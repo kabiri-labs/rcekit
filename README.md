@@ -48,6 +48,11 @@ Generate up to 1000 payloads for PHP contexts:
 python rce_payload_gen.py --contexts php --max-payloads 1000 --acknowledge-consent
 ```
 
+Generate benign payloads plus a metadata sidecar with indicators:
+```bash
+python rce_payload_gen.py --detection-only --include-metadata --output detection.txt
+```
+
 Use custom attacker IP and domain:
 ```bash
 python rce_payload_gen.py --attacker-ip 10.0.0.1 --attacker-domain evil.com --acknowledge-consent
@@ -72,10 +77,15 @@ python rce_payload_gen.py --detection-only
 | `--environments` | Environments to generate (space-separated) | All environments |
 | `--template-file` | Path to a JSON/YAML template bundle | `templates/payloads.json` |
 | `--detection-only` | Generate benign payloads for validation scans | Disabled |
+| `--output-format` | Output payloads as `text` or `jsonl` records | `text` |
+| `--include-metadata` | Emit indicators, safety tiers, and notes | Disabled |
+| `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
+| `--include-blocking` | Include blocking or timing-based probes | Disabled |
 | `--acknowledge-consent` | Required confirmation before creating exploitation payloads | Disabled |
 
 ### Available Contexts
 
+- `raw` - No wrapper; best for language-native snippets and direct command probes
 - `html` - HTML context
 - `attribute` - HTML attribute context
 - `javascript` - JavaScript context
@@ -195,6 +205,7 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 - Detailed execution logs are stored in `rce_generator.log` with timestamps and severity levels for monitoring.
 - Exploitation payload generation writes audit entries to `exploit_audit.log` with a unique watermark token.
 - Detection mode produces safe canary payloads suitable for authorized scanning and validation activities.
+- When `--include-metadata` is enabled, plain-text output keeps raw payloads in the main file and writes a `.meta.jsonl` sidecar with the expected indicator, runner, safety tier, and lint notes for each payload.
 - Exploitation payloads include embedded watermark comments/commands referencing the audit token to discourage misuse.
 
 ## Ethical Use
