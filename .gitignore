@@ -1,0 +1,15 @@
+# Generated payload artifacts (regenerate with rce_payload_gen.py)
+rce_payloads.txt
+*.meta.jsonl
+
+# Runtime logs / audit trails
+rce_generator.log
+exploit_audit.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
