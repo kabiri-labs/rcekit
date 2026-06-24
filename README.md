@@ -4,7 +4,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 
 ## Features
 
-- **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, JavaScript, containerized Docker workloads, and Kubernetes clusters
+- **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, containerized Docker workloads, and Kubernetes clusters
 - **Context-Aware**: Creates payloads for different injection contexts (HTML, JavaScript, SQL, etc.)
 - **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods with automatic constraint handling (e.g., escaping forbidden characters, adding quotes)
 - **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
@@ -135,7 +135,6 @@ python rce_payload_gen.py --detection-only
 - `ruby` - Ruby environment
 - `perl` - Perl environment
 - `go` - Go environment
-- `javascript` - JavaScript environment (legacy)
 - `docker` - Container escape research against Docker runtimes
 - `kubernetes` - Payloads targeting Kubernetes workloads and control planes
 
@@ -213,9 +212,6 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 
 ### Go (`go`)
 - `os_exec`: exec.Command executions
-
-### JavaScript (`javascript`)
-- Legacy executions using require and eval
 
 ## Logging & Ethical Controls
 

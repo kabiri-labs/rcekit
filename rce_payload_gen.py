@@ -217,7 +217,7 @@ class RCEPayloadGenerator:
             return f"{payload};/* {watermark_token} */"
         if env in {"python", "ruby", "perl"}:
             return f"{payload}  # {watermark_token}"
-        if env in {"nodejs", "javascript"}:
+        if env == "nodejs":
             return f"{payload} // {watermark_token}"
         if env in {"java", "dotnet", "go"}:
             return f"{payload} /* {watermark_token} */"
@@ -247,7 +247,6 @@ class RCEPayloadGenerator:
             "ruby": "ruby",
             "perl": "perl",
             "go": "go",
-            "javascript": "javascript",
             "docker": "sh",
             "kubernetes": "kubectl",
             "sql": "sql",
@@ -353,7 +352,7 @@ class RCEPayloadGenerator:
         return notes
 
     def _requires_raw_context(self, env: str) -> bool:
-        return env in {"python", "php", "java", "dotnet", "ruby", "perl", "go", "nodejs", "javascript", "sql"}
+        return env in {"python", "php", "java", "dotnet", "ruby", "perl", "go", "nodejs", "sql"}
 
     def _is_context_compatible(self, context_name: str, env: str, raw_context_only: bool) -> bool:
         if context_name == "raw":
@@ -361,7 +360,7 @@ class RCEPayloadGenerator:
         if raw_context_only:
             if env == "php":
                 return context_name == "php"
-            if env in {"nodejs", "javascript"}:
+            if env == "nodejs":
                 return context_name == "javascript"
             return False
         if env in {"unix", "windows", "docker", "kubernetes"}:
@@ -453,7 +452,6 @@ class RCEPayloadGenerator:
             "ruby",
             "perl",
             "go",
-            "javascript",
             "docker",
             "kubernetes",
         ]

