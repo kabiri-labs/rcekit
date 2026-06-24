@@ -7,7 +7,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, JavaScript, containerized Docker workloads, and Kubernetes clusters
 - **Context-Aware**: Creates payloads for different injection contexts (HTML, JavaScript, SQL, etc.)
 - **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods with automatic constraint handling (e.g., escaping forbidden characters, adding quotes)
-- **Advanced Encoding**: Multi-stage encoding, polymorphic mutations, Base64, Hex, ROT13, URL encoding, and more for evasion research
+- **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
 - **Detection-Friendly Mode**: Quickly produce benign canary payloads for safe scanning with `--detection-only`
@@ -23,6 +23,19 @@ cd rcpayloadgen
 
 # Install dependencies (none required beyond standard Python libraries)
 # Python 3.6+ required
+```
+
+> **Note:** Generated payload files (`rce_payloads.txt`, `*.meta.jsonl`) and runtime
+> logs are not committed — they are listed in `.gitignore` and regenerated on demand.
+
+## Testing
+
+The project ships a dependency-free `unittest` suite that locks in payload
+uniqueness, the executable-only encoding policy, safety filtering, and detection
+mode:
+
+```bash
+python -m unittest discover -s tests
 ```
 
 ## Usage
@@ -128,19 +141,23 @@ python rce_payload_gen.py --detection-only
 
 ### Available Encoding Methods
 
+Every encoding is constrained to output an operator can actually run against the
+target. Encodings that need a decoder on the receiving side (Base64/Hex chains)
+are flagged in metadata with a "requires a decode-and-execute path" note.
+
 - `none` - No encoding
-- `url_encode` - URL encoding
+- `url_encode` - URL encoding (for channels that URL-decode before the sink)
 - `double_url_encode` - Double URL encoding
-- `base64` - Base64 encoding
-- `hex` - Hexadecimal encoding
-- `rot13` - ROT13 encoding
-- `random_case` - Random case variation
-- `insert_special_chars` - Insert special characters
+- `base64` - Base64 encoding (pair with a `base64 -d | sh`-style decode wrapper)
+- `hex` - Hexadecimal encoding (pair with a hex decode wrapper)
+- `random_case` - Random case variation, emitted **only** for case-insensitive runners (Windows `cmd`, PowerShell, SQL); suppressed elsewhere because it would corrupt the command
 - `base64_then_url` - Multi-stage base64 followed by URL encoding
-- `rot13_then_base64` - ROT13 transform with a base64 wrapper
 - `double_base64` - Nested base64 encoding layers
-- `xor_polymorphic` - XOR key obfuscation with key disclosure for analysis
-- `chunk_shuffle` - Chunk-level permutation for polymorphic variants
+
+> **Removed in this version:** `rot13`, `rot13_then_base64`, `insert_special_chars`,
+> `xor_polymorphic`, and `chunk_shuffle`. These produced non-executable output
+> (e.g. `rot13("id") -> "vq"`, or literal `XOR(..):` / `shuffle::` debug strings)
+> and only inflated the result set with payloads that fail on the target.
 
 ## Payload Types
 
