@@ -96,6 +96,39 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertTrue(records)
         self.assertTrue(any("TESTTOKN" in r.payload for r in records))
 
+    def test_no_watermark_by_default(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum", "code_execution"],
+            selected_environments=["unix", "python"],
+        ))
+        self.assertTrue(records)
+        self.assertFalse(any("RCEPayloadGen-ID" in r.payload for r in records))
+
+    def test_code_payloads_not_quote_wrapped(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["code_execution"],
+            selected_environments=["python"],
+            selected_contexts=["raw"],
+            selected_encodings=["none"],
+        ))
+        payloads = [r.payload for r in records]
+        # The raw snippet must appear executable, never wrapped into an inert
+        # string literal such as "os.system('whoami')".
+        self.assertIn("os.system('whoami')", payloads)
+        self.assertNotIn('"os.system(\'whoami\')"', payloads)
+
+    def test_ssti_delimiters_preserved(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["code_execution"],
+            selected_environments=["python", "java"],
+            selected_contexts=["raw"],
+            selected_encodings=["none"],
+        ))
+        payloads = [r.payload for r in records]
+        # SSTI payloads must keep their template delimiters intact.
+        self.assertIn("{{7*7}}", payloads)
+        self.assertTrue(any(p.startswith("${") for p in payloads))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -83,45 +83,6 @@ class RCEPayloadGenerator:
             "kubernetes": ["; ", "&& "],
         }
 
-        # Sink-specific constraints (forbidden chars, requirements)
-        self.sink_constraints: Dict[str, Dict[str, Any]] = {
-            # General OS command sinks
-            "unix_os_command": {"forbidden_chars": [";", "|", "&", "`", "(", ")"], "requires_quotes": False},
-            "windows_os_command": {"forbidden_chars": ["&", "|", "^", "<", ">"], "requires_quotes": False},
-            # Node.js sinks
-            "nodejs_child_process_exec": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            "nodejs_pug_ssti": {"forbidden_chars": ["{{", "}}"], "requires_quotes": False},
-            "nodejs_ejs_ssti": {"forbidden_chars": ["<%", "%>"], "requires_quotes": False},
-            "nodejs_handlebars_ssti": {"forbidden_chars": ["{{", "}}"], "requires_quotes": False},
-            # Python sinks
-            "python_os_system": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            "python_jinja2_ssti": {"forbidden_chars": ["{{", "}}"], "requires_quotes": False},
-            # PHP sinks
-            "php_exec_system": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            "php_deserialize": {"forbidden_chars": [], "requires_quotes": False},
-            "php_eval": {"forbidden_chars": [], "requires_quotes": False},
-            # Java sinks
-            "java_runtime_exec": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            "java_freemarker_ssti": {"forbidden_chars": ["${", "}"], "requires_quotes": False},
-            "java_velocity_ssti": {"forbidden_chars": ["#", "$"], "requires_quotes": False},
-            "java_thymeleaf_ssti": {"forbidden_chars": ["[[", "]]"], "requires_quotes": False},
-            "java_deserialization": {"forbidden_chars": [], "requires_quotes": False},
-            "java_expression": {"forbidden_chars": [], "requires_quotes": False},
-            # .NET sinks
-            "dotnet_process_start": {"forbidden_chars": ["&", "|"], "requires_quotes": True},
-            "dotnet_deserialize": {"forbidden_chars": [], "requires_quotes": False},
-            # Ruby sinks
-            "ruby_kernel_system": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            "ruby_erb_ssti": {"forbidden_chars": ["<%", "%>"], "requires_quotes": False},
-            # Perl sinks
-            "perl_system_backticks": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            # Go sinks
-            "go_os_exec": {"forbidden_chars": [";", "|"], "requires_quotes": True},
-            # Node sinks
-            "nodejs_vm_eval": {"forbidden_chars": [], "requires_quotes": False},
-            "nodejs_deserialization": {"forbidden_chars": [], "requires_quotes": False},
-        }
-
         self.payload_categories: Dict[str, Any] = {}
         self.detection_payloads: Dict[str, List[str]] = {}
         self._load_template_payloads()
@@ -181,25 +142,6 @@ class RCEPayloadGenerator:
             logger.error("Unable to load payload templates: %s", exc)
             self.payload_categories = {}
             self.detection_payloads = {}
-
-    def apply_constraints(self, payload: str, sink: str) -> str:
-        """Apply sink-specific constraints to payload"""
-        if sink not in self.sink_constraints:
-            return payload
-        
-        constraints = self.sink_constraints[sink]
-        forbidden = constraints.get('forbidden_chars', [])
-        
-        # Simple replacement for forbidden chars (e.g., encode them)
-        for char in forbidden:
-            if char in payload:
-                # Replace with URL-encoded version as example
-                payload = payload.replace(char, urllib.parse.quote(char))
-        
-        if constraints.get('requires_quotes', False):
-            payload = f'"{payload}"'
-
-        return payload
 
     def apply_watermark(self, payload: str, env: str, context_name: str, marker: str) -> str:
         """Embed a watermark comment or command into generated payloads where feasible."""
@@ -471,14 +413,12 @@ class RCEPayloadGenerator:
                     env_payloads = category[env]
                     if isinstance(env_payloads, dict):
                         for sink, payloads in env_payloads.items():
-                            sink_key = f"{env}_{sink.replace('.', '_')}"
                             for entry in payloads:
                                 yield from self._build_record_set(
                                     entry=entry,
                                     category_name=category_name,
                                     env=env,
                                     sink=sink,
-                                    sink_key=sink_key,
                                     context_name=context_name,
                                     encodings=encodings,
                                     generated_payloads=generated_payloads,
@@ -494,7 +434,6 @@ class RCEPayloadGenerator:
                                 category_name=category_name,
                                 env=env,
                                 sink=None,
-                                sink_key=None,
                                 context_name=context_name,
                                 encodings=encodings,
                                 generated_payloads=generated_payloads,
@@ -510,7 +449,6 @@ class RCEPayloadGenerator:
         category_name: str,
         env: str,
         sink: Optional[str],
-        sink_key: Optional[str],
         context_name: str,
         encodings: List[str],
         generated_payloads: Set[str],
@@ -521,8 +459,6 @@ class RCEPayloadGenerator:
     ) -> Iterator[PayloadRecord]:
         base = self._normalize_entry(entry)
         payload = str(base["payload"]).replace("{attacker_ip}", self.attacker_ip).replace("{attacker_domain}", self.attacker_domain)
-        if sink_key:
-            payload = self.apply_constraints(payload, sink_key)
         runner = base.get("runner") or self._infer_runner(payload, env, sink)
         blocking = bool(base.get("blocking", self._is_blocking(payload)))
         safety = base.get("safety") or self._classify_safety(payload, category_name, mode)
@@ -709,6 +645,8 @@ def main():
                         help="Include blocking or timing-based payloads that are excluded by default")
     parser.add_argument("--acknowledge-consent", action="store_true",
                         help="Acknowledge that exploitation payloads will only be used with proper authorization")
+    parser.add_argument("--watermark", action="store_true",
+                        help="Embed a traceable watermark token into each exploitation payload (audit logging happens either way)")
 
     args = parser.parse_args()
 
@@ -728,8 +666,13 @@ def main():
 
     watermark_token = None
     if mode == "exploit":
-        watermark_token = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8))
-        generator.log_exploitation_usage(watermark_token, args)
+        # Always record an audit entry for accountability. Only embed the token
+        # into the payloads themselves when explicitly requested, so the default
+        # output stays clean and copy-pasteable for operational use.
+        audit_token = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+        generator.log_exploitation_usage(audit_token, args)
+        if args.watermark:
+            watermark_token = audit_token
 
     max_safety = args.max_safety or ("safe" if mode == "detection" else "intrusive")
     count = generator.save_payloads_to_file(

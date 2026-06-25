@@ -6,7 +6,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 
 - **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, containerized Docker workloads, and Kubernetes clusters
 - **Context-Aware**: Creates payloads for different injection contexts (HTML, JavaScript, SQL, etc.)
-- **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods with automatic constraint handling (e.g., escaping forbidden characters, adding quotes)
+- **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods, emitted verbatim so each snippet stays syntactically valid for its sink
 - **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
@@ -95,6 +95,7 @@ python rce_payload_gen.py --detection-only
 | `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
 | `--include-blocking` | Include blocking or timing-based probes | Disabled |
 | `--acknowledge-consent` | Required confirmation before creating exploitation payloads | Disabled |
+| `--watermark` | Embed a traceable watermark token into each exploitation payload (audit logging happens regardless) | Disabled |
 
 ### Available Contexts
 
@@ -165,7 +166,7 @@ RCEPayloadGen generates payloads across multiple categories:
 1. **Basic Enumeration**: Common system reconnaissance commands
 2. **File Operations**: File system interaction and sensitive file access
 3. **Network Operations**: Network configuration and discovery
-4. **Code Execution**: Language-specific code execution patterns with sink-level details and constraint adjustments
+4. **Code Execution**: Language-specific code execution patterns with sink-level details
 5. **Download & Execute**: Payloads that download and execute remote code
 6. **Reverse Shells**: Comprehensive reverse shell payloads for various environments
 7. **Credential Access**: Systematic harvesting of credentials, tokens, and configuration secrets
@@ -178,7 +179,7 @@ RCEPayloadGen generates payloads across multiple categories:
 
 ## Detailed Code Execution Sinks
 
-For the `code_execution` category, payloads are generated at a sink-specific level, with automatic adjustments for constraints such as forbidden characters (escaped via URL encoding) and quote requirements. Below is a list of supported sinks per environment:
+For the `code_execution` category, payloads are generated at a sink-specific level and emitted verbatim, so each snippet stays syntactically valid for its target sink (encoding variants are applied separately and labelled in metadata). Below is a list of supported sinks per environment:
 
 ### Node.js (`nodejs`)
 - `child_process_exec`: Executions using child_process module
@@ -216,10 +217,10 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 ## Logging & Ethical Controls
 
 - Detailed execution logs are stored in `rce_generator.log` with timestamps and severity levels for monitoring.
-- Exploitation payload generation writes audit entries to `exploit_audit.log` with a unique watermark token.
+- Exploitation runs always write an audit entry to `exploit_audit.log` with a unique token, regardless of whether the watermark is embedded.
 - Detection mode produces safe canary payloads suitable for authorized scanning and validation activities.
 - When `--include-metadata` is enabled, plain-text output keeps raw payloads in the main file and writes a `.meta.jsonl` sidecar with the expected indicator, runner, safety tier, and lint notes for each payload.
-- Exploitation payloads include embedded watermark comments/commands referencing the audit token to discourage misuse.
+- The in-payload watermark is **opt-in** via `--watermark`, so the default exploitation output stays clean and copy-pasteable. When enabled, payloads carry an embedded comment/command referencing the audit token to discourage misuse.
 
 ## Ethical Use
 
