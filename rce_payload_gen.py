@@ -602,12 +602,35 @@ class RCEPayloadGenerator:
     def _generate_canary(self) -> str:
         return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
 
+    def _filter_by_profile(
+        self,
+        records: Iterator[PayloadRecord],
+        deny_chars: Optional[str],
+        max_length: Optional[int],
+    ) -> Iterator[PayloadRecord]:
+        """Keep only payloads a constrained target could actually accept.
+
+        A payload is dropped if it exceeds ``max_length`` or contains any
+        character in ``deny_chars``. The check runs on the final, wrapped and
+        encoded payload, so an encoded variant (e.g. a URL-encoded quote) is
+        correctly retained when the literal character is gone.
+        """
+        denied = set(deny_chars) if deny_chars else set()
+        for record in records:
+            if max_length and len(record.payload) > max_length:
+                continue
+            if denied and any(char in record.payload for char in denied):
+                continue
+            yield record
+
     def save_payloads_to_file(
         self,
         file_path: str,
         max_payloads: int = None,
         output_format: str = "text",
         include_metadata: bool = False,
+        deny_chars: Optional[str] = None,
+        max_length: Optional[int] = None,
         **kwargs,
     ) -> int:
         """
@@ -622,6 +645,8 @@ class RCEPayloadGenerator:
         """
         output_path = Path(file_path)
         records = self.generate_payload_records(**kwargs)
+        if deny_chars or max_length:
+            records = self._filter_by_profile(records, deny_chars, max_length)
 
         if output_format == "burp":
             return self._write_burp(output_path, records, max_payloads)
@@ -877,8 +902,38 @@ def main():
                         help="Acknowledge that exploitation payloads will only be used with proper authorization")
     parser.add_argument("--watermark", action="store_true",
                         help="Embed a traceable watermark token into each exploitation payload (audit logging happens either way)")
+    parser.add_argument("--target-profile", default=None,
+                        help="JSON profile describing the target (environments, contexts, categories, encodings, deny_chars, max_length, oob_domain); CLI flags override it")
+    parser.add_argument("--deny-chars", default=None,
+                        help="Drop payloads containing any of these characters (e.g. \"'\\\"\" for a target that rejects quotes)")
+    parser.add_argument("--max-length", type=int, default=None,
+                        help="Drop payloads longer than this many characters")
 
     args = parser.parse_args()
+
+    # A target profile supplies defaults for the selection and filter options;
+    # any explicit CLI flag overrides the matching profile field.
+    profile: Dict[str, Any] = {}
+    if args.target_profile:
+        try:
+            with open(args.target_profile, "r", encoding="utf-8") as profile_file:
+                profile = json.load(profile_file)
+        except Exception as exc:
+            print(f"[!] Unable to load target profile {args.target_profile}: {exc}")
+            return
+        logger.info("Loaded target profile '%s' from %s", profile.get("name", "?"), args.target_profile)
+
+    def from_profile(cli_value, key):
+        return cli_value if cli_value is not None else profile.get(key)
+
+    selected_environments = from_profile(args.environments, "environments")
+    selected_contexts = from_profile(args.contexts, "contexts")
+    selected_categories = from_profile(args.categories, "categories")
+    selected_encodings = from_profile(args.encodings, "encodings")
+    max_length = from_profile(args.max_length, "max_length")
+    deny_chars = args.deny_chars
+    if deny_chars is None and profile.get("deny_chars") is not None:
+        deny_chars = "".join(profile["deny_chars"])
 
     template_path = Path(args.template_file) if args.template_file else None
     # Initialize generator
@@ -906,7 +961,7 @@ def main():
 
     max_safety = args.max_safety or ("safe" if mode == "detection" else "intrusive")
     include_blocking = args.include_blocking
-    oob_domain = args.oob_domain
+    oob_domain = from_profile(args.oob_domain, "oob_domain")
     if args.output_format == "nuclei":
         # Nuclei templates rely on the time-based, OOB, and reflection oracles,
         # so pull in blocking/intrusive payloads and provide a placeholder OOB
@@ -921,10 +976,12 @@ def main():
         max_payloads=args.max_payloads,
         output_format=args.output_format,
         include_metadata=args.include_metadata or args.output_format == "jsonl",
-        selected_contexts=args.contexts,
-        selected_categories=args.categories,
-        selected_encodings=args.encodings,
-        selected_environments=args.environments,
+        deny_chars=deny_chars,
+        max_length=max_length,
+        selected_contexts=selected_contexts,
+        selected_categories=selected_categories,
+        selected_encodings=selected_encodings,
+        selected_environments=selected_environments,
         mode=mode,
         watermark_token=watermark_token,
         max_safety=max_safety,

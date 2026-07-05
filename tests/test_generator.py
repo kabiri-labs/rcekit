@@ -195,6 +195,46 @@ class GeneratorTestCase(unittest.TestCase):
         }
         self.assertTrue({"spel", "ognl", "groovy"}.issubset(sinks))
 
+    def test_profile_filter_drops_denied_chars_and_long_payloads(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum", "file_operations", "waf_bypass"],
+            selected_environments=["unix"], selected_contexts=["raw"],
+            selected_encodings=["none"],
+        ))
+        filtered = list(self.gen._filter_by_profile(records, deny_chars="'\"", max_length=40))
+        self.assertTrue(filtered)
+        self.assertLess(len(filtered), len(records), "the filter must actually drop something")
+        for record in filtered:
+            self.assertNotIn('"', record.payload)
+            self.assertNotIn("'", record.payload)
+            self.assertLessEqual(len(record.payload), 40)
+        # A quote-free WAF-bypass payload should survive the quote filter.
+        self.assertTrue(any("${IFS}" in r.payload for r in filtered))
+
+    def test_target_profile_file_applies_end_to_end(self):
+        profile = Path(__file__).resolve().parent.parent / "profiles" / "quote-filtered-unix.json"
+        self.assertTrue(profile.exists(), "example profile should ship with the repo")
+        import json
+        spec = json.loads(profile.read_text())
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "p.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out),
+                deny_chars="".join(spec["deny_chars"]),
+                max_length=spec["max_length"],
+                selected_environments=spec["environments"],
+                selected_contexts=spec["contexts"],
+                selected_categories=spec["categories"],
+                selected_encodings=spec["encodings"],
+                oob_domain=spec.get("oob_domain"),
+            )
+            lines = out.read_text().splitlines()
+            self.assertTrue(lines)
+            for line in lines:
+                self.assertNotIn('"', line)
+                self.assertNotIn("'", line)
+                self.assertLessEqual(len(line), spec["max_length"])
+
     def test_burp_export_writes_context_wordlists(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "run.txt"

@@ -1,0 +1,11 @@
+{
+    "name": "quote-filtered-unix",
+    "description": "Unix OS-command injection through a JSON/typed API that rejects quote characters. Favours quote-free WAF-bypass payloads and URL-encoded variants.",
+    "environments": ["unix"],
+    "contexts": ["raw"],
+    "categories": ["basic_enum", "file_operations", "waf_bypass", "oob"],
+    "encodings": ["none", "url_encode"],
+    "deny_chars": ["'", "\""],
+    "max_length": 256,
+    "oob_domain": "your-id.oast.pro"
+}

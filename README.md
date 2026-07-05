@@ -12,6 +12,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Customizable**: Fine-tune payload generation with various command-line options
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
 - **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
+- **Target Profiles**: Describe the target once (environments, contexts, denied characters, max length) and emit only compatible payloads instead of spraying everything
 - **WAF-Bypass Payloads**: Quote-free, space-free command-injection variants (`${IFS}`, brace expansion, `cat</etc/passwd`) for targets that reject quotes
 - **Detection-Friendly Mode**: Quickly produce benign canary payloads for safe scanning with `--detection-only`
 - **No Duplicates**: Intelligent duplicate detection to avoid redundant payloads
@@ -112,6 +113,9 @@ python rce_payload_gen.py --detection-only
 | `--include-blocking` | Include blocking or timing-based probes | Disabled |
 | `--acknowledge-consent` | Required confirmation before creating exploitation payloads | Disabled |
 | `--watermark` | Embed a traceable watermark token into each exploitation payload (audit logging happens regardless) | Disabled |
+| `--target-profile` | JSON profile describing the target; supplies defaults that CLI flags override | None |
+| `--deny-chars` | Drop payloads containing any of these characters (e.g. quotes) | None |
+| `--max-length` | Drop payloads longer than this many characters | None |
 
 ### Available Contexts
 
@@ -248,6 +252,34 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 - `introspection`: schema discovery queries
 - `injection`: resolver-argument injection reaching OS command / SQL / NoSQL / path-traversal sinks
 - `batching`: aliasing brute-force and nested-query amplification
+
+## Target Profiles
+
+Instead of spraying every payload, describe the target once and let the generator
+emit only what could actually reach the sink. A profile is a small JSON file:
+
+```json
+{
+  "name": "quote-filtered-unix",
+  "environments": ["unix"],
+  "contexts": ["raw"],
+  "categories": ["basic_enum", "file_operations", "waf_bypass", "oob"],
+  "encodings": ["none", "url_encode"],
+  "deny_chars": ["'", "\""],
+  "max_length": 256,
+  "oob_domain": "your-id.oast.pro"
+}
+```
+
+```bash
+python rce_payload_gen.py --acknowledge-consent --target-profile profiles/quote-filtered-unix.json
+```
+
+Profile fields supply defaults; any explicit CLI flag overrides the matching
+field. `deny_chars` and `max_length` (also available directly as `--deny-chars`
+/ `--max-length`) filter the **final** payload — so a URL-encoded quote survives
+a quote filter, because the literal character is gone. An example profile ships
+in [`profiles/`](profiles/).
 
 ## Output Formats & Integrations
 
