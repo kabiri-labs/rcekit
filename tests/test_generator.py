@@ -9,6 +9,7 @@ detection mode must behave as documented.
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -128,6 +129,79 @@ class GeneratorTestCase(unittest.TestCase):
         # SSTI payloads must keep their template delimiters intact.
         self.assertIn("{{7*7}}", payloads)
         self.assertTrue(any(p.startswith("${") for p in payloads))
+
+    def test_waf_bypass_payloads_are_quote_free(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["waf_bypass"],
+            selected_environments=["unix"],
+            selected_contexts=["raw"],
+            selected_encodings=["none"],
+        ))
+        self.assertTrue(records)
+        self.assertTrue(any("${IFS}" in r.payload for r in records))
+        # The whole point is command injection without quote characters.
+        for record in records:
+            self.assertNotIn('"', record.payload)
+            self.assertNotIn("'", record.payload)
+
+    def test_oob_requires_domain_and_gets_unique_tokens(self):
+        # Without an OOB domain, {oob} payloads are dropped entirely.
+        without = list(self.gen.generate_payload_records(
+            selected_categories=["oob"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+        ))
+        self.assertEqual(without, [])
+
+        # With a domain, each record carries a unique correlation token/host.
+        with_dom = list(self.gen.generate_payload_records(
+            selected_categories=["oob"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+            oob_domain="oast.example.com",
+        ))
+        self.assertTrue(with_dom)
+        tokens = [r.token for r in with_dom]
+        self.assertTrue(all(tokens), "every OOB record must carry a token")
+        self.assertEqual(len(tokens), len(set(tokens)), "OOB tokens must be unique")
+        for record in with_dom:
+            self.assertIn(record.oob_host, record.payload)
+            self.assertTrue(record.oob_host.endswith(".oast.example.com"))
+            self.assertEqual(record.expected_channel, "interactsh")
+
+    def test_burp_export_writes_context_wordlists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            count = self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="burp",
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+            )
+            self.assertGreater(count, 0)
+            outdir = Path(tmp) / "run_burp"
+            self.assertTrue((outdir / "payloads-all.txt").exists())
+            self.assertTrue((outdir / "request.txt").exists())
+            self.assertTrue(any(outdir.glob("payloads-*.txt")))
+
+    def test_nuclei_export_writes_valid_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            count = self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="nuclei",
+                selected_environments=["unix"], mode="detection",
+                oob_domain="x.oast.pro", max_safety="stateful", include_blocking=True,
+            )
+            self.assertGreater(count, 0)
+            outdir = Path(tmp) / "run_nuclei"
+            templates = list(outdir.glob("*.yaml"))
+            self.assertTrue(templates)
+            joined = "\n".join(t.read_text() for t in templates)
+            # OOB templates must use the interactsh placeholder, not a real host.
+            self.assertIn("{{interactsh-url}}", joined)
+            self.assertIn("interactsh_protocol", joined)
+            # Time templates normalise sleeps and never include hanging tails.
+            time_files = list(outdir.glob("*-time.yaml"))
+            if time_files:
+                time_text = "\n".join(t.read_text() for t in time_files)
+                self.assertIn("duration>=6", time_text)
+                self.assertNotIn("tail -f", time_text)
 
 
 if __name__ == "__main__":

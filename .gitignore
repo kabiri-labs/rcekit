@@ -1,6 +1,9 @@
 # Generated payload artifacts (regenerate with rce_payload_gen.py)
 rce_payloads.txt
 *.meta.jsonl
+*.map.jsonl
+*_burp/
+*_nuclei/
 
 # Runtime logs / audit trails
 rce_generator.log

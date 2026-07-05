@@ -10,6 +10,9 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
+- **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
+- **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
+- **WAF-Bypass Payloads**: Quote-free, space-free command-injection variants (`${IFS}`, brace expansion, `cat</etc/passwd`) for targets that reject quotes
 - **Detection-Friendly Mode**: Quickly produce benign canary payloads for safe scanning with `--detection-only`
 - **No Duplicates**: Intelligent duplicate detection to avoid redundant payloads
 - **Production-Ready**: Robust error handling, logging, and performance optimization
@@ -66,6 +69,18 @@ Generate benign payloads plus a metadata sidecar with indicators:
 python rce_payload_gen.py --detection-only --include-metadata --output detection.txt
 ```
 
+Blind-RCE payloads with per-payload OOB tokens (writes a `token → payload` map sidecar):
+```bash
+python rce_payload_gen.py --acknowledge-consent --categories oob \
+  --oob-domain your-id.oast.pro --output oob.txt
+```
+
+Export Burp/ffuf wordlists (grouped by context) or a runnable Nuclei pack:
+```bash
+python rce_payload_gen.py --acknowledge-consent --output-format burp --output run.txt
+python rce_payload_gen.py --detection-only --output-format nuclei --output run.txt
+```
+
 Use custom attacker IP and domain:
 ```bash
 python rce_payload_gen.py --attacker-ip 10.0.0.1 --attacker-domain evil.com --acknowledge-consent
@@ -90,7 +105,8 @@ python rce_payload_gen.py --detection-only
 | `--environments` | Environments to generate (space-separated) | All environments |
 | `--template-file` | Path to a JSON/YAML template bundle | `templates/payloads.json` |
 | `--detection-only` | Generate benign payloads for validation scans | Disabled |
-| `--output-format` | Output payloads as `text` or `jsonl` records | `text` |
+| `--output-format` | `text`, `jsonl`, `burp` (per-context wordlists + request template), or `nuclei` (runnable templates) | `text` |
+| `--oob-domain` | Collaborator/interactsh domain for out-of-band payloads; each gets a unique subdomain token | None |
 | `--include-metadata` | Emit indicators, safety tiers, and notes | Disabled |
 | `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
 | `--include-blocking` | Include blocking or timing-based probes | Disabled |
@@ -123,6 +139,8 @@ python rce_payload_gen.py --detection-only
 - `cloud_metadata` - Cloud service metadata harvesting from on-prem or containerised footholds
 - `database_enumeration` - Database discovery and schema inspection helpers
 - `lateral_movement` - Post-exploitation lateral movement primitives
+- `waf_bypass` - Quote-free / space-free command-injection variants for filtered inputs
+- `oob` - Out-of-band callback payloads (requires `--oob-domain`), including DNS/HTTP exfil and JNDI/Log4Shell
 
 ### Available Environments
 
@@ -213,6 +231,16 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 
 ### Go (`go`)
 - `os_exec`: exec.Command executions
+
+## Output Formats & Integrations
+
+- **`text` / `jsonl`** — a single file of payloads (or JSONL records). When payloads carry correlation tokens (OOB or detection canaries) a `<output>.map.jsonl` manifest is written mapping each `token` to its exact payload, context, and expected channel — so a received callback or reflected canary is traceable to one payload.
+- **`burp`** — writes a `<output>_burp/` directory with deduplicated, watermark-free wordlists split per injection context (`payloads-raw.txt`, `payloads-sql.txt`, …), a combined `payloads-all.txt`, and a `request.txt` template with a marked injection point. Load the lists into Burp Intruder, or `ffuf -request request.txt -w payloads-all.txt:FUZZ`.
+- **`nuclei`** — writes a `<output>_nuclei/` directory of runnable Nuclei templates grouped by environment and **oracle**:
+  - *OOB* templates inject callbacks and match on `interactsh_protocol` (the real host is rewritten to `{{interactsh-url}}`).
+  - *Time-based* templates normalise every delay to 6s and match on `duration>=6`.
+  - *Reflection* templates inject a fixed canary and match it in the response body.
+  - For the fullest pack, run `--detection-only --output-format nuclei` (reflection + time + OOB).
 
 ## Logging & Ethical Controls
 
