@@ -7,7 +7,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, containerized Docker workloads, and Kubernetes clusters
 - **Context-Aware**: Break-out contexts (HTML, JS, SQL, shell-quoted strings) plus transport contexts (JSON, XML, YAML, HTTP header, GraphQL) that escape the payload to survive the wire format and reach the sink intact
 - **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods, emitted verbatim so each snippet stays syntactically valid for its sink
-- **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
+- **Executable-Only Encoding**: The default encodings run as-is on the channel/sink or carry their own decoder (`base64_decode_exec`). Bare decoder-required blobs (Base64/Hex) are opt-in and warn on text output, and non-runnable transforms (ROT13, XOR/chunk shuffling, byte splicing) are removed — so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
@@ -190,18 +190,32 @@ python rce_payload_gen.py --acknowledge-consent --contexts json --environments u
 
 ### Available Encoding Methods
 
-Every encoding is constrained to output an operator can actually run against the
-target. Encodings that need a decoder on the receiving side (Base64/Hex chains)
-are flagged in metadata with a "requires a decode-and-execute path" note.
+Encodings fall into two groups. **Default encodings** run as-is on the receiving
+channel/sink (or carry their own decoder), so plain-text output is always
+directly usable:
 
 - `none` - No encoding
 - `url_encode` - URL encoding (for channels that URL-decode before the sink)
 - `double_url_encode` - Double URL encoding
-- `base64` - Base64 encoding (pair with a `base64 -d | sh`-style decode wrapper)
-- `hex` - Hexadecimal encoding (pair with a hex decode wrapper)
 - `random_case` - Random case variation, emitted **only** for case-insensitive runners (Windows `cmd`, PowerShell, SQL); suppressed elsewhere because it would corrupt the command
-- `base64_then_url` - Multi-stage base64 followed by URL encoding
-- `double_base64` - Nested base64 encoding layers
+- `base64_decode_exec` - **Self-contained** base64 that carries its own decoder pipeline (`echo <b64>|base64 -d|sh`); runs as-is on a POSIX shell (shell runners only)
+
+**Decoder-required encodings** are opt-in via `--encodings`. They emit bare blobs
+that only execute where the *sink itself* base64/hex-decodes the input (e.g.
+`eval(base64_decode(...))`). Because a plain-text blob can look like a working
+payload but do nothing on its own, they are excluded from the default set and,
+when requested for text output without `--include-metadata`, the tool prints a
+warning:
+
+- `base64` - Bare base64 blob
+- `hex` - Bare hexadecimal blob
+- `base64_then_url` - Base64 then URL encoding
+- `double_base64` - Nested base64 layers
+
+> **Removed in an earlier version:** `rot13`, `rot13_then_base64`, `insert_special_chars`,
+> `xor_polymorphic`, and `chunk_shuffle`. These produced non-executable output
+> (e.g. `rot13("id") -> "vq"`, or literal `XOR(..):` / `shuffle::` debug strings)
+> and only inflated the result set with payloads that fail on the target.
 
 > **Removed in this version:** `rot13`, `rot13_then_base64`, `insert_special_chars`,
 > `xor_polymorphic`, and `chunk_shuffle`. These produced non-executable output

@@ -63,6 +63,36 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertFalse(self.gen._encoding_is_compatible("random_case", "python"))
         self.assertTrue(self.gen._encoding_is_compatible("random_case", "cmd"))
         self.assertTrue(self.gen._encoding_is_compatible("base64", "python"))
+        # The self-contained decode-and-run harness is shell-only.
+        self.assertTrue(self.gen._encoding_is_compatible("base64_decode_exec", "sh"))
+        self.assertFalse(self.gen._encoding_is_compatible("base64_decode_exec", "python"))
+
+    def test_default_encodings_exclude_decoder_required_blobs(self):
+        encodings = {r.encoding for r in self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["raw"],
+        )}
+        # Bare base64/hex blobs must not appear by default (they do nothing
+        # unless the sink decodes them).
+        self.assertFalse(encodings & self.gen.decoder_required_encodings)
+
+    def test_base64_decode_exec_is_self_contained_and_runnable(self):
+        records = [r for r in self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["base64_decode_exec"],
+        )]
+        self.assertTrue(records)
+        for record in records:
+            # Carries its own decoder pipeline, so it runs as-is on a shell.
+            self.assertIn("|base64 -d|sh", record.payload)
+
+    def test_decoder_required_encodings_are_opt_in(self):
+        records = [r for r in self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["base64"],
+        )]
+        self.assertTrue(records)
+        self.assertTrue(all(r.encoding == "base64" for r in records))
 
     def test_detection_mode_is_safe(self):
         records = list(self.gen.generate_payload_records(

