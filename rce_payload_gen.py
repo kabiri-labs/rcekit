@@ -195,6 +195,8 @@ class RCEPayloadGenerator:
             "docker": "sh",
             "kubernetes": "kubectl",
             "sql": "sql",
+            "graphql": "graphql",
+            "mongodb": "mongo",
             "powershell": "powershell",
         }
         if sink and "ssti" in sink:
@@ -240,6 +242,8 @@ class RCEPayloadGenerator:
             "container_escape": "Expect evidence of host boundary visibility, namespace access, or orchestrator privilege exposure.",
             "oob": "Expect an out-of-band DNS/HTTP callback to your collaborator/interactsh listener carrying the payload's unique token.",
             "waf_bypass": "Expect the same command output as the plain variant, proving the quote/space-free form slipped past input filtering.",
+            "nosql_injection": "Expect authentication bypass, altered result sets, a reproducible delay from server-side JS, or a NoSQL/BSON error confirming operator injection.",
+            "graphql_injection": "Expect introspection schema data, downstream command/SQL/NoSQL output reached through a resolver argument, or a GraphQL error revealing the injected value.",
         }
         return category_indicators.get(category_name, f"Expect a controlled {env} execution observable in the response or logs.")
 
@@ -301,7 +305,7 @@ class RCEPayloadGenerator:
         return notes
 
     def _requires_raw_context(self, env: str) -> bool:
-        return env in {"python", "php", "java", "dotnet", "ruby", "perl", "go", "nodejs", "sql"}
+        return env in {"python", "php", "java", "dotnet", "ruby", "perl", "go", "nodejs", "sql", "graphql", "mongodb"}
 
     def _is_context_compatible(self, context_name: str, env: str, raw_context_only: bool) -> bool:
         if context_name == "raw":
@@ -409,6 +413,8 @@ class RCEPayloadGenerator:
             "go",
             "docker",
             "kubernetes",
+            "graphql",
+            "mongodb",
         ]
 
         for context_name in contexts:

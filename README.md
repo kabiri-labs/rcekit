@@ -4,7 +4,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 
 ## Features
 
-- **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, containerized Docker workloads, and Kubernetes clusters
+- **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, containerized Docker workloads, and Kubernetes clusters
 - **Context-Aware**: Creates payloads for different injection contexts (HTML, JavaScript, SQL, etc.)
 - **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods, emitted verbatim so each snippet stays syntactically valid for its sink
 - **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
@@ -141,6 +141,8 @@ python rce_payload_gen.py --detection-only
 - `lateral_movement` - Post-exploitation lateral movement primitives
 - `waf_bypass` - Quote-free / space-free command-injection variants for filtered inputs
 - `oob` - Out-of-band callback payloads (requires `--oob-domain`), including DNS/HTTP exfil and JNDI/Log4Shell
+- `nosql_injection` - MongoDB/NoSQL operator injection, `$where` server-side JS, and blind time-based probes
+- `graphql_injection` - GraphQL introspection, resolver-argument injection (OS/SQL/NoSQL/traversal), and batching
 
 ### Available Environments
 
@@ -156,6 +158,8 @@ python rce_payload_gen.py --detection-only
 - `go` - Go environment
 - `docker` - Container escape research against Docker runtimes
 - `kubernetes` - Payloads targeting Kubernetes workloads and control planes
+- `graphql` - GraphQL injection surface (introspection, argument-borne injection, batching)
+- `mongodb` - MongoDB / NoSQL injection surface (operator injection, `$where`/`$function` server-side JS)
 
 ### Available Encoding Methods
 
@@ -218,6 +222,9 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 - `freemarker_ssti`: Freemarker template engine SSTI
 - `velocity_ssti`: Velocity template engine SSTI
 - `thymeleaf_ssti`: Thymeleaf template engine SSTI
+- `spel`: Spring Expression Language (SpEL) injection
+- `ognl`: OGNL injection (e.g. Struts)
+- `groovy`: Groovy expression / dynamic class-loading execution
 
 ### .NET (`dotnet`)
 - `process_start`: Process.Start executions
@@ -231,6 +238,16 @@ For the `code_execution` category, payloads are generated at a sink-specific lev
 
 ### Go (`go`)
 - `os_exec`: exec.Command executions
+
+### MongoDB (`mongodb`, category `nosql_injection`)
+- `operator_injection`: query-operator / auth-bypass injection (`$ne`, `$gt`, `$regex`, `$or`)
+- `where_js`: `$where` server-side JavaScript (including blind `sleep()` timing)
+- `server_side_js`: `$function` / `$accumulator` server-side JS execution (MongoDB 4.4+)
+
+### GraphQL (`graphql`, category `graphql_injection`)
+- `introspection`: schema discovery queries
+- `injection`: resolver-argument injection reaching OS command / SQL / NoSQL / path-traversal sinks
+- `batching`: aliasing brute-force and nested-query amplification
 
 ## Output Formats & Integrations
 

