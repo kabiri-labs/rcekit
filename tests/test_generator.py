@@ -8,6 +8,7 @@ removed obfuscation transforms must stay removed, and the safety filters and
 detection mode must behave as documented.
 """
 
+import json
 import sys
 import tempfile
 import unittest
@@ -194,6 +195,57 @@ class GeneratorTestCase(unittest.TestCase):
             )
         }
         self.assertTrue({"spel", "ognl", "groovy"}.issubset(sinks))
+
+    def test_json_context_escapes_payload(self):
+        # A Java payload uses double quotes, which must be escaped to stay a
+        # valid JSON string value.
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["code_execution"], selected_environments=["java"],
+            selected_contexts=["json"], selected_encodings=["none"],
+        ))
+        self.assertTrue(records)
+        for record in records:
+            # Each payload must parse as the body of a JSON string.
+            json.loads('"' + record.payload + '"')
+        self.assertTrue(any('\\"' in r.payload for r in records))
+
+    def test_xml_context_entity_escapes(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["code_execution"], selected_environments=["java"],
+            selected_contexts=["xml"], selected_encodings=["none"],
+        ))
+        self.assertTrue(any("&quot;" in r.payload for r in records))
+        self.assertFalse(any('"' in r.payload for r in records))
+
+    def test_transport_context_carries_any_environment(self):
+        # A serialization context is compatible with a non-shell environment.
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["code_execution"], selected_environments=["python"],
+            selected_contexts=["yaml"], selected_encodings=["none"],
+        ))
+        self.assertTrue(records)
+        self.assertTrue(all(r.context == "yaml" for r in records))
+
+    def test_shell_quoted_context_breaks_out_cleanly(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["shell_single_quoted"], selected_encodings=["none"],
+        ))
+        self.assertTrue(records)
+        for record in records:
+            self.assertTrue(record.payload.startswith("'; "))
+            self.assertNotRegex(record.payload, r";\s*;")  # no ";;" syntax error
+        # Shell-quoted contexts are not offered to non-shell environments.
+        self.assertFalse(self.gen._is_context_compatible("shell_single_quoted", "python", True))
+
+    def test_default_contexts_exclude_transport_contexts(self):
+        # A default run (no --contexts) must not silently include the richer
+        # opt-in contexts, keeping output size and behaviour stable.
+        contexts = {r.context for r in self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+        )}
+        self.assertNotIn("json", contexts)
+        self.assertNotIn("shell_single_quoted", contexts)
 
     def test_profile_filter_drops_denied_chars_and_long_payloads(self):
         records = list(self.gen.generate_payload_records(

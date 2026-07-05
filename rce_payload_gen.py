@@ -60,18 +60,42 @@ class RCEPayloadGenerator:
 
     def setup_components(self):
         """Initialize all payload components"""
-        # Context-specific wrappers for different injection points
+        # Injection contexts. Each context has a break-out `prefix`/`suffix` and,
+        # crucially, an `escape` rule describing how the payload must be encoded to
+        # remain valid *inside* the surrounding container. Two families:
+        #   * language / structural break-outs (close a quote, tag, or statement)
+        #   * transport / serialization contexts that carry any environment's
+        #     payload and only need to survive the wire format (JSON/XML/YAML/...)
         self.contexts = {
-            "raw": {"prefix": "", "suffix": ""},
-            "html": {"prefix": "", "suffix": ""},
-            "attribute": {"prefix": "\"", "suffix": "\""},
-            "javascript": {"prefix": "';", "suffix": ";//"},
-            "sql": {"prefix": "';", "suffix": "-- "},
-            "php": {"prefix": "<?php ", "suffix": "?>"},
-            "unix_shell": {"prefix": "", "suffix": ""},
-            "windows_cmd": {"prefix": "", "suffix": ""},
-            "powershell": {"prefix": "", "suffix": ""},
+            # Language & structural break-outs
+            "raw": {"prefix": "", "suffix": "", "escape": "none"},
+            "html": {"prefix": "", "suffix": "", "escape": "none"},
+            "attribute": {"prefix": "\"", "suffix": "\"", "escape": "none"},
+            "attribute_unquoted": {"prefix": " ", "suffix": " ", "escape": "none"},
+            "javascript": {"prefix": "';", "suffix": ";//", "escape": "none"},
+            "sql": {"prefix": "';", "suffix": "-- ", "escape": "none"},
+            "php": {"prefix": "<?php ", "suffix": "?>", "escape": "none"},
+            "unix_shell": {"prefix": "", "suffix": "", "escape": "none"},
+            "windows_cmd": {"prefix": "", "suffix": "", "escape": "none"},
+            "powershell": {"prefix": "", "suffix": "", "escape": "none"},
+            "shell_single_quoted": {"prefix": "'; ", "suffix": " #", "escape": "none"},
+            "shell_double_quoted": {"prefix": "\"; ", "suffix": " #", "escape": "none"},
+            "graphql_string": {"prefix": "", "suffix": "", "escape": "graphql"},
+            # Transport / serialization contexts (carry any environment's payload)
+            "json": {"prefix": "", "suffix": "", "escape": "json"},
+            "graphql_variable": {"prefix": "", "suffix": "", "escape": "json"},
+            "xml": {"prefix": "", "suffix": "", "escape": "xml"},
+            "xml_cdata": {"prefix": "<![CDATA[", "suffix": "]]>", "escape": "none"},
+            "yaml": {"prefix": "\"", "suffix": "\"", "escape": "json"},
+            "http_header": {"prefix": "", "suffix": "", "escape": "header"},
         }
+        # Contexts that deliver any payload through a serialization layer; they are
+        # compatible with every environment, not just shell runners.
+        self.transport_contexts = {"json", "graphql_variable", "graphql_string", "xml", "xml_cdata", "yaml", "http_header"}
+        # Original language/structural contexts used when no --contexts is given,
+        # so default output size and behaviour stay stable; the richer contexts
+        # above are opt-in via --contexts.
+        self.default_contexts = ["raw", "html", "attribute", "javascript", "sql", "php", "unix_shell", "windows_cmd", "powershell"]
         self.separator_envs = {"unix", "windows", "docker", "kubernetes"}
         self.safe_detection_encodings = ["none", "url_encode", "double_url_encode"]
         # Runners whose target parser is case-insensitive, so random_case is a
@@ -310,6 +334,12 @@ class RCEPayloadGenerator:
     def _is_context_compatible(self, context_name: str, env: str, raw_context_only: bool) -> bool:
         if context_name == "raw":
             return True
+        # Serialization contexts wrap any environment's payload for the wire.
+        if context_name in self.transport_contexts:
+            return True
+        # Shell-quoted break-outs only make sense for shell runners.
+        if context_name in {"shell_single_quoted", "shell_double_quoted"}:
+            return env in {"unix", "docker", "kubernetes"}
         if raw_context_only:
             if env == "php":
                 return context_name == "php"
@@ -317,7 +347,7 @@ class RCEPayloadGenerator:
                 return context_name == "javascript"
             return False
         if env in {"unix", "windows", "docker", "kubernetes"}:
-            return context_name in {"html", "attribute", "sql", "unix_shell", "windows_cmd", "powershell"}
+            return context_name in {"html", "attribute", "attribute_unquoted", "sql", "unix_shell", "windows_cmd", "powershell"}
         return False
 
     def _passes_filters(self, safety: str, blocking: bool, max_safety: str, include_blocking: bool) -> bool:
@@ -338,6 +368,28 @@ class RCEPayloadGenerator:
             return False
         return True
 
+    def _escape_for_context(self, payload: str, escape: str) -> str:
+        """Make a payload valid inside its surrounding container.
+
+        A break-out payload placed verbatim inside JSON/XML/YAML/etc. would
+        corrupt the wire format; these rules encode the payload so it survives
+        the serialization layer and reaches the sink intact.
+        """
+        if escape in {"json", "yaml", "graphql"}:
+            # JSON string-body escaping (also valid for YAML double-quoted
+            # scalars and GraphQL string literals): handles " \\ and controls.
+            return json.dumps(payload)[1:-1]
+        if escape == "xml":
+            return (payload.replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
+        if escape == "url":
+            return urllib.parse.quote(payload)
+        if escape == "header":
+            # Keep the payload on a single header line unless the operator is
+            # deliberately testing CRLF/header injection.
+            return payload.replace("\r", " ").replace("\n", " ")
+        return payload
+
     def generate_payload_records(
         self,
         selected_contexts: Optional[List[str]] = None,
@@ -351,7 +403,7 @@ class RCEPayloadGenerator:
         oob_domain: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         generated_payloads: Set[str] = set()
-        contexts = selected_contexts if selected_contexts else list(self.contexts.keys())
+        contexts = selected_contexts if selected_contexts else list(self.default_contexts)
         encodings = selected_encodings if selected_encodings else (
             self.safe_detection_encodings if mode == "detection" else list(self.encoding_methods.keys())
         )
@@ -496,7 +548,9 @@ class RCEPayloadGenerator:
         notes = tuple([*base.get("notes", ()), *self._lint_payload(payload, env)])
         tags = tuple(dict.fromkeys([*base.get("tags", ()), category_name, *( [sink] if sink else [] )]))
         variants = [payload]
-        if env in self.separator_envs:
+        # Shell-quoted break-out contexts already supply their own separator, so
+        # prepending an env separator would produce ";;" style syntax errors.
+        if env in self.separator_envs and context_name not in {"shell_single_quoted", "shell_double_quoted"}:
             variants = [f"{separator}{payload}" for separator in self.separators[env]]
             variants.append(payload)
 
@@ -565,7 +619,9 @@ class RCEPayloadGenerator:
                     working = working.replace("{canary}", token)
 
                 encoded_payload = self.encoding_methods[enc_name](working)
-                wrapped_payload = f"{context['prefix']}{encoded_payload}{context['suffix']}"
+                escape = context.get("escape", "none")
+                escaped_payload = self._escape_for_context(encoded_payload, escape)
+                wrapped_payload = f"{context['prefix']}{escaped_payload}{context['suffix']}"
                 if wrapped_payload in generated_payloads:
                     continue
                 generated_payloads.add(wrapped_payload)
@@ -573,6 +629,8 @@ class RCEPayloadGenerator:
                 final_notes = list(notes)
                 if enc_name not in {"none", "url_encode", "double_url_encode"}:
                     final_notes.append("This encoded variant requires a decode-and-execute path before the primary indicator is observable.")
+                if escape != "none":
+                    final_notes.append(f"Payload is escaped for the '{context_name}' serialization context; the sink must decode it before execution.")
 
                 yield PayloadRecord(
                     payload=wrapped_payload,

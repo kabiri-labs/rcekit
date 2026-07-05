@@ -5,7 +5,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 ## Features
 
 - **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, containerized Docker workloads, and Kubernetes clusters
-- **Context-Aware**: Creates payloads for different injection contexts (HTML, JavaScript, SQL, etc.)
+- **Context-Aware**: Break-out contexts (HTML, JS, SQL, shell-quoted strings) plus transport contexts (JSON, XML, YAML, HTTP header, GraphQL) that escape the payload to survive the wire format and reach the sink intact
 - **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods, emitted verbatim so each snippet stays syntactically valid for its sink
 - **Executable-Only Encoding**: Base64, Hex, single/double URL encoding, and multi-stage Base64 chains — every variant either runs as-is or is a documented decode-and-execute blob. Transforms that produce non-runnable output (ROT13, XOR/chunk shuffling, byte splicing) have been removed so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
@@ -100,7 +100,7 @@ python rce_payload_gen.py --detection-only
 | `--attacker-ip` | Attacker IP for reverse shells | `192.168.1.100` |
 | `--attacker-domain` | Attacker domain for download payloads | `attacker.com` |
 | `--max-payloads` | Maximum number of payloads to generate | Unlimited |
-| `--contexts` | Contexts to generate (space-separated) | All contexts |
+| `--contexts` | Contexts to generate (space-separated) | Default language/structural contexts |
 | `--categories` | Categories to generate (space-separated) | All categories |
 | `--encodings` | Encoding methods to apply (space-separated) | All encodings |
 | `--environments` | Environments to generate (space-separated) | All environments |
@@ -119,15 +119,38 @@ python rce_payload_gen.py --detection-only
 
 ### Available Contexts
 
-- `raw` - No wrapper; best for language-native snippets and direct command probes
-- `html` - HTML context
-- `attribute` - HTML attribute context
-- `javascript` - JavaScript context
-- `sql` - SQL injection context
+A context is more than a prefix/suffix: each one also carries an **escape rule**
+that makes the payload valid *inside* its surrounding container (e.g. a payload
+placed in a JSON string has its quotes and backslashes escaped so it survives the
+wire format and reaches the sink intact). Contexts fall into two families.
+
+**Language & structural break-outs** (the default set when `--contexts` is omitted):
+
+- `raw` - No wrapper; language-native snippets and direct command probes
+- `html` - HTML text context
+- `attribute` - Quoted HTML attribute break-out
+- `attribute_unquoted` - Unquoted HTML attribute break-out
+- `javascript` - JavaScript string break-out
+- `sql` - SQL string break-out
 - `php` - PHP code context
-- `unix_shell` - Unix shell context
-- `windows_cmd` - Windows command context
-- `powershell` - PowerShell context
+- `unix_shell` / `windows_cmd` / `powershell` - shell contexts
+- `shell_single_quoted` / `shell_double_quoted` - break out of a single/double-quoted shell argument (opt-in)
+- `graphql_string` - inject into an inline GraphQL string literal (opt-in)
+
+**Transport / serialization contexts** (opt-in via `--contexts`; carry *any*
+environment's payload and escape it for the wire format):
+
+- `json` - JSON string value (quotes/backslashes/controls escaped)
+- `graphql_variable` - GraphQL variables JSON
+- `xml` - XML text/attribute (entity-escaped)
+- `xml_cdata` - XML CDATA section
+- `yaml` - YAML double-quoted scalar
+- `http_header` - HTTP header value (CR/LF neutralised)
+
+Example — deliver a command-injection payload inside a JSON API field:
+```bash
+python rce_payload_gen.py --acknowledge-consent --contexts json --environments unix
+```
 
 ### Available Categories
 
