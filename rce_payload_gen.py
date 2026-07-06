@@ -99,6 +99,12 @@ class RCEPayloadGenerator:
         # above are opt-in via --contexts.
         self.default_contexts = ["raw", "html", "attribute", "javascript", "sql", "php", "unix_shell", "windows_cmd", "powershell"]
         self.separator_envs = {"unix", "windows", "docker", "kubernetes"}
+        # Command chainers that break out of a concatenated shell command. Used by
+        # sink-aware profiles (sink_needs_separator) to keep only payloads that can
+        # actually escape a mid-command injection point. ${IFS} is deliberately not
+        # here: it is a field separator, not a command separator.
+        self.command_separators = ("; ", "| ", "|| ", "& ", "&& ", "&", "|",
+                                   "%0a", "%0A", "%26", "%7C", "`|", "`&", "\\n", "\n")
         self.safe_detection_encodings = ["none", "url_encode", "double_url_encode"]
         # Runners whose target parser is case-insensitive, so random_case is a
         # meaningful keyword/WAF-bypass transform rather than a payload-breaking one.
@@ -727,24 +733,43 @@ class RCEPayloadGenerator:
     def _generate_canary(self) -> str:
         return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
 
+    def _is_separator_led(self, record: PayloadRecord) -> bool:
+        """True if the payload can break out of a mid-command injection point."""
+        if record.environment not in self.separator_envs:
+            return True  # non-shell sinks are not command-concatenation points
+        if record.context in {"shell_single_quoted", "shell_double_quoted"}:
+            return True  # quote break-outs supply their own separator
+        prefix = self.contexts.get(record.context, {}).get("prefix", "")
+        core = record.payload[len(prefix):] if prefix and record.payload.startswith(prefix) else record.payload
+        return core.startswith(self.command_separators)
+
     def _filter_by_profile(
         self,
         records: Iterator[PayloadRecord],
-        deny_chars: Optional[str],
-        max_length: Optional[int],
+        deny_chars: Optional[str] = None,
+        max_length: Optional[int] = None,
+        needs_separator: bool = False,
+        blind: bool = False,
     ) -> Iterator[PayloadRecord]:
-        """Keep only payloads a constrained target could actually accept.
+        """Keep only payloads a target with this shape could actually accept.
 
-        A payload is dropped if it exceeds ``max_length`` or contains any
-        character in ``deny_chars``. The check runs on the final, wrapped and
-        encoded payload, so an encoded variant (e.g. a URL-encoded quote) is
-        correctly retained when the literal character is gone.
+        * ``deny_chars`` / ``max_length`` drop payloads a filter would reject
+          (checked on the final wrapped/encoded payload, so a URL-encoded quote
+          survives a quote filter because the literal character is gone).
+        * ``needs_separator`` (sink concatenates input mid shell command) keeps
+          only unencoded payloads that begin with a command separator.
+        * ``blind`` (sink returns no output) keeps only payloads confirmable
+          out-of-band: timing (blocking) or OOB callbacks.
         """
         denied = set(deny_chars) if deny_chars else set()
         for record in records:
             if max_length and len(record.payload) > max_length:
                 continue
             if denied and any(char in record.payload for char in denied):
+                continue
+            if needs_separator and record.encoding == "none" and not self._is_separator_led(record):
+                continue
+            if blind and not (record.blocking or record.oob_host or record.expected_channel == "interactsh"):
                 continue
             yield record
 
@@ -756,6 +781,8 @@ class RCEPayloadGenerator:
         include_metadata: bool = False,
         deny_chars: Optional[str] = None,
         max_length: Optional[int] = None,
+        needs_separator: bool = False,
+        blind: bool = False,
         **kwargs,
     ) -> int:
         """
@@ -770,8 +797,8 @@ class RCEPayloadGenerator:
         """
         output_path = Path(file_path)
         records = self.generate_payload_records(**kwargs)
-        if deny_chars or max_length:
-            records = self._filter_by_profile(records, deny_chars, max_length)
+        if deny_chars or max_length or needs_separator or blind:
+            records = self._filter_by_profile(records, deny_chars, max_length, needs_separator, blind)
 
         if output_format == "burp":
             return self._write_burp(output_path, records, max_payloads)
@@ -1120,6 +1147,12 @@ def main():
                         help="Drop payloads containing any of these characters (e.g. \"'\\\"\" for a target that rejects quotes)")
     parser.add_argument("--max-length", type=int, default=None,
                         help="Drop payloads longer than this many characters")
+    parser.add_argument("--sink-needs-separator", action="store_true", default=None,
+                        help="Sink concatenates input mid shell command: keep only separator-led payloads")
+    parser.add_argument("--sink-blind", action="store_true", default=None,
+                        help="Sink returns no output: keep only out-of-band confirmable payloads (timing/OOB)")
+    parser.add_argument("--sink-decodes", nargs="+", default=None,
+                        help="Encodings the sink decodes before use (e.g. base64); those variants become valid and are generated")
 
     args = parser.parse_args()
 
@@ -1147,6 +1180,11 @@ def main():
     if deny_chars is None and profile.get("deny_chars") is not None:
         deny_chars = "".join(profile["deny_chars"])
 
+    # Sink-shape awareness: narrow generation to what this sink could execute.
+    needs_separator = bool(from_profile(args.sink_needs_separator, "sink_needs_separator"))
+    blind = bool(from_profile(args.sink_blind, "sink_blind"))
+    sink_decodes = from_profile(args.sink_decodes, "sink_decodes") or []
+
     template_path = Path(args.template_file) if args.template_file else None
     # Initialize generator
     generator = RCEPayloadGenerator(
@@ -1154,6 +1192,13 @@ def main():
         attacker_domain=args.attacker_domain,
         template_path=template_path,
     )
+
+    if sink_decodes:
+        # The sink decodes these, so the encoded form is a valid, executable
+        # delivery here — add them to the encoding set that is in effect.
+        current = selected_encodings if selected_encodings is not None else list(generator.default_encodings)
+        additions = [e for e in sink_decodes if e in generator.encoding_methods]
+        selected_encodings = list(dict.fromkeys(current + additions))
 
     mode = "detection" if args.detection_only else "exploit"
 
@@ -1202,6 +1247,8 @@ def main():
             mode=mode, watermark_token=watermark_token, max_safety=max_safety,
             include_blocking=include_blocking, oob_domain=oob_domain,
         )
+        if deny_chars or max_length or needs_separator or blind:
+            records = generator._filter_by_profile(records, deny_chars, max_length, needs_separator, blind)
         print(f"[verify] {method} {args.verify_url}  (authorised target)")
         results = generator.run_verification(
             records, url=args.verify_url, method=method, data=args.verify_data,
@@ -1227,7 +1274,8 @@ def main():
         return
 
     if args.output_format == "text" and not args.include_metadata and selected_encodings:
-        risky = sorted(set(selected_encodings) & generator.decoder_required_encodings)
+        # A decoder-required encoding is fine when the sink is known to decode it.
+        risky = sorted((set(selected_encodings) & generator.decoder_required_encodings) - set(sink_decodes))
         if risky:
             print(
                 f"[!] Warning: encoding(s) {risky} emit bare blobs that only execute where the "
@@ -1244,6 +1292,8 @@ def main():
         include_metadata=args.include_metadata or args.output_format == "jsonl",
         deny_chars=deny_chars,
         max_length=max_length,
+        needs_separator=needs_separator,
+        blind=blind,
         selected_contexts=selected_contexts,
         selected_categories=selected_categories,
         selected_encodings=selected_encodings,

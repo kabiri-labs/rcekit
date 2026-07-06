@@ -14,7 +14,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Machine-Readable Success Signatures**: Every payload carries a `match` field — the reflected canary/OOB token, or an inferred command-output regex (`id` → `uid=\d+`, `/etc/passwd` → `root:...`) — so a verifier, Nuclei, or Burp macro can auto-confirm execution instead of eyeballing output
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
 - **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
-- **Target Profiles**: Describe the target once (environments, contexts, denied characters, max length) and emit only compatible payloads instead of spraying everything
+- **Sink-Aware Target Profiles**: Describe the target once (environments, contexts, denied characters, max length, and sink shape — needs-separator / blind / decodes-input) and emit only payloads that could actually fire, instead of spraying everything
 - **WAF-Bypass Payloads**: Quote-free, space-free command-injection variants (`${IFS}`, brace expansion, `cat</etc/passwd`) for targets that reject quotes
 - **Detection-Friendly Mode**: Quickly produce benign canary payloads for safe scanning with `--detection-only`
 - **No Duplicates**: Intelligent duplicate detection to avoid redundant payloads
@@ -121,6 +121,9 @@ python rce_payload_gen.py --detection-only
 | `--target-profile` | JSON profile describing the target; supplies defaults that CLI flags override | None |
 | `--deny-chars` | Drop payloads containing any of these characters (e.g. quotes) | None |
 | `--max-length` | Drop payloads longer than this many characters | None |
+| `--sink-needs-separator` | Sink concatenates input mid shell command: keep only separator-led payloads | Off |
+| `--sink-blind` | Sink returns no output: keep only out-of-band confirmable payloads (timing/OOB) | Off |
+| `--sink-decodes` | Encodings the sink decodes before use (e.g. `base64`); those variants become valid and are generated | None |
 
 ### Available Contexts
 
@@ -320,8 +323,19 @@ python rce_payload_gen.py --acknowledge-consent --target-profile profiles/quote-
 Profile fields supply defaults; any explicit CLI flag overrides the matching
 field. `deny_chars` and `max_length` (also available directly as `--deny-chars`
 / `--max-length`) filter the **final** payload — so a URL-encoded quote survives
-a quote filter, because the literal character is gone. An example profile ships
-in [`profiles/`](profiles/).
+a quote filter, because the literal character is gone.
+
+**Sink-shape awareness** narrows generation to what the sink could actually
+execute, cutting payloads that can never fire (in testing, `sink_needs_separator`
+dropped ~20% of payloads against a mid-command sink *without losing a single
+confirmed hit*):
+
+- `sink_needs_separator` (`--sink-needs-separator`) — input lands mid shell command, so only separator-led break-out payloads are kept
+- `sink_blind` (`--sink-blind`) — the sink returns no output, so only out-of-band confirmable payloads (timing / OOB) are kept
+- `sink_decodes` (`--sink-decodes base64 ...`) — the sink decodes the input, so those encoded forms become valid and are generated (and no longer warned about)
+
+Example profiles ship in [`profiles/`](profiles/) (`quote-filtered-unix.json`,
+`shell-concat-noquotes.json`).
 
 ## Verifying Against a Target
 

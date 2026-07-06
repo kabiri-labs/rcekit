@@ -304,6 +304,33 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertNotIn("json", contexts)
         self.assertNotIn("shell_single_quoted", contexts)
 
+    def test_sink_needs_separator_keeps_only_breakouts(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+        ))
+        filtered = list(self.gen._filter_by_profile(records, needs_separator=True))
+        self.assertTrue(filtered)
+        self.assertLess(len(filtered), len(records))
+        # The bare command (no separator) can't fire mid-command; it must be gone.
+        self.assertIn("id", [r.payload for r in records])
+        self.assertNotIn("id", [r.payload for r in filtered])
+        # A separator-led variant must survive.
+        self.assertIn("; id", [r.payload for r in filtered])
+
+    def test_sink_blind_keeps_only_out_of_band_confirmable(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum", "oob"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+            oob_domain="x.oast.pro", max_safety="stateful", include_blocking=True,
+        ))
+        filtered = list(self.gen._filter_by_profile(records, blind=True))
+        self.assertTrue(filtered)
+        for record in filtered:
+            self.assertTrue(record.blocking or record.oob_host or record.expected_channel == "interactsh")
+        # Plain reflected `echo`/`id` payloads (response-only) must be dropped.
+        self.assertFalse(any(r.payload == "; id" for r in filtered))
+
     def test_profile_filter_drops_denied_chars_and_long_payloads(self):
         records = list(self.gen.generate_payload_records(
             selected_categories=["basic_enum", "file_operations", "waf_bypass"],

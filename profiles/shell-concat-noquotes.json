@@ -1,0 +1,11 @@
+{
+    "name": "shell-concat-noquotes",
+    "description": "Input is concatenated into the middle of a shell command (so a command separator is required to break out) and the surrounding API rejects quote characters. Emits only separator-led, quote-free payloads that can actually fire here.",
+    "environments": ["unix"],
+    "contexts": ["raw"],
+    "categories": ["basic_enum", "file_operations", "network_operations", "waf_bypass", "oob"],
+    "encodings": ["none"],
+    "deny_chars": ["'", "\""],
+    "sink_needs_separator": true,
+    "oob_domain": "your-id.oast.pro"
+}
