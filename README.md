@@ -10,6 +10,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Executable-Only Encoding**: The default encodings run as-is on the channel/sink or carry their own decoder (`base64_decode_exec`). Bare decoder-required blobs (Base64/Hex) are opt-in and warn on text output, and non-runnable transforms (ROT13, XOR/chunk shuffling, byte splicing) are removed — so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
+- **Machine-Readable Success Signatures**: Every payload carries a `match` field — the reflected canary/OOB token, or an inferred command-output regex (`id` → `uid=\d+`, `/etc/passwd` → `root:...`) — so a verifier, Nuclei, or Burp macro can auto-confirm execution instead of eyeballing output
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
 - **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
 - **Target Profiles**: Describe the target once (environments, contexts, denied characters, max length) and emit only compatible payloads instead of spraying everything
@@ -320,7 +321,7 @@ in [`profiles/`](profiles/).
 
 ## Output Formats & Integrations
 
-- **`text` / `jsonl`** — a single file of payloads (or JSONL records). When payloads carry correlation tokens (OOB or detection canaries) a `<output>.map.jsonl` manifest is written mapping each `token` to its exact payload, context, and expected channel — so a received callback or reflected canary is traceable to one payload.
+- **`text` / `jsonl`** — a single file of payloads (or JSONL records). A `<output>.map.jsonl` manifest is written for every payload that has an oracle — a correlation `token` (OOB / detection canary) **or** a machine-readable `match` regex — mapping it to its exact payload, context, and expected channel, so a received callback, reflected canary, or command-output signature is traceable to one payload and can be auto-confirmed by a verifier.
 - **`burp`** — writes a `<output>_burp/` directory with deduplicated, watermark-free wordlists split per injection context (`payloads-raw.txt`, `payloads-sql.txt`, …), a combined `payloads-all.txt`, and a `request.txt` template with a marked injection point. Load the lists into Burp Intruder, or `ffuf -request request.txt -w payloads-all.txt:FUZZ`.
 - **`nuclei`** — writes a `<output>_nuclei/` directory of runnable Nuclei templates grouped by environment and **oracle**:
   - *OOB* templates inject callbacks and match on `interactsh_protocol` (the real host is rewritten to `{{interactsh-url}}`).

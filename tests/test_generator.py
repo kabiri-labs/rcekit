@@ -198,6 +198,33 @@ class GeneratorTestCase(unittest.TestCase):
             self.assertTrue(record.oob_host.endswith(".oast.example.com"))
             self.assertEqual(record.expected_channel, "interactsh")
 
+    def test_command_payloads_carry_match_signatures(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum", "file_operations"],
+            selected_environments=["unix"], selected_contexts=["raw"],
+            selected_encodings=["none"],
+        ))
+        by_payload = {r.payload: r.match for r in records}
+        # `id` output is a recognisable uid= line; /etc/passwd starts with root:.
+        self.assertEqual(by_payload.get("; id"), r"uid=\d+")
+        self.assertTrue(any(m and "root:" in m for m in by_payload.values()))
+        # A signature must actually match real output.
+        self.assertRegex("uid=0(root) gid=0(root)", by_payload["; id"])
+
+    def test_canary_match_is_the_token_and_oob_has_none(self):
+        records = list(self.gen.generate_payload_records(
+            mode="detection", selected_environments=["unix"], selected_contexts=["raw"],
+            selected_encodings=["none"], oob_domain="x.oast.pro",
+            max_safety="stateful", include_blocking=True,
+        ))
+        canaries = [r for r in records if r.token and r.expected_channel in {"response", "stderr"}]
+        self.assertTrue(canaries)
+        for record in canaries:
+            self.assertEqual(record.match, record.token)
+        oob = [r for r in records if r.expected_channel == "interactsh"]
+        self.assertTrue(oob)
+        self.assertTrue(all(r.match is None for r in oob))
+
     def test_mongodb_and_graphql_sinks_present(self):
         mongo = [r for r in self.gen.generate_payload_records(
             selected_categories=["nosql_injection"], selected_environments=["mongodb"],
