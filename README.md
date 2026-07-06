@@ -10,6 +10,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Executable-Only Encoding**: The default encodings run as-is on the channel/sink or carry their own decoder (`base64_decode_exec`). Bare decoder-required blobs (Base64/Hex) are opt-in and warn on text output, and non-runnable transforms (ROT13, XOR/chunk shuffling, byte splicing) are removed — so operators never copy a payload that silently does nothing
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
+- **Built-in Verification Harness**: `--verify-url` fires the payloads at an authorised target and reports which actually executed, using each payload's oracle — closing the generate → deliver → confirm loop from one command
 - **Machine-Readable Success Signatures**: Every payload carries a `match` field — the reflected canary/OOB token, or an inferred command-output regex (`id` → `uid=\d+`, `/etc/passwd` → `root:...`) — so a verifier, Nuclei, or Burp macro can auto-confirm execution instead of eyeballing output
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
 - **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
@@ -109,6 +110,9 @@ python rce_payload_gen.py --detection-only
 | `--detection-only` | Generate benign payloads for validation scans | Disabled |
 | `--output-format` | `text`, `jsonl`, `burp` (per-context wordlists + request template), or `nuclei` (runnable templates) | `text` |
 | `--oob-domain` | Collaborator/interactsh domain for out-of-band payloads; each gets a unique subdomain token | None |
+| `--verify-url` | Authorised target URL with a `FUZZ` marker; fire payloads and confirm execution via their oracle | None |
+| `--verify-data` / `--verify-header` / `--verify-method` | Request body (with `FUZZ`) / repeatable header / HTTP method for verification | — |
+| `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout for verification | `0` / `8` |
 | `--include-metadata` | Emit indicators, safety tiers, and notes | Disabled |
 | `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
 | `--include-blocking` | Include blocking or timing-based probes | Disabled |
@@ -318,6 +322,36 @@ field. `deny_chars` and `max_length` (also available directly as `--deny-chars`
 / `--max-length`) filter the **final** payload — so a URL-encoded quote survives
 a quote filter, because the literal character is gone. An example profile ships
 in [`profiles/`](profiles/).
+
+## Verifying Against a Target
+
+`--verify-url` closes the loop: it fires the generated payloads at an
+**authorised** target and reports which ones actually executed, using each
+payload's built-in oracle (the `match` regex, a reflected canary token, or a
+timing delay). Put a `FUZZ` marker where the payload should go.
+
+```bash
+python rce_payload_gen.py --acknowledge-consent \
+  --environments unix --categories basic_enum file_operations waf_bypass \
+  --verify-url "https://target.example/lookup?host=FUZZ"
+```
+
+```
+[verify] GET https://target.example/lookup?host=FUZZ  (authorised target)
+[verify] sent 270 unique payloads: confirmed=44, no-match=86, no-signature=140
+
+[verify] CONFIRMED execution (44):
+  [file_operations/raw] ; cat /etc/passwd            (matched /root:.*?:0:0:/)
+  [waf_bypass/raw]      ; cat${IFS}/etc/passwd        (matched /root:.*?:0:0:/)
+  ...
+```
+
+- The `FUZZ` marker also works in `--verify-data` (request body) and repeatable
+  `--verify-header` values; method defaults to GET (POST when `--verify-data` is set).
+- Rate-limit with `--verify-delay <seconds>` and cap with `--max-payloads`.
+- OOB payloads are sent but confirmed out-of-band — watch your listener for their tokens.
+- Requires `--acknowledge-consent`; every run is written to `exploit_audit.log`.
+  **Only run this against systems you are authorised to test.**
 
 ## Output Formats & Integrations
 

