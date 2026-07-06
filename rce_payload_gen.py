@@ -24,6 +24,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
+# breaking changes to the CLI, output formats, or template schema.
+__version__ = "1.0.0"
+
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
 
@@ -1095,6 +1099,7 @@ class RCEPayloadGenerator:
 
 def main():
     parser = argparse.ArgumentParser(description="Generate RCE payloads for penetration testing")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-o", "--output", default="rce_payloads.txt",
                        help="Output file path (default: rce_payloads.txt)")
     parser.add_argument("--attacker-ip", default="192.168.1.100",

@@ -16,7 +16,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import rce_payload_gen  # noqa: E402
 from rce_payload_gen import RCEPayloadGenerator  # noqa: E402
+
+
+class VersionTestCase(unittest.TestCase):
+    def test_version_is_semver(self):
+        self.assertRegex(rce_payload_gen.__version__, r"^\d+\.\d+\.\d+$")
 
 
 class GeneratorTestCase(unittest.TestCase):

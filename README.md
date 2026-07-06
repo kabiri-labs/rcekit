@@ -1,5 +1,7 @@
 # RCEPayloadGen - Advanced RCE Payload Generator
 
+**Version 1.0.0** (semantic versioning; see `--version`).
+
 RCEPayloadGen is a comprehensive Remote Code Execution payload generator designed for penetration testers, security researchers, and red teamers. This tool generates a wide variety of RCE payloads tailored to different environments, contexts, encoding methods, and specific execution sinks.
 
 ## Features
