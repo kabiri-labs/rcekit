@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1097,6 +1097,149 @@ class RCEPayloadGenerator:
         except Exception as exc:
             logger.error("Unable to log exploitation usage: %s", exc)
 
+class OOBListener:
+    """A lightweight out-of-band listener that records DNS/HTTP callbacks and
+    correlates each one back to the payload whose unique token produced it.
+
+    It closes the OOB loop: generate OOB payloads -> fire them (e.g. --verify-url
+    or your own tooling) -> the target calls back to ``{token}.{oob-domain}`` ->
+    this listener maps the token to the exact payload from a ``.map.jsonl``
+    manifest. For real engagements the OOB domain's NS/A records must point here;
+    for lab use, point payloads straight at this host/port.
+    """
+
+    def __init__(self, tokens: Optional[Dict[str, Dict[str, Any]]] = None,
+                 answer_ip: str = "127.0.0.1", log_path: Optional[str] = None):
+        self.tokens = tokens or {}
+        self.answer_ip = answer_ip
+        self.log_path = log_path
+        self.hits: List[Dict[str, Any]] = []
+        self._servers: List[Any] = []
+
+    def _correlate(self, host: str, path: str):
+        hay = f"{host} {path}".lower()
+        for token, entry in self.tokens.items():
+            if token and token.lower() in hay:
+                return token, entry
+        label = host.split(".")[0].lower() if host else ""
+        return (label or None), None
+
+    def record(self, proto: str, source: str, host: str, path: str = "") -> Dict[str, Any]:
+        token, entry = self._correlate(host, path)
+        hit = {
+            "time": datetime.now(timezone.utc).isoformat(), "proto": proto,
+            "source": source, "host": host, "path": path, "token": token,
+            "payload": entry.get("payload") if entry else None,
+            "category": entry.get("category") if entry else None,
+            "context": entry.get("context") if entry else None,
+        }
+        self.hits.append(hit)
+        where = f"{host or path}"
+        if entry:
+            print(f"[HIT] {proto} token={token} from {source} -> {entry.get('payload')} "
+                  f"[{entry.get('category')}/{entry.get('context')}]")
+        else:
+            print(f"[HIT] {proto} from {source} -> {where}  (token={token}; not in manifest)")
+        if self.log_path:
+            try:
+                with open(self.log_path, "a", encoding="utf-8") as log_file:
+                    log_file.write(json.dumps(hit, ensure_ascii=True) + "\n")
+            except Exception as exc:
+                logger.error("Unable to write OOB hit log: %s", exc)
+        return hit
+
+    def start_http(self, port: int) -> Any:
+        import http.server
+        import socketserver
+
+        listener = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _handle(self):
+                host = self.headers.get("Host", "").split(":")[0]
+                listener.record("http", self.client_address[0], host, self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            do_GET = _handle
+            do_POST = _handle
+
+        server = socketserver.ThreadingTCPServer(("0.0.0.0", port), Handler)
+        server.daemon_threads = True
+        self._servers.append(server)
+        import threading
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def _parse_dns_qname(self, data: bytes) -> str:
+        labels, i = [], 12
+        while i < len(data) and data[i] != 0:
+            length = data[i]
+            labels.append(data[i + 1:i + 1 + length].decode(errors="replace"))
+            i += 1 + length
+        return ".".join(labels)
+
+    def _dns_response(self, query: bytes) -> bytes:
+        header = query[:2] + b"\x81\x80" + b"\x00\x01" + b"\x00\x01" + b"\x00\x00" + b"\x00\x00"
+        i = 12
+        while i < len(query) and query[i] != 0:
+            i += 1 + query[i]
+        i += 1 + 4  # null byte + qtype + qclass
+        question = query[12:i]
+        rdata = bytes(int(o) for o in self.answer_ip.split("."))
+        answer = b"\xc0\x0c" + b"\x00\x01" + b"\x00\x01" + b"\x00\x00\x00\x1e" + b"\x00\x04" + rdata
+        return header + question + answer
+
+    def start_dns(self, port: int) -> bool:
+        import socket
+        import threading
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", port))
+        except OSError as exc:
+            logger.warning("DNS listener could not bind port %s (%s); continuing with HTTP only.", port, exc)
+            return False
+
+        def loop():
+            while True:
+                try:
+                    data, addr = sock.recvfrom(512)
+                except OSError:
+                    break
+                name = self._parse_dns_qname(data)
+                try:
+                    sock.sendto(self._dns_response(data), addr)
+                except OSError:
+                    pass
+                self.record("dns", addr[0], name)
+
+        threading.Thread(target=loop, daemon=True).start()
+        return True
+
+
+def load_token_manifest(path: str) -> Dict[str, Dict[str, Any]]:
+    """Load a .map.jsonl manifest into a token -> entry dict."""
+    tokens: Dict[str, Dict[str, Any]] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as manifest:
+            for line in manifest:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if entry.get("token"):
+                    tokens[entry["token"]] = entry
+    except Exception as exc:
+        logger.error("Unable to load manifest %s: %s", path, exc)
+    return tokens
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate RCE payloads for penetration testing")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -1136,6 +1279,18 @@ def main():
                         help="Seconds to wait between verification requests (rate limiting)")
     parser.add_argument("--verify-timeout", type=float, default=8.0,
                         help="Per-request timeout for verification (seconds)")
+    parser.add_argument("--listen", action="store_true",
+                        help="Run the built-in OOB listener (HTTP+DNS) that records callbacks and correlates them to payload tokens")
+    parser.add_argument("--listen-http-port", type=int, default=8080,
+                        help="HTTP port for the OOB listener (default 8080)")
+    parser.add_argument("--listen-dns-port", type=int, default=5335,
+                        help="UDP DNS port for the OOB listener (default 5335; use 53 for real DNS, needs root + NS delegation)")
+    parser.add_argument("--listen-answer-ip", default="127.0.0.1",
+                        help="IP returned by the listener's DNS answers (default 127.0.0.1)")
+    parser.add_argument("--correlate", default=None,
+                        help="A .map.jsonl manifest to correlate received tokens back to their payloads")
+    parser.add_argument("--listen-log", default=None,
+                        help="Append received OOB hits to this file as JSONL")
     parser.add_argument("--include-metadata", action="store_true",
                         help="Write indicator and safety metadata alongside payload output")
     parser.add_argument("--max-safety", choices=["safe", "intrusive", "stateful"], default=None,
@@ -1160,6 +1315,29 @@ def main():
                         help="Encodings the sink decodes before use (e.g. base64); those variants become valid and are generated")
 
     args = parser.parse_args()
+
+    if args.listen:
+        import time
+        tokens = load_token_manifest(args.correlate) if args.correlate else {}
+        listener = OOBListener(tokens=tokens, answer_ip=args.listen_answer_ip, log_path=args.listen_log)
+        listener.start_http(args.listen_http_port)
+        dns_ok = listener.start_dns(args.listen_dns_port)
+        print(f"[listen] OOB listener up — HTTP :{args.listen_http_port}"
+              + (f", DNS :{args.listen_dns_port}" if dns_ok else " (DNS disabled)"))
+        if tokens:
+            print(f"[listen] correlating against {len(tokens)} tokens from {args.correlate}")
+        else:
+            print("[listen] no --correlate manifest; hits will be reported without payload mapping")
+        print("[listen] waiting for callbacks — Ctrl+C to stop")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            unique = {h["token"] for h in listener.hits if h["token"]}
+            correlated = {h["token"] for h in listener.hits if h["payload"]}
+            print(f"\n[listen] stopped: {len(listener.hits)} callbacks, "
+                  f"{len(unique)} unique tokens, {len(correlated)} correlated to a payload.")
+        return
 
     # A target profile supplies defaults for the selection and filter options;
     # any explicit CLI flag overrides the matching profile field.
