@@ -351,6 +351,20 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertTrue(oob)
         self.assertTrue(all(r.match is None for r in oob))
 
+    def test_destructive_flagging(self):
+        self.assertTrue(self.gen._is_destructive("echo x >> ~/.bashrc", "persistence"))
+        self.assertTrue(self.gen._is_destructive("rm -rf /tmp/x", "file_operations"))
+        self.assertTrue(self.gen._is_destructive("Set-MpPreference -DisableRealtimeMonitoring $true", "persistence"))
+        self.assertFalse(self.gen._is_destructive("id", "basic_enum"))
+        self.assertFalse(self.gen._is_destructive("cat /etc/passwd", "file_operations"))
+        # The record field is populated from the payload/category.
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["persistence"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"], max_safety="stateful",
+        ))
+        self.assertTrue(records)
+        self.assertTrue(all(r.destructive for r in records))
+
     def test_mongodb_and_graphql_sinks_present(self):
         mongo = [r for r in self.gen.generate_payload_records(
             selected_categories=["nosql_injection"], selected_environments=["mongodb"],

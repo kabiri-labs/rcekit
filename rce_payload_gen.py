@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -48,6 +48,7 @@ class PayloadRecord:
     notes: Tuple[str, ...] = ()
     blocking: bool = False
     stateful: bool = False
+    destructive: bool = False
     token: Optional[str] = None
     oob_host: Optional[str] = None
     match: Optional[str] = None
@@ -363,6 +364,19 @@ class RCEPayloadGenerator:
             ]
         )
 
+    def _is_destructive(self, payload: str, category_name: str) -> bool:
+        """Payloads that alter or damage the target (a stronger signal than
+        `stateful`): persistence, backdoors, security-control tampering, and
+        irreversible file/disk operations. Used to hold these back from live
+        verification unless the operator explicitly opts in."""
+        if category_name == "persistence" or self._is_stateful(payload):
+            return True
+        lower = payload.lower()
+        return any(token in lower for token in [
+            "rm -rf", "rm -f ", "mkfs", "dd if=", "del /f", "rmdir /s",
+            "disablerealtimemonitoring", ":(){", "> /etc/", "shutdown", "reboot",
+        ])
+
     def _classify_safety(self, payload: str, category_name: str, mode: str) -> str:
         lower_payload = payload.lower()
         if self._is_stateful(payload) or category_name == "persistence":
@@ -672,6 +686,7 @@ class RCEPayloadGenerator:
         match_sig: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
         context = self.contexts[context_name]
+        destructive = self._is_destructive(payload, category)
         for enc_name in encodings:
             if enc_name not in self.encoding_methods or not self._encoding_is_compatible(enc_name, runner):
                 continue
@@ -734,6 +749,7 @@ class RCEPayloadGenerator:
                     notes=tuple(dict.fromkeys(final_notes)),
                     blocking=blocking,
                     stateful=stateful,
+                    destructive=destructive,
                     token=token,
                     oob_host=oob_host,
                     match=match,
@@ -848,6 +864,7 @@ class RCEPayloadGenerator:
                                 "expected_channel": record.expected_channel,
                                 "indicator": record.indicator,
                                 "match": record.match,
+                                "destructive": record.destructive,
                             })
                         count += 1
                         if max_payloads and count >= max_payloads:
@@ -1289,6 +1306,8 @@ def main():
                         help="Seconds to wait between verification requests (rate limiting)")
     parser.add_argument("--verify-timeout", type=float, default=8.0,
                         help="Per-request timeout for verification (seconds)")
+    parser.add_argument("--verify-allow-destructive", action="store_true",
+                        help="Allow --verify-url to fire destructive payloads (persistence/backdoors/etc.); off by default")
     parser.add_argument("--listen", action="store_true",
                         help="Run the built-in OOB listener (HTTP+DNS) that records callbacks and correlates them to payload tokens")
     parser.add_argument("--listen-http-port", type=int, default=8080,
@@ -1442,6 +1461,17 @@ def main():
         )
         if deny_chars or max_length or needs_separator or blind:
             records = generator._filter_by_profile(records, deny_chars, max_length, needs_separator, blind)
+        skipped_destructive = [0]
+        if not args.verify_allow_destructive:
+            # Never install backdoors / tamper with a live target unless asked.
+            def _drop_destructive(source):
+                for record in source:
+                    if record.destructive:
+                        skipped_destructive[0] += 1
+                        continue
+                    yield record
+
+            records = _drop_destructive(records)
         print(f"[verify] {method} {args.verify_url}  (authorised target)")
         results = generator.run_verification(
             records, url=args.verify_url, method=method, data=args.verify_data,
@@ -1454,6 +1484,9 @@ def main():
         confirmed = [r for r in results if r["verdict"] == "confirmed"]
         print(f"[verify] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
+        if skipped_destructive[0]:
+            print(f"[verify] skipped {skipped_destructive[0]} destructive payloads "
+                  "(persistence/backdoors/etc.); pass --verify-allow-destructive to include them.")
         if confirmed:
             print(f"\n[verify] CONFIRMED execution ({len(confirmed)}):")
             for result in confirmed:

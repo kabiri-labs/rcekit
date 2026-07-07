@@ -1,6 +1,6 @@
 # RCEPayloadGen — RCE Testing Toolkit
 
-**Version 1.1.3** · MIT · Python 3.8+ · no third-party dependencies
+**Version 1.2.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -77,6 +77,7 @@ and does not. Only run any of this against systems you are authorised to test.
 | `--verify-url` | Authorised target URL with a `FUZZ` marker; fire and confirm execution | None |
 | `--verify-data` / `--verify-header` / `--verify-method` | Body (with `FUZZ`) / repeatable header / HTTP method | — |
 | `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout | `0` / `8` |
+| `--verify-allow-destructive` | Let verification fire destructive payloads (persistence/backdoors); skipped by default | Off |
 | `--listen` + `--correlate <map.jsonl>` | Run the OOB listener and map callbacks to payloads | Off |
 | `--listen-http-port` / `--listen-dns-port` / `--listen-answer-ip` / `--listen-log` | Listener HTTP/DNS ports, DNS answer IP, hit log | `8080` / `5335` / `127.0.0.1` / — |
 | **Targeting** | | |
@@ -219,8 +220,10 @@ python rce_payload_gen.py --acknowledge-consent \
 ```
 
 Rate-limit with `--verify-delay` and cap with `--max-payloads`. OOB payloads are
-sent but confirmed out-of-band (see below). Requires `--acknowledge-consent`;
-every run is audited to `exploit_audit.log`.
+sent but confirmed out-of-band (see below). **Destructive payloads (persistence,
+backdoors, security-control tampering) are never fired at the target unless you
+pass `--verify-allow-destructive`.** Requires `--acknowledge-consent`; every run
+is audited to `exploit_audit.log`.
 
 ## Out-of-Band Listener
 
