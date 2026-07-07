@@ -524,6 +524,34 @@ class GeneratorTestCase(unittest.TestCase):
             self.assertTrue((outdir / "request.txt").exists())
             self.assertTrue(any(outdir.glob("payloads-*.txt")))
 
+    def test_export_is_profile_request_aware(self):
+        request = {"url": "/api/v1/lookup", "method": "POST",
+                   "headers": {"Content-Type": "application/json"},
+                   "body": '{"host": "FUZZ"}'}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            # Burp request.txt reflects the profile's method/path/body.
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="burp", request_template=request,
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            burp_req = (Path(tmp) / "run_burp" / "request.txt").read_text()
+            self.assertIn("POST /api/v1/lookup HTTP/1.1", burp_req)
+            self.assertIn("Content-Type: application/json", burp_req)
+            self.assertIn('{"host": "\xa7payload\xa7"}', burp_req)
+
+            # Nuclei templates embed the same request with the payload marker.
+            out2 = Path(tmp) / "run2.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out2), output_format="nuclei", request_template=request,
+                selected_environments=["unix"], mode="detection",
+                max_safety="stateful", include_blocking=True,
+            )
+            templates = "\n".join(t.read_text() for t in (Path(tmp) / "run2_nuclei").glob("*.yaml"))
+            self.assertIn("POST /api/v1/lookup HTTP/1.1", templates)
+            self.assertIn('{"host": "{{payload}}"}', templates)
+
     def test_nuclei_export_writes_valid_templates(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "run.txt"

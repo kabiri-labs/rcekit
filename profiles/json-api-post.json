@@ -1,0 +1,16 @@
+{
+    "name": "json-api-post",
+    "description": "A JSON API where the payload is injected into the `host` field of a POST body. The request block shapes the Burp/Nuclei exports (and documents the shape for --verify-*).",
+    "environments": ["unix"],
+    "contexts": ["json"],
+    "categories": ["basic_enum", "file_operations", "waf_bypass"],
+    "encodings": ["none"],
+    "request": {
+        "url": "/api/v1/lookup",
+        "method": "POST",
+        "headers": {
+            "Content-Type": "application/json"
+        },
+        "body": "{\"host\": \"FUZZ\"}"
+    }
+}

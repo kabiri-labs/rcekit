@@ -1,6 +1,6 @@
 # RCEPayloadGen — RCE Testing Toolkit
 
-**Version 1.2.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 1.3.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -196,7 +196,21 @@ python rce_payload_gen.py --acknowledge-consent --target-profile profiles/shell-
 - `deny_chars` / `max_length` filter the **final** payload — a URL-encoded quote survives a quote filter because the literal character is gone.
 - **Sink shape** narrows generation to what can actually fire: `sink_needs_separator` (mid-command injection → separator-led break-outs only), `sink_blind` (no output → OOB/timing only), `sink_decodes` (input is decoded → those encodings become valid). Against a mid-command sink, `sink_needs_separator` dropped ~20% of payloads *without losing a single confirmed hit*.
 
-Example profiles ship in [`profiles/`](profiles/).
+A profile may also carry a **`request`** block describing the target request
+(URL/path, method, headers, body) with a `FUZZ` marker. The `burp` and `nuclei`
+exports then shape their output to the real endpoint instead of a generic
+`?rcpg=` parameter:
+
+```json
+"request": {
+  "url": "/api/v1/lookup",
+  "method": "POST",
+  "headers": {"Content-Type": "application/json"},
+  "body": "{\"host\": \"FUZZ\"}"
+}
+```
+
+Example profiles ship in [`profiles/`](profiles/) (including `json-api-post.json`).
 
 ## Verifying Against a Target
 

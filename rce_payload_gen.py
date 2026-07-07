@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -813,6 +813,7 @@ class RCEPayloadGenerator:
         max_length: Optional[int] = None,
         needs_separator: bool = False,
         blind: bool = False,
+        request_template: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> int:
         """
@@ -831,9 +832,9 @@ class RCEPayloadGenerator:
             records = self._filter_by_profile(records, deny_chars, max_length, needs_separator, blind)
 
         if output_format == "burp":
-            return self._write_burp(output_path, records, max_payloads)
+            return self._write_burp(output_path, records, max_payloads, request_template)
         if output_format == "nuclei":
-            return self._write_nuclei(output_path, records, max_payloads)
+            return self._write_nuclei(output_path, records, max_payloads, request_template)
 
         count = 0
         manifest: List[Dict[str, Any]] = []
@@ -892,7 +893,33 @@ class RCEPayloadGenerator:
         """Derive an output directory name for multi-file formats."""
         return output_path.with_name(f"{output_path.stem or 'rce_payloads'}_{suffix}")
 
-    def _write_burp(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int]) -> int:
+    def _render_request(self, req: Optional[Dict[str, Any]], url_sub: str, other_sub: str, host: str) -> Optional[str]:
+        """Render a profile `request` block into a raw HTTP request, substituting
+        the FUZZ marker in the URL (with `url_sub`) and in headers/body (with
+        `other_sub`). Returns None if no usable request/marker is present."""
+        if not req or not req.get("url"):
+            return None
+        body = req.get("body") or ""
+        headers = req.get("headers") or {}
+        if "FUZZ" not in req["url"] and "FUZZ" not in body and not any("FUZZ" in str(v) for v in headers.values()):
+            return None
+        from urllib.parse import urlsplit
+        method = (req.get("method") or ("POST" if body else "GET")).upper()
+        parts = urlsplit(req["url"])
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        resolved_host = host or parts.netloc or "TARGET-HOST"
+        lines = [f"{method} {path.replace('FUZZ', url_sub)} HTTP/1.1", f"Host: {resolved_host}"]
+        for key, value in headers.items():
+            lines.append(f"{key}: {str(value).replace('FUZZ', other_sub)}")
+        rendered = "\n".join(lines)
+        if body:
+            rendered += "\n\n" + body.replace("FUZZ", other_sub)
+        return rendered
+
+    def _write_burp(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
+                    request_template: Optional[Dict[str, Any]] = None) -> int:
         """Write deduplicated, watermark-free payload wordlists grouped by injection context."""
         outdir = self._format_outdir(output_path, "burp")
         outdir.mkdir(parents=True, exist_ok=True)
@@ -915,29 +942,39 @@ class RCEPayloadGenerator:
                 (outdir / f"payloads-{context_name}.txt").write_text("\n".join(items) + "\n", encoding="utf-8")
             all_items = [p for items in groups.values() for p in items]
             (outdir / "payloads-all.txt").write_text("\n".join(all_items) + "\n", encoding="utf-8")
-            (outdir / "request.txt").write_text(self._burp_request_template(), encoding="utf-8")
+            (outdir / "request.txt").write_text(self._burp_request_template(request_template), encoding="utf-8")
             logger.info("Burp/ffuf wordlists written to %s/ (%s payloads across %s context files)", outdir, count, len(groups))
         except Exception as exc:
             logger.error("Error writing Burp output to %s: %s", outdir, exc)
         return count
 
-    def _burp_request_template(self) -> str:
-        return (
+    def _burp_request_template(self, request_template: Optional[Dict[str, Any]] = None) -> str:
+        header = (
             "# Burp Intruder: load payloads-*.txt as a payload set; the injection\n"
-            "# point is marked with Burp's position markers (the caret pair below).\n"
-            "# ffuf: replace the marked value with the keyword FUZZ and use\n"
+            "# point is Burp's position marker (\xa7...\xa7 below).\n"
+            "# ffuf: replace the marker with FUZZ and run\n"
             "#   ffuf -request request.txt -w payloads-all.txt:FUZZ\n"
-            "POST /vulnerable-endpoint HTTP/1.1\n"
+        )
+        rendered = self._render_request(request_template, "\xa7payload\xa7", "\xa7payload\xa7", "")
+        if rendered:
+            return header + rendered + "\n"
+        return (
+            header
+            + "POST /vulnerable-endpoint HTTP/1.1\n"
             "Host: TARGET-HOST\n"
             "User-Agent: rcpayloadgen\n"
             "Content-Type: application/x-www-form-urlencoded\n"
             "Connection: close\n"
             "\n"
-            "vulnerable_param=\xa7INJECT\xa7\n"
+            "vulnerable_param=\xa7payload\xa7\n"
         )
 
-    def _write_nuclei(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int]) -> int:
+    def _write_nuclei(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
+                      request_template: Optional[Dict[str, Any]] = None) -> int:
         """Emit Nuclei templates grouped by environment and oracle (OOB / time-based / reflection)."""
+        # A profile request block shapes the raw request; otherwise a generic
+        # GET ?rcpg=<payload> is used.
+        raw_request = self._render_request(request_template, "{{url_encode(payload)}}", "{{payload}}", "{{Hostname}}")
         outdir = self._format_outdir(output_path, "nuclei")
         outdir.mkdir(parents=True, exist_ok=True)
         canary = "RCEPGCANARY"
@@ -947,9 +984,14 @@ class RCEPayloadGenerator:
         count = 0
         for record in records:
             # Nuclei url-encodes the payload itself, so only the unencoded form
-            # is meaningful (and encoded blobs would hide the OOB host). Inject
-            # into a generic URL parameter, so only the raw context applies.
-            if record.encoding != "none" or record.context != "raw":
+            # is meaningful (and encoded blobs would hide the OOB host).
+            if record.encoding != "none":
+                continue
+            # Without a custom request the payload goes into a generic URL
+            # parameter, so only the raw context applies. With a profile request
+            # block the template defines the injection point, so honour whatever
+            # context the profile selected (e.g. a JSON-escaped body value).
+            if raw_request is None and record.context != "raw":
                 continue
             payload = record.payload
             lower = payload.lower()
@@ -980,15 +1022,22 @@ class RCEPayloadGenerator:
                 break
         try:
             for (env, oracle), payloads in groups.items():
-                template = self._nuclei_template(env, oracle, payloads, canary)
+                template = self._nuclei_template(env, oracle, payloads, canary, raw_request)
                 (outdir / f"rcpg-{env}-{oracle}.yaml").write_text(template, encoding="utf-8")
             logger.info("Nuclei templates written to %s/ (%s templates, %s payloads)", outdir, len(groups), count)
         except Exception as exc:
             logger.error("Error writing Nuclei output to %s: %s", outdir, exc)
         return count
 
-    def _nuclei_template(self, env: str, oracle: str, payloads: List[str], canary: str) -> str:
+    def _nuclei_template(self, env: str, oracle: str, payloads: List[str], canary: str,
+                         raw_request: Optional[str] = None) -> str:
         plist = "\n".join(f"          - {json.dumps(p)}" for p in payloads)
+        if raw_request:
+            request_lines = "\n".join(f"        {line}" for line in raw_request.split("\n")) + "\n\n"
+            request_desc = "the request defined by the target profile"
+        else:
+            request_lines = "        GET /?rcpg={{url_encode(payload)}} HTTP/1.1\n        Host: {{Hostname}}\n\n"
+            request_desc = "a URL parameter"
         if oracle == "oob":
             name = f"Out-of-band RCE probe ({env})"
             matcher = (
@@ -1022,13 +1071,12 @@ class RCEPayloadGenerator:
             f"  name: {name}\n"
             "  author: rcpayloadgen\n"
             "  severity: high\n"
-            f"  description: Injects {env} RCE payloads into a URL parameter and confirms execution via the {oracle} oracle.\n"
+            f"  description: Injects {env} RCE payloads into {request_desc} and confirms execution via the {oracle} oracle.\n"
             f"  tags: rce,rcpayloadgen,{env},{oracle}\n\n"
             "http:\n"
             "  - raw:\n"
             "      - |\n"
-            "        GET /?rcpg={{url_encode(payload)}} HTTP/1.1\n"
-            "        Host: {{Hostname}}\n\n"
+            f"{request_lines}"
             "    payloads:\n"
             "      payload:\n"
             f"{plist}\n"
@@ -1396,6 +1444,8 @@ def main():
     needs_separator = bool(from_profile(args.sink_needs_separator, "sink_needs_separator"))
     blind = bool(from_profile(args.sink_blind, "sink_blind"))
     sink_decodes = from_profile(args.sink_decodes, "sink_decodes") or []
+    # A profile `request` block shapes the exported Burp/Nuclei requests.
+    request_template = profile.get("request")
 
     template_path = Path(args.template_file) if args.template_file else None
     # Initialize generator
@@ -1520,6 +1570,7 @@ def main():
         max_length=max_length,
         needs_separator=needs_separator,
         blind=blind,
+        request_template=request_template,
         selected_contexts=selected_contexts,
         selected_categories=selected_categories,
         selected_encodings=selected_encodings,
