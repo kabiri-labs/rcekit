@@ -1,6 +1,6 @@
 # RCEPayloadGen — RCE Testing Toolkit
 
-**Version 1.1.1** · MIT · Python 3.6+ · no third-party dependencies
+**Version 1.1.2** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -24,7 +24,7 @@ payload generation:
 
 ```bash
 git clone https://github.com/kabiri-labs/rcpayloadgen.git
-cd rcpayloadgen        # Python 3.6+, standard library only
+cd rcpayloadgen        # Python 3.8+, standard library only
 ```
 
 Generated payload files (`*.txt`, `*.meta.jsonl`, `*.map.jsonl`) and runtime logs

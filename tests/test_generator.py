@@ -9,6 +9,8 @@ detection mode must behave as documented.
 """
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,10 +21,74 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import rce_payload_gen  # noqa: E402
 from rce_payload_gen import OOBListener, RCEPayloadGenerator  # noqa: E402
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "rce_payload_gen.py"
+
 
 class VersionTestCase(unittest.TestCase):
     def test_version_is_semver(self):
         self.assertRegex(rce_payload_gen.__version__, r"^\d+\.\d+\.\d+$")
+
+
+class CLITestCase(unittest.TestCase):
+    """Exercise the real CLI (argparse + main) via subprocess, not just the API."""
+
+    def _run(self, *args, cwd=None):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=str(cwd or REPO_ROOT), capture_output=True, text=True, timeout=120,
+        )
+
+    def test_help(self):
+        result = self._run("--help")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--verify-url", result.stdout)
+        self.assertIn("--listen", result.stdout)
+
+    def test_version_flag(self):
+        result = self._run("--version")
+        self.assertEqual(result.returncode, 0)
+        self.assertRegex(result.stdout.strip(), r"\d+\.\d+\.\d+$")
+
+    def test_exploit_requires_consent(self):
+        result = self._run("--categories", "basic_enum", "--environments", "unix")
+        self.assertIn("consent", (result.stdout + result.stderr).lower())
+
+    def test_detection_only_writes_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "d.txt"
+            result = self._run("--detection-only", "--environments", "unix", "-o", str(out))
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(out.exists() and out.read_text().strip())
+
+    def test_jsonl_records_are_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "d.jsonl"
+            self._run("--detection-only", "--environments", "unix",
+                      "--output-format", "jsonl", "-o", str(out))
+            lines = [l for l in out.read_text().splitlines() if l.strip()]
+            self.assertTrue(lines)
+            for line in lines:
+                json.loads(line)  # each record must be valid JSON
+
+    def test_nuclei_export_produces_templates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            result = self._run("--detection-only", "--environments", "unix",
+                                "--output-format", "nuclei", "-o", str(out))
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(list((Path(tmp) / "run_nuclei").glob("*.yaml")))
+
+    def test_target_profile_end_to_end(self):
+        profile = REPO_ROOT / "profiles" / "quote-filtered-unix.json"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "p.txt"
+            result = self._run("--acknowledge-consent", "--target-profile", str(profile),
+                               "--encodings", "none", "-o", str(out))
+            self.assertEqual(result.returncode, 0)
+            text = out.read_text()
+            self.assertTrue(text.strip())
+            self.assertNotIn('"', text)  # profile denies quote characters
 
 
 class OOBListenerTestCase(unittest.TestCase):

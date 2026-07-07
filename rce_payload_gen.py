@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
