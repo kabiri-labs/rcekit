@@ -228,6 +228,15 @@ class GeneratorTestCase(unittest.TestCase):
         ))
         self.assertEqual(records, [], "persistence is stateful and must be filtered at safe tier")
 
+    def test_sleep_family_is_classified_blocking(self):
+        blocking = ["sleep 5", "time.sleep(2)", "Thread.sleep(2000)",
+                    "time.Sleep(1 * time.Second)", "pg_sleep(1)", "SELECT pg_sleep(1);",
+                    "Start-Sleep -Seconds 3", "select(undef, undef, undef, 1)", "timeout /T 5"]
+        for payload in blocking:
+            self.assertTrue(self.gen._is_blocking(payload), payload)
+        for payload in ["id", "cat /etc/passwd", "setTimeout(()=>x,1000)", "whoami"]:
+            self.assertFalse(self.gen._is_blocking(payload), payload)
+
     def test_blocking_excluded_by_default(self):
         records = list(self.gen.generate_payload_records(
             mode="detection", include_blocking=False, max_safety="stateful",

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -331,7 +331,17 @@ class RCEPayloadGenerator:
 
     def _is_blocking(self, payload: str) -> bool:
         lower_payload = payload.lower()
-        return any(token in lower_payload for token in ["tail -f", "sleep ", "timeout /t", "start-sleep", "readline()", "while(($i ="])
+        if any(token in lower_payload for token in
+               ["tail -f", "start-sleep", "timeout /t", "readline()", "while(($i =", "select(undef"]):
+            return True
+        # Sleep family across languages: "sleep 5" (shell), time.sleep()/Thread.sleep()/
+        # time.Sleep() (dot form), pg_sleep(), or a bare sleep( call. The old check only
+        # matched "sleep " (with a space), so time.sleep(2) etc. were misclassified.
+        if re.search(r"\bsleep\s", lower_payload):
+            return True
+        if re.search(r"(^|[^a-z0-9_])(pg_)?sleep\(", lower_payload) or ".sleep(" in lower_payload:
+            return True
+        return False
 
     def _is_stateful(self, payload: str) -> bool:
         lower_payload = payload.lower()

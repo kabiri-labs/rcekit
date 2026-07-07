@@ -1,6 +1,6 @@
 # RCEPayloadGen — RCE Testing Toolkit
 
-**Version 1.1.2** · MIT · Python 3.8+ · no third-party dependencies
+**Version 1.1.3** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
