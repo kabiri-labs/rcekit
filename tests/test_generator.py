@@ -458,6 +458,27 @@ class GeneratorTestCase(unittest.TestCase):
         # A separator-led variant must survive.
         self.assertIn("; id", [r.payload for r in filtered])
 
+    def test_sink_needs_separator_judges_encoded_payloads_by_canonical_form(self):
+        # Separator-validity must be decided on the pre-encoding payload, not the
+        # final string: a url-encoded bare command still can't fire mid-command,
+        # while a url-encoded break-out still can.
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none", "url_encode"],
+        ))
+        filtered = list(self.gen._filter_by_profile(records, needs_separator=True))
+        # Encoded bare command (decodes to plain "id") cannot break out -> dropped.
+        self.assertIn("id", [r.payload for r in records])
+        self.assertNotIn("id", [r.payload for r in filtered])
+        # Encoded break-out (";" percent-escaped) is still a valid separator once
+        # the sink decodes it, so it must survive even though its literal form no
+        # longer starts with a separator.
+        self.assertIn("%3B%20id", [r.payload for r in records])
+        self.assertIn("%3B%20id", [r.payload for r in filtered])
+        # Nothing that survives should be an encoded bare command.
+        for record in filtered:
+            self.assertTrue(record.separator_led)
+
     def test_sink_blind_keeps_only_out_of_band_confirmable(self):
         records = list(self.gen.generate_payload_records(
             selected_categories=["basic_enum", "oob"], selected_environments=["unix"],
