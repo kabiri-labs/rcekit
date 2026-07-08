@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1099,18 +1099,36 @@ class RCEKit:
         )
 
     def _evaluate_verify(self, record: PayloadRecord, status: Optional[int], body: str,
-                         elapsed: float, baseline: float) -> Tuple[str, str]:
-        """Apply the payload's built-in oracle to a target response."""
+                         elapsed: float, baseline: float, margin: float = 2.0,
+                         control_body: str = "", elapsed_confirm: Optional[float] = None) -> Tuple[str, str]:
+        """Apply the payload's built-in oracle to a target response.
+
+        The verdicts are *differential* so ``confirmed`` means execution, not
+        coincidence:
+
+        * **timing** — a candidate delay must clear ``baseline`` by ``margin``
+          (a noise-aware threshold, not a fixed constant) *and* reproduce on a
+          second fire (``elapsed_confirm``); a one-off slow response is jitter,
+          not a sleep, and is reported ``no-delay``.
+        * **reflection** — a ``match`` that is already present in the
+          payload-free ``control_body`` is not evidence of execution, so it is
+          reported ``inconclusive`` rather than a false ``confirmed``.
+        """
         if status is None:
             return "error", body[:80]
         if record.expected_channel == "interactsh":
             return "oob-pending", f"watch token {record.token} at your OOB listener"
         if record.expected_channel == "timing" or record.blocking:
-            if elapsed - baseline >= 2.0:
-                return "confirmed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s"
-            return "no-delay", f"{elapsed:.1f}s"
+            if elapsed - baseline < margin:
+                return "no-delay", f"{elapsed:.1f}s vs baseline {baseline:.1f}s (needs +{margin:.1f}s)"
+            if elapsed_confirm is not None and elapsed_confirm - baseline < margin:
+                return "no-delay", (f"delay {elapsed:.1f}s did not reproduce on re-fire "
+                                    f"({elapsed_confirm:.1f}s vs baseline {baseline:.1f}s)")
+            return "confirmed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s (margin {margin:.1f}s)"
         if record.match:
             if re.search(record.match, body):
+                if control_body and re.search(record.match, control_body):
+                    return "inconclusive", f"signature /{record.match}/ also present without the payload"
                 return "confirmed", f"matched /{record.match}/"
             return "no-match", ""
         return "no-signature", "no machine-readable oracle for this payload"
@@ -1151,8 +1169,22 @@ class RCEKit:
             except Exception as exc:  # network error, timeout, etc.
                 return None, str(exc), time.time() - start
 
-        # Baseline latency from a benign request, used by the timing oracle.
-        _, _, baseline = fire(f"rcekit-baseline-{self._generate_canary()}")
+        # Baseline from several benign requests: a single sample can be a cold
+        # start or a jitter spike, which would poison every timing verdict. Take
+        # a robust centre (median) plus a noise-aware margin (floored, but at
+        # least a few times the observed spread), and keep one payload-free body
+        # as the control for the reflection differential.
+        import statistics
+
+        baseline_samples: List[float] = []
+        control_body = ""
+        for _ in range(3):
+            _, cbody, sample = fire(f"rcekit-baseline-{self._generate_canary()}")
+            baseline_samples.append(sample)
+            control_body = cbody
+        baseline = statistics.median(baseline_samples)
+        spread = max(baseline_samples) - min(baseline_samples)
+        margin = max(2.0, 3 * spread)
 
         results: List[Dict[str, Any]] = []
         seen: Set[str] = set()
@@ -1161,7 +1193,14 @@ class RCEKit:
                 continue
             seen.add(record.payload)
             status, body, elapsed = fire(record.payload)
-            verdict, detail = self._evaluate_verify(record, status, body, elapsed, baseline)
+            # Only a candidate delay is worth a confirmatory re-fire; this keeps
+            # the extra request off the vast majority of payloads.
+            elapsed_confirm: Optional[float] = None
+            is_timing = record.expected_channel == "timing" or record.blocking
+            if is_timing and status is not None and elapsed - baseline >= margin:
+                _, _, elapsed_confirm = fire(record.payload)
+            verdict, detail = self._evaluate_verify(
+                record, status, body, elapsed, baseline, margin, control_body, elapsed_confirm)
             results.append({
                 "verdict": verdict, "detail": detail, "status": status,
                 "payload": record.payload, "category": record.category,
@@ -1553,6 +1592,12 @@ def main():
         if confirmed:
             print(f"\n[verify] CONFIRMED execution ({len(confirmed)}):")
             for result in confirmed:
+                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
+        inconclusive = [r for r in results if r["verdict"] == "inconclusive"]
+        if inconclusive:
+            print(f"\n[verify] {len(inconclusive)} INCONCLUSIVE (signature seen without the payload — "
+                  "the target reflects it regardless, so it is not proof of execution):")
+            for result in inconclusive:
                 print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
         oob_pending = [r for r in results if r["verdict"] == "oob-pending"]
         if oob_pending:
