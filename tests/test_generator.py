@@ -19,7 +19,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import rcekit  # noqa: E402
-from rcekit import OOBListener, RCEKit  # noqa: E402
+from rcekit import OOBListener, PayloadRecord, RCEKit  # noqa: E402
+
+
+def make_record(**overrides):
+    """A minimal PayloadRecord for exercising the verification oracle."""
+    base = dict(
+        payload="; id", mode="exploit", category="basic_enum", environment="unix",
+        context="raw", encoding="none", sink=None, indicator="", safety="intrusive",
+        expected_channel="response", runner="sh",
+    )
+    base.update(overrides)
+    return PayloadRecord(**base)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "rcekit.py"
@@ -635,6 +646,73 @@ class GeneratorTestCase(unittest.TestCase):
             confirmed = [r for r in results if r["verdict"] == "confirmed"]
             self.assertTrue(confirmed, "the harness must confirm at least one RCE")
             self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_timing_oracle_requires_a_reproducible_delay(self):
+        # A blocking/timing payload is only "confirmed" when the delay clears the
+        # noise margin AND reproduces on the re-fire; a one-off spike is jitter.
+        rec = make_record(payload="; sleep 8", expected_channel="timing", blocking=True)
+        confirmed, _ = self.gen._evaluate_verify(
+            rec, 200, "", elapsed=8.4, baseline=1.0, margin=2.0, elapsed_confirm=8.1)
+        self.assertEqual(confirmed, "confirmed")
+        # First request was slow but the delay did not reproduce -> not execution.
+        jitter, _ = self.gen._evaluate_verify(
+            rec, 200, "", elapsed=8.4, baseline=1.0, margin=2.0, elapsed_confirm=1.2)
+        self.assertEqual(jitter, "no-delay")
+        # Below the margin at all -> not a delay.
+        quick, _ = self.gen._evaluate_verify(
+            rec, 200, "", elapsed=1.5, baseline=1.0, margin=2.0, elapsed_confirm=None)
+        self.assertEqual(quick, "no-delay")
+
+    def test_reflection_oracle_rejects_signature_present_without_payload(self):
+        # The command-output signature confirms execution only when it is absent
+        # from the payload-free control response.
+        rec = make_record(payload="; id", match=r"uid=\d+", expected_channel="response")
+        confirmed, _ = self.gen._evaluate_verify(
+            rec, 200, "uid=0(root) gid=0(root)", elapsed=0.1, baseline=0.1,
+            control_body="welcome home")
+        self.assertEqual(confirmed, "confirmed")
+        # Same signature already in the baseline response -> not proof of execution.
+        inconclusive, _ = self.gen._evaluate_verify(
+            rec, 200, "uid=0(root) gid=0(root)", elapsed=0.1, baseline=0.1,
+            control_body="debug: uid=0(root) always shown")
+        self.assertEqual(inconclusive, "inconclusive")
+
+    def test_verify_marks_always_reflected_signature_inconclusive(self):
+        # End-to-end: a target that echoes the signature regardless of input must
+        # not be reported as a confirmed RCE.
+        import http.server
+        import socketserver
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                # Signature present for every request, payload or not.
+                self.wfile.write(b"uid=0(root) gid=0(root) groups=0(root)")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            records = self.gen.generate_payload_records(
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            results = self.gen.run_verification(
+                records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ",
+            )
+            id_results = [r for r in results if r["payload"] == "; id"]
+            self.assertTrue(id_results)
+            self.assertEqual(id_results[0]["verdict"], "inconclusive")
+            self.assertFalse(any(r["verdict"] == "confirmed" for r in results),
+                             "a signature echoed regardless of payload must not confirm")
         finally:
             server.shutdown()
             server.server_close()
