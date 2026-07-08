@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -49,6 +49,7 @@ class PayloadRecord:
     blocking: bool = False
     stateful: bool = False
     destructive: bool = False
+    separator_led: bool = True
     token: Optional[str] = None
     oob_host: Optional[str] = None
     match: Optional[str] = None
@@ -708,6 +709,10 @@ class RCEKit:
                     token = self._generate_canary()
                     working = working.replace("{canary}", token)
 
+                # Decide separator-validity on the canonical payload, before any
+                # encoding hides (or spuriously reveals) the leading separator.
+                separator_led = self._is_separator_led(working, environment, context_name)
+
                 encoded_payload = self.encoding_methods[enc_name](working)
                 escape = context.get("escape", "none")
                 escaped_payload = self._escape_for_context(encoded_payload, escape)
@@ -750,6 +755,7 @@ class RCEKit:
                     blocking=blocking,
                     stateful=stateful,
                     destructive=destructive,
+                    separator_led=separator_led,
                     token=token,
                     oob_host=oob_host,
                     match=match,
@@ -763,14 +769,20 @@ class RCEKit:
     def _generate_canary(self) -> str:
         return ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(6))
 
-    def _is_separator_led(self, record: PayloadRecord) -> bool:
-        """True if the payload can break out of a mid-command injection point."""
-        if record.environment not in self.separator_envs:
+    def _is_separator_led(self, core: str, environment: str, context: str) -> bool:
+        """True if this canonical (pre-encoding) payload can break out of a
+        mid-command injection point.
+
+        Judged on the raw payload rather than the final encoded/wrapped string:
+        a url-encoded ``; id`` no longer *looks* separator-led once the ``;`` is
+        percent-escaped, but it still fires once the sink decodes it. Conversely
+        a bare ``id`` never fires mid-command no matter how it is encoded, so its
+        separator-validity must be decided before encoding is applied.
+        """
+        if environment not in self.separator_envs:
             return True  # non-shell sinks are not command-concatenation points
-        if record.context in {"shell_single_quoted", "shell_double_quoted"}:
+        if context in {"shell_single_quoted", "shell_double_quoted"}:
             return True  # quote break-outs supply their own separator
-        prefix = self.contexts.get(record.context, {}).get("prefix", "")
-        core = record.payload[len(prefix):] if prefix and record.payload.startswith(prefix) else record.payload
         return core.startswith(self.command_separators)
 
     def _filter_by_profile(
@@ -787,7 +799,8 @@ class RCEKit:
           (checked on the final wrapped/encoded payload, so a URL-encoded quote
           survives a quote filter because the literal character is gone).
         * ``needs_separator`` (sink concatenates input mid shell command) keeps
-          only unencoded payloads that begin with a command separator.
+          only payloads whose canonical form begins with a command separator, so
+          an encoded break-out survives while an encoded bare command does not.
         * ``blind`` (sink returns no output) keeps only payloads confirmable
           out-of-band: timing (blocking) or OOB callbacks.
         """
@@ -797,7 +810,7 @@ class RCEKit:
                 continue
             if denied and any(char in record.payload for char in denied):
                 continue
-            if needs_separator and record.encoding == "none" and not self._is_separator_led(record):
+            if needs_separator and not record.separator_led:
                 continue
             if blind and not (record.blocking or record.oob_host or record.expected_channel == "interactsh"):
                 continue
