@@ -18,7 +18,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("rce_generator.log"),
+        logging.FileHandler("rcekit.log"),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "1.3.0"
+__version__ = "2.0.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -53,7 +53,7 @@ class PayloadRecord:
     oob_host: Optional[str] = None
     match: Optional[str] = None
 
-class RCEPayloadGenerator:
+class RCEKit:
     def __init__(
         self,
         attacker_ip: str = "192.168.1.100",
@@ -197,7 +197,7 @@ class RCEPayloadGenerator:
 
     def apply_watermark(self, payload: str, env: str, context_name: str, marker: str) -> str:
         """Embed a watermark comment or command into generated payloads where feasible."""
-        watermark_token = f"RCEPayloadGen-ID:{marker}"
+        watermark_token = f"RCEKit-ID:{marker}"
 
         if context_name == "attribute":
             logger.debug("Skipping watermark injection for attribute context due to quoting constraints.")
@@ -962,7 +962,7 @@ class RCEPayloadGenerator:
             header
             + "POST /vulnerable-endpoint HTTP/1.1\n"
             "Host: TARGET-HOST\n"
-            "User-Agent: rcpayloadgen\n"
+            "User-Agent: rcekit\n"
             "Content-Type: application/x-www-form-urlencoded\n"
             "Connection: close\n"
             "\n"
@@ -973,11 +973,11 @@ class RCEPayloadGenerator:
                       request_template: Optional[Dict[str, Any]] = None) -> int:
         """Emit Nuclei templates grouped by environment and oracle (OOB / time-based / reflection)."""
         # A profile request block shapes the raw request; otherwise a generic
-        # GET ?rcpg=<payload> is used.
+        # GET ?rcekit=<payload> is used.
         raw_request = self._render_request(request_template, "{{url_encode(payload)}}", "{{payload}}", "{{Hostname}}")
         outdir = self._format_outdir(output_path, "nuclei")
         outdir.mkdir(parents=True, exist_ok=True)
-        canary = "RCEPGCANARY"
+        canary = "RCEKITCANARY"
         groups: "Dict[Tuple[str, str], List[str]]" = {}
         seen: "Dict[Tuple[str, str], Set[str]]" = {}
         sleep_tokens = ("sleep", "timeout", "start-sleep", "pg_sleep", "thread.sleep", "time.sleep")
@@ -1023,7 +1023,7 @@ class RCEPayloadGenerator:
         try:
             for (env, oracle), payloads in groups.items():
                 template = self._nuclei_template(env, oracle, payloads, canary, raw_request)
-                (outdir / f"rcpg-{env}-{oracle}.yaml").write_text(template, encoding="utf-8")
+                (outdir / f"rcekit-{env}-{oracle}.yaml").write_text(template, encoding="utf-8")
             logger.info("Nuclei templates written to %s/ (%s templates, %s payloads)", outdir, len(groups), count)
         except Exception as exc:
             logger.error("Error writing Nuclei output to %s: %s", outdir, exc)
@@ -1036,7 +1036,7 @@ class RCEPayloadGenerator:
             request_lines = "\n".join(f"        {line}" for line in raw_request.split("\n")) + "\n\n"
             request_desc = "the request defined by the target profile"
         else:
-            request_lines = "        GET /?rcpg={{url_encode(payload)}} HTTP/1.1\n        Host: {{Hostname}}\n\n"
+            request_lines = "        GET /?rcekit={{url_encode(payload)}} HTTP/1.1\n        Host: {{Hostname}}\n\n"
             request_desc = "a URL parameter"
         if oracle == "oob":
             name = f"Out-of-band RCE probe ({env})"
@@ -1066,13 +1066,13 @@ class RCEPayloadGenerator:
                 f"          - \"{canary}\""
             )
         return (
-            f"id: rcpg-{env}-{oracle}\n\n"
+            f"id: rcekit-{env}-{oracle}\n\n"
             "info:\n"
             f"  name: {name}\n"
-            "  author: rcpayloadgen\n"
+            "  author: rcekit\n"
             "  severity: high\n"
             f"  description: Injects {env} RCE payloads into {request_desc} and confirms execution via the {oracle} oracle.\n"
-            f"  tags: rce,rcpayloadgen,{env},{oracle}\n\n"
+            f"  tags: rce,rcekit,{env},{oracle}\n\n"
             "http:\n"
             "  - raw:\n"
             "      - |\n"
@@ -1120,7 +1120,7 @@ class RCEPayloadGenerator:
             encoded = urllib.parse.quote(payload, safe="")
             target = url.replace(MARK, encoded)
             body = data.replace(MARK, encoded).encode() if data else None
-            hdrs: Dict[str, str] = {"User-Agent": "rcpayloadgen-verify"}
+            hdrs: Dict[str, str] = {"User-Agent": "rcekit-verify"}
             for header in headers or []:
                 name, _, value = header.partition(":")
                 hdrs[name.strip()] = value.strip().replace(MARK, payload)
@@ -1139,7 +1139,7 @@ class RCEPayloadGenerator:
                 return None, str(exc), time.time() - start
 
         # Baseline latency from a benign request, used by the timing oracle.
-        _, _, baseline = fire(f"rcpg-baseline-{self._generate_canary()}")
+        _, _, baseline = fire(f"rcekit-baseline-{self._generate_canary()}")
 
         results: List[Dict[str, Any]] = []
         seen: Set[str] = set()
@@ -1449,7 +1449,7 @@ def main():
 
     template_path = Path(args.template_file) if args.template_file else None
     # Initialize generator
-    generator = RCEPayloadGenerator(
+    generator = RCEKit(
         attacker_ip=args.attacker_ip,
         attacker_domain=args.attacker_domain,
         template_path=template_path,

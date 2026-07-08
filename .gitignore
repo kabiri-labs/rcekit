@@ -1,4 +1,4 @@
-# Generated payload artifacts (regenerate with rce_payload_gen.py)
+# Generated payload artifacts (regenerate with rcekit.py)
 rce_payloads.txt
 *.meta.jsonl
 *.map.jsonl
@@ -6,7 +6,7 @@ rce_payloads.txt
 *_nuclei/
 
 # Runtime logs / audit trails
-rce_generator.log
+rcekit.log
 exploit_audit.log
 *.log
 

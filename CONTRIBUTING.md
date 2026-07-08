@@ -1,11 +1,11 @@
-# Contributing to RCEPayloadGen
+# Contributing to RCEKit
 
-Thanks for your interest in improving RCEPayloadGen! This document explains how
+Thanks for your interest in improving RCEKit! This document explains how
 to contribute effectively and the standards the project holds itself to.
 
 ## Scope & ethics
 
-RCEPayloadGen is an **RCE testing toolkit for authorised security testing**.
+RCEKit is an **RCE testing toolkit for authorised security testing**.
 Contributions are welcome, but by opening a pull request you agree that your
 change is intended for lawful, authorised use only (penetration testing,
 security research, education, and defensive tooling).
@@ -30,6 +30,6 @@ Please **do not** submit:
 ## Development setup
 
 ```bash
-git clone https://github.com/kabiri-labs/rcpayloadgen.git
-cd rcpayloadgen        # Python 3.8+, standard library only — no dependencies
+git clone https://github.com/kabiri-labs/rcekit.git
+cd rcekit        # Python 3.8+, standard library only — no dependencies
 python -m unittest discover -s tests

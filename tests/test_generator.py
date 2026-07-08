@@ -1,4 +1,4 @@
-"""Unit tests for RCEPayloadGenerator.
+"""Unit tests for RCEKit.
 
 Run with: python -m unittest discover -s tests  (no third-party deps required)
 
@@ -18,16 +18,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import rce_payload_gen  # noqa: E402
-from rce_payload_gen import OOBListener, RCEPayloadGenerator  # noqa: E402
+import rcekit  # noqa: E402
+from rcekit import OOBListener, RCEKit  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = REPO_ROOT / "rce_payload_gen.py"
+SCRIPT = REPO_ROOT / "rcekit.py"
 
 
 class VersionTestCase(unittest.TestCase):
     def test_version_is_semver(self):
-        self.assertRegex(rce_payload_gen.__version__, r"^\d+\.\d+\.\d+$")
+        self.assertRegex(rcekit.__version__, r"^\d+\.\d+\.\d+$")
 
 
 class CLITestCase(unittest.TestCase):
@@ -138,7 +138,7 @@ class OOBListenerTestCase(unittest.TestCase):
 
 class GeneratorTestCase(unittest.TestCase):
     def setUp(self):
-        self.gen = RCEPayloadGenerator()
+        self.gen = RCEKit()
 
     def test_templates_loaded(self):
         self.assertTrue(self.gen.payload_categories, "payload categories should load")
@@ -260,7 +260,7 @@ class GeneratorTestCase(unittest.TestCase):
             selected_environments=["unix", "python"],
         ))
         self.assertTrue(records)
-        self.assertFalse(any("RCEPayloadGen-ID" in r.payload for r in records))
+        self.assertFalse(any("RCEKit-ID" in r.payload for r in records))
 
     def test_code_payloads_not_quote_wrapped(self):
         records = list(self.gen.generate_payload_records(

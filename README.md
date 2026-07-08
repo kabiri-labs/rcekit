@@ -1,8 +1,8 @@
-# RCEPayloadGen — RCE Testing Toolkit
+# RCEKit — RCE Testing Toolkit
 
-**Version 1.3.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.0.0** · MIT · Python 3.8+ · no third-party dependencies
 
-RCEPayloadGen is an offensive **RCE testing toolkit** for authorised penetration
+RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
 payload generation:
 
@@ -23,8 +23,8 @@ payload generation:
 ## Install
 
 ```bash
-git clone https://github.com/kabiri-labs/rcpayloadgen.git
-cd rcpayloadgen        # Python 3.8+, standard library only
+git clone https://github.com/kabiri-labs/rcekit.git
+cd rcekit        # Python 3.8+, standard library only
 ```
 
 Generated payload files (`*.txt`, `*.meta.jsonl`, `*.map.jsonl`) and runtime logs
@@ -34,20 +34,20 @@ are `.gitignore`d and regenerated on demand.
 
 ```bash
 # 1. Benign probes (no consent needed) — check whether your input reaches a sink
-python rce_payload_gen.py --detection-only --output detect.txt
+python rcekit.py --detection-only --output detect.txt
 
 # 2. Generate targeted payloads for an authorised engagement
-python rce_payload_gen.py --acknowledge-consent \
+python rcekit.py --acknowledge-consent \
   --environments unix --categories basic_enum file_operations waf_bypass \
   --output payloads.txt
 
 # 3. Fire them at an authorised target and auto-confirm what executed
-python rce_payload_gen.py --acknowledge-consent \
+python rcekit.py --acknowledge-consent \
   --environments unix --categories basic_enum file_operations waf_bypass \
   --verify-url "https://target.example/lookup?host=FUZZ"
 
 # 4. Catch blind / out-of-band callbacks and map them back to payloads
-python rce_payload_gen.py --listen --correlate payloads.txt.map.jsonl
+python rcekit.py --listen --correlate payloads.txt.map.jsonl
 ```
 
 Exploitation payloads require `--acknowledge-consent`; `--detection-only` is benign
@@ -190,7 +190,7 @@ is a small JSON file (fields supply defaults; explicit CLI flags override them):
 ```
 
 ```bash
-python rce_payload_gen.py --acknowledge-consent --target-profile profiles/shell-concat-noquotes.json
+python rcekit.py --acknowledge-consent --target-profile profiles/shell-concat-noquotes.json
 ```
 
 - `deny_chars` / `max_length` filter the **final** payload — a URL-encoded quote survives a quote filter because the literal character is gone.
@@ -199,7 +199,7 @@ python rce_payload_gen.py --acknowledge-consent --target-profile profiles/shell-
 A profile may also carry a **`request`** block describing the target request
 (URL/path, method, headers, body) with a `FUZZ` marker. The `burp` and `nuclei`
 exports then shape their output to the real endpoint instead of a generic
-`?rcpg=` parameter:
+`?rcekit=` parameter:
 
 ```json
 "request": {
@@ -220,7 +220,7 @@ executed, using each payload's oracle. Put a `FUZZ` marker where the payload goe
 POST with `--verify-data`).
 
 ```bash
-python rce_payload_gen.py --acknowledge-consent \
+python rcekit.py --acknowledge-consent \
   --environments unix --categories basic_enum file_operations waf_bypass \
   --verify-url "https://target.example/lookup?host=FUZZ"
 ```
@@ -246,9 +246,9 @@ it, via the token in a `.map.jsonl` manifest — no separate interactsh required
 
 ```bash
 # generate OOB payloads (writes oob.txt + oob.txt.map.jsonl), then listen
-python rce_payload_gen.py --acknowledge-consent --categories oob \
+python rcekit.py --acknowledge-consent --categories oob \
   --oob-domain your-id.oob.example.com --output oob.txt
-python rce_payload_gen.py --listen --correlate oob.txt.map.jsonl \
+python rcekit.py --listen --correlate oob.txt.map.jsonl \
   --listen-http-port 8080 --listen-dns-port 53
 ```
 
@@ -272,7 +272,7 @@ at the listener.
 - **Consent gate** — exploitation generation and `--verify-url` require `--acknowledge-consent`; `--detection-only` is benign and does not.
 - **Audit log** — every exploitation/verification run is recorded in `exploit_audit.log`. `--watermark` additionally embeds a traceable token in each payload.
 - **Safety tiers** — `safe` / `intrusive` / `stateful`, filtered by `--max-safety` (stateful and blocking probes are excluded by default).
-- **Logging** — execution logs go to `rce_generator.log`.
+- **Logging** — execution logs go to `rcekit.log`.
 
 This toolkit is intended for authorised penetration testing, security research and
 education, and defensive training only. **Never use it against systems without

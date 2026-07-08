@@ -1,6 +1,6 @@
 # Security Policy
 
-RCEPayloadGen is an offensive **RCE testing toolkit for authorised security
+RCEKit is an offensive **RCE testing toolkit for authorised security
 testing**. This policy covers vulnerabilities **in the tool itself** — please
 read the scope section, because generating attack payloads is the tool's
 intended function, not a vulnerability.
@@ -28,7 +28,7 @@ privately:
 
 Please include:
 
-- the version (`python rce_payload_gen.py --version`),
+- the version (`python rcekit.py --version`),
 - a clear description and minimal steps to reproduce,
 - the impact and any suggested fix.
 
