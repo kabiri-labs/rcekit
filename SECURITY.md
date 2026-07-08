@@ -12,7 +12,7 @@ Only the latest released version is supported. Fixes ship in a new version
 
 | Version | Supported |
 |---------|-----------|
-| latest `1.x` | ✅ |
+| latest `2.x` | ✅ |
 | older | ❌ |
 
 ## Reporting a vulnerability
