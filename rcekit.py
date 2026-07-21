@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.3.1"
+__version__ = "2.4.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -53,6 +53,7 @@ class PayloadRecord:
     token: Optional[str] = None
     oob_host: Optional[str] = None
     match: Optional[str] = None
+    expected_delay_ms: Optional[int] = None
 
 class RCEKit:
     def __init__(
@@ -344,6 +345,60 @@ class RCEKit:
         if re.search(r"(^|[^a-z0-9_])(pg_)?sleep\(", lower_payload) or ".sleep(" in lower_payload:
             return True
         return False
+
+    def _expected_delay_ms(self, payload: str, environment: str) -> Optional[int]:
+        """Best-effort parse of a blocking payload's intended delay, in
+        milliseconds. The runtime disambiguates the seconds-vs-milliseconds
+        sleep APIs (``time.sleep(2)`` is 2s in Python but ``Thread.sleep(2000)``
+        is 2000ms in Java). Returns ``None`` when no delay can be determined, so
+        the verifier falls back to its conservative fixed floor."""
+        low = payload.lower()
+
+        def sec(value: str) -> int:
+            return int(round(float(value) * 1000))
+
+        # Explicit, unambiguous units first.
+        match = re.search(r"-milliseconds\s+([\d.]+)", low)
+        if match:
+            return int(round(float(match.group(1))))
+        match = re.search(r"-seconds\s+([\d.]+)", low)
+        if match:
+            return sec(match.group(1))
+        match = re.search(r"timeout\s+/t\s+([\d.]+)", low)
+        if match:
+            return sec(match.group(1))
+        # Go: time.Sleep(N * time.Second|Millisecond).
+        match = re.search(r"time\.sleep\(\s*([\d.]+)\s*\*\s*time\.(second|millisecond)", low)
+        if match:
+            return sec(match.group(1)) if match.group(2) == "second" else int(round(float(match.group(1))))
+        # Perl: select(undef, undef, undef, N) -> seconds.
+        match = re.search(r"select\(\s*undef\s*,\s*undef\s*,\s*undef\s*,\s*([\d.]+)", low)
+        if match:
+            return sec(match.group(1))
+        # Java / .NET Thread.Sleep(N) -> milliseconds.
+        if "thread.sleep(" in low:
+            match = re.search(r"thread\.sleep\(\s*([\d.]+)", low)
+            if match:
+                return int(round(float(match.group(1))))
+        # Node: setTimeout(cb, N) -> milliseconds.
+        match = re.search(r"settimeout\([^,]*,\s*([\d.]+)\s*\)", low)
+        if match:
+            return int(round(float(match.group(1))))
+        # SQL sleep helpers -> seconds.
+        if environment in {"sql"}:
+            match = re.search(r"(?:pg_sleep|sleep)\(\s*([\d.]+)", low)
+            if match:
+                return sec(match.group(1))
+        # Python / Ruby sleep(N)/time.sleep(N) -> seconds.
+        if environment in {"python", "ruby"}:
+            match = re.search(r"sleep\(\s*([\d.]+)", low)
+            if match:
+                return sec(match.group(1))
+        # Shell `sleep N` (seconds); also the generic fallback.
+        match = re.search(r"\bsleep\s+([\d.]+)", low)
+        if match:
+            return sec(match.group(1))
+        return None
 
     def _is_stateful(self, payload: str) -> bool:
         lower_payload = payload.lower()
@@ -688,6 +743,7 @@ class RCEKit:
     ) -> Iterator[PayloadRecord]:
         context = self.contexts[context_name]
         destructive = self._is_destructive(payload, category)
+        expected_delay_ms = self._expected_delay_ms(payload, environment) if blocking else None
         for enc_name in encodings:
             if enc_name not in self.encoding_methods or not self._encoding_is_compatible(enc_name, runner):
                 continue
@@ -759,6 +815,7 @@ class RCEKit:
                     token=token,
                     oob_host=oob_host,
                     match=match,
+                    expected_delay_ms=expected_delay_ms,
                 )
             except Exception as exc:
                 logger.error("Error encoding payload with %s: %s", enc_name, exc)
@@ -1232,9 +1289,13 @@ class RCEKit:
         coincidence:
 
         * **timing** — a candidate delay must clear ``baseline`` by ``margin``
-          (a noise-aware threshold, not a fixed constant) *and* reproduce on a
+          (a noise-aware threshold that adapts to the payload's own
+          ``expected_delay_ms``, not a fixed constant) *and* reproduce on a
           second fire (``elapsed_confirm``); a one-off slow response is jitter,
-          not a sleep, and is reported ``no-delay``.
+          not a sleep, and is reported ``no-delay``. A request that hangs past
+          the timeout (``status is None``) is itself a signal for a sleep
+          payload — reported ``timing-candidate-on-timeout`` rather than a flat
+          ``error`` — since the timeout may be the expected delay.
         * **reflection** — a ``match`` that is also present in ``control_body``
           is not evidence of execution, so it is reported ``inconclusive``
           rather than a false ``confirmed``. For a canary token the caller
@@ -1243,17 +1304,28 @@ class RCEKit:
           execution; for a command-output signature the control is the
           payload-free baseline response.
         """
-        if status is None:
-            return "error", body[:80]
+        # OOB is confirmed out-of-band, so a timed-out delivery request does not
+        # change the verdict — check it before the generic status==None error.
         if record.expected_channel == "interactsh":
             return "oob-pending", f"watch token {record.token} at your OOB listener"
         if record.expected_channel == "timing" or record.blocking:
+            if status is None:
+                # The delivery request hung past the timeout. For a sleep payload
+                # that hang is the signal, but we could not measure it, so flag a
+                # candidate the operator can confirm with a larger --verify-timeout.
+                if elapsed - baseline >= margin:
+                    return "timing-candidate-on-timeout", (
+                        f"request hung {elapsed:.1f}s (>= timeout) vs baseline {baseline:.1f}s; "
+                        "raise --verify-timeout above the expected delay to confirm")
+                return "error", body[:80]
             if elapsed - baseline < margin:
                 return "no-delay", f"{elapsed:.1f}s vs baseline {baseline:.1f}s (needs +{margin:.1f}s)"
             if elapsed_confirm is not None and elapsed_confirm - baseline < margin:
                 return "no-delay", (f"delay {elapsed:.1f}s did not reproduce on re-fire "
                                     f"({elapsed_confirm:.1f}s vs baseline {baseline:.1f}s)")
             return "confirmed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s (margin {margin:.1f}s)"
+        if status is None:
+            return "error", body[:80]
         if record.match:
             if re.search(record.match, body):
                 if control_body and re.search(record.match, control_body):
@@ -1286,13 +1358,13 @@ class RCEKit:
         if data is not None:
             logger.info("Verification body injected as '%s'", resolved_body_location)
 
-        def fire(payload: str):
+        def fire(payload: str, req_timeout: Optional[float] = None):
             target, body, hdrs = self._build_verify_request(
                 payload, url, data, headers, url_location, resolved_body_location)
             request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
             start = time.time()
             try:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
+                with urllib.request.urlopen(request, timeout=req_timeout or timeout) as response:
                     return response.status, response.read().decode(errors="replace"), time.time() - start
             except urllib.error.HTTPError as exc:
                 return exc.code, exc.read().decode(errors="replace"), time.time() - start
@@ -1314,7 +1386,7 @@ class RCEKit:
             control_body = cbody
         baseline = statistics.median(baseline_samples)
         spread = max(baseline_samples) - min(baseline_samples)
-        margin = max(2.0, 3 * spread)
+        noise = 3 * spread
 
         results: List[Dict[str, Any]] = []
         seen: Set[str] = set()
@@ -1322,13 +1394,26 @@ class RCEKit:
             if record.payload in seen:
                 continue
             seen.add(record.payload)
-            status, body, elapsed = fire(record.payload)
+            is_timing = record.expected_channel == "timing" or record.blocking
+            # Adapt the confirmation threshold and the request timeout to the
+            # payload's own expected delay. A known short sleep (e.g. 1s) only
+            # needs to clear the measured noise plus half its expected delay, so
+            # it is no longer unverifiable under the old flat 2s floor; an unknown
+            # delay keeps the conservative 2s floor. The timeout is stretched past
+            # the expected delay so the sleep can complete instead of timing out.
+            expected = (record.expected_delay_ms / 1000.0) if (is_timing and record.expected_delay_ms) else None
+            if expected is not None:
+                margin = max(0.5, noise, 0.5 * expected)
+                req_timeout = max(timeout, baseline + expected + 2.0)
+            else:
+                margin = max(2.0, noise)
+                req_timeout = timeout
+            status, body, elapsed = fire(record.payload, req_timeout if is_timing else None)
             # Only a candidate delay is worth a confirmatory re-fire; this keeps
             # the extra request off the vast majority of payloads.
             elapsed_confirm: Optional[float] = None
-            is_timing = record.expected_channel == "timing" or record.blocking
             if is_timing and status is not None and elapsed - baseline >= margin:
-                _, _, elapsed_confirm = fire(record.payload)
+                _, _, elapsed_confirm = fire(record.payload, req_timeout)
             # Paired negative control for a reflected canary. The canary token
             # sits verbatim in the payload, so a target that merely echoes input
             # returns it without executing anything. Re-fire the SAME token in an
@@ -1754,6 +1839,12 @@ def main():
         oob_pending = [r for r in results if r["verdict"] == "oob-pending"]
         if oob_pending:
             print(f"\n[verify] {len(oob_pending)} OOB payloads sent — check your listener for the tokens.")
+        timing_candidates = [r for r in results if r["verdict"] == "timing-candidate-on-timeout"]
+        if timing_candidates:
+            print(f"\n[verify] {len(timing_candidates)} TIMING CANDIDATES timed out (the hang may be the "
+                  "expected delay — raise --verify-timeout above it to confirm):")
+            for result in timing_candidates:
+                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
         if not confirmed and not oob_pending:
             print("\n[verify] No execution confirmed. The target may be patched, or the payloads "
                   "may not fit its sink/context (try --target-profile or a different --environments/--contexts).")
