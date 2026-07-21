@@ -553,8 +553,62 @@ class GeneratorTestCase(unittest.TestCase):
             self.assertGreater(count, 0)
             outdir = Path(tmp) / "run_burp"
             self.assertTrue((outdir / "payloads-all.txt").exists())
-            self.assertTrue((outdir / "request.txt").exists())
             self.assertTrue(any(outdir.glob("payloads-*.txt")))
+            # Without a target profile Burp users set positions themselves, so no
+            # generic placeholder request is fabricated.
+            self.assertFalse((outdir / "request.txt").exists())
+
+    def test_wordlist_export_honours_selected_encodings(self):
+        # The exporter must not silently drop encoded variants: an encoding the
+        # tools cannot reproduce (or simply one the user asked for) belongs in the
+        # wordlist as a literal line.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="burp",
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none", "base64_decode_exec"],
+            )
+            allp = (Path(tmp) / "run_burp" / "payloads-all.txt").read_text()
+            self.assertIn("; id", allp)
+            self.assertTrue(any("base64 -d" in line for line in allp.splitlines()),
+                            "self-contained encoded variants must survive into the wordlist")
+
+    def test_ffuf_export_with_profile_is_runnable(self):
+        request = {"url": "https://target.example/api/v1/lookup", "method": "POST",
+                   "headers": {"Content-Type": "application/json"},
+                   "body": '{"host": "FUZZ"}'}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="ffuf", request_template=request,
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            outdir = Path(tmp) / "run_ffuf"
+            self.assertTrue((outdir / "payloads-all.txt").exists())
+            req = (outdir / "request.txt").read_text()
+            # A real FUZZ marker, not Burp's section sign.
+            self.assertIn('{"host": "FUZZ"}', req)
+            self.assertNotIn("\xa7", req)
+            run = (outdir / "run.sh").read_text()
+            self.assertIn("ffuf -request request.txt -w payloads-all.txt", run)
+            self.assertIn("-request-proto https", run)
+
+    def test_ffuf_export_without_profile_writes_wordlists_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            count = self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="ffuf",
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            self.assertGreater(count, 0)
+            outdir = Path(tmp) / "run_ffuf"
+            self.assertTrue((outdir / "payloads-all.txt").exists())
+            # No injection point -> no fabricated request or runner.
+            self.assertFalse((outdir / "request.txt").exists())
+            self.assertFalse((outdir / "run.sh").exists())
 
     def test_export_is_profile_request_aware(self):
         request = {"url": "/api/v1/lookup", "method": "POST",

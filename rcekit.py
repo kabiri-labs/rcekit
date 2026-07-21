@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -846,6 +846,8 @@ class RCEKit:
 
         if output_format == "burp":
             return self._write_burp(output_path, records, max_payloads, request_template)
+        if output_format == "ffuf":
+            return self._write_ffuf(output_path, records, max_payloads, request_template)
         if output_format == "nuclei":
             return self._write_nuclei(output_path, records, max_payloads, request_template)
 
@@ -931,18 +933,20 @@ class RCEKit:
             rendered += "\n\n" + body.replace("FUZZ", other_sub)
         return rendered
 
-    def _write_burp(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
-                    request_template: Optional[Dict[str, Any]] = None) -> int:
-        """Write deduplicated, watermark-free payload wordlists grouped by injection context."""
-        outdir = self._format_outdir(output_path, "burp")
-        outdir.mkdir(parents=True, exist_ok=True)
-        groups: "Dict[str, List[str]]" = {}
+    def _write_wordlists(self, outdir: Path, records: Iterator[PayloadRecord],
+                         max_payloads: Optional[int]) -> Tuple[int, Dict[str, List[str]]]:
+        """Write deduplicated, watermark-free payload wordlists grouped by
+        injection context (``payloads-<context>.txt`` plus a combined
+        ``payloads-all.txt``). Whatever encodings the caller selected are honoured
+        as-is — the wordlist is the literal set of strings to fuzz with, so a
+        ``base64_decode_exec`` or ``random_case`` variant (which Burp/ffuf cannot
+        reproduce with a processing rule) is kept rather than silently dropped.
+        For a raw-only list, generate with ``--encodings none``.
+        """
+        groups: Dict[str, List[str]] = {}
         seen: Set[str] = set()
         count = 0
         for record in records:
-            # Emit the unencoded payloads; Burp/ffuf apply their own encoding.
-            if record.encoding != "none":
-                continue
             if record.payload in seen:
                 continue
             seen.add(record.payload)
@@ -950,37 +954,76 @@ class RCEKit:
             count += 1
             if max_payloads and count >= max_payloads:
                 break
+        for context_name, items in groups.items():
+            (outdir / f"payloads-{context_name}.txt").write_text("\n".join(items) + "\n", encoding="utf-8")
+        all_items = [p for items in groups.values() for p in items]
+        (outdir / "payloads-all.txt").write_text("\n".join(all_items) + "\n", encoding="utf-8")
+        return count, groups
+
+    def _write_burp(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
+                    request_template: Optional[Dict[str, Any]] = None) -> int:
+        """Write context-split payload wordlists for Burp Intruder.
+
+        A ``request.txt`` (with Burp's ``\xa7...\xa7`` position marker) is written
+        only when a target profile supplies a real request; without one Burp users
+        set the injection point themselves from a captured request, so no generic
+        placeholder request is emitted.
+        """
+        outdir = self._format_outdir(output_path, "burp")
+        outdir.mkdir(parents=True, exist_ok=True)
+        count = 0
         try:
-            for context_name, items in groups.items():
-                (outdir / f"payloads-{context_name}.txt").write_text("\n".join(items) + "\n", encoding="utf-8")
-            all_items = [p for items in groups.values() for p in items]
-            (outdir / "payloads-all.txt").write_text("\n".join(all_items) + "\n", encoding="utf-8")
-            (outdir / "request.txt").write_text(self._burp_request_template(request_template), encoding="utf-8")
-            logger.info("Burp/ffuf wordlists written to %s/ (%s payloads across %s context files)", outdir, count, len(groups))
+            count, groups = self._write_wordlists(outdir, records, max_payloads)
+            rendered = self._render_request(request_template, "\xa7payload\xa7", "\xa7payload\xa7", "")
+            if rendered:
+                (outdir / "request.txt").write_text(
+                    "# Burp Intruder: load payloads-*.txt as a payload set; the \xa7...\xa7\n"
+                    "# marker below is the injection point from your target profile.\n"
+                    + rendered + "\n", encoding="utf-8")
+                hint = "request.txt from the target profile"
+            else:
+                hint = "set the payload position in Burp from your captured request"
+            logger.info("Burp wordlists written to %s/ (%s payloads across %s context files; %s)",
+                        outdir, count, len(groups), hint)
         except Exception as exc:
             logger.error("Error writing Burp output to %s: %s", outdir, exc)
         return count
 
-    def _burp_request_template(self, request_template: Optional[Dict[str, Any]] = None) -> str:
-        header = (
-            "# Burp Intruder: load payloads-*.txt as a payload set; the injection\n"
-            "# point is Burp's position marker (\xa7...\xa7 below).\n"
-            "# ffuf: replace the marker with FUZZ and run\n"
-            "#   ffuf -request request.txt -w payloads-all.txt:FUZZ\n"
-        )
-        rendered = self._render_request(request_template, "\xa7payload\xa7", "\xa7payload\xa7", "")
-        if rendered:
-            return header + rendered + "\n"
-        return (
-            header
-            + "POST /vulnerable-endpoint HTTP/1.1\n"
-            "Host: TARGET-HOST\n"
-            "User-Agent: rcekit\n"
-            "Content-Type: application/x-www-form-urlencoded\n"
-            "Connection: close\n"
-            "\n"
-            "vulnerable_param=\xa7payload\xa7\n"
-        )
+    def _write_ffuf(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
+                    request_template: Optional[Dict[str, Any]] = None) -> int:
+        """Write ffuf wordlists plus, when a target profile supplies a request, a
+        ready-to-run ``request.txt`` (with a real ``FUZZ`` marker) and ``run.sh``.
+
+        Without a request/injection point ffuf has nowhere to inject, so only the
+        wordlists are written and the caller is warned — no unusable placeholder
+        request is fabricated.
+        """
+        outdir = self._format_outdir(output_path, "ffuf")
+        outdir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        try:
+            count, _ = self._write_wordlists(outdir, records, max_payloads)
+            rendered = self._render_request(request_template, "FUZZ", "FUZZ", "")
+            if rendered:
+                (outdir / "request.txt").write_text(rendered + "\n", encoding="utf-8")
+                from urllib.parse import urlsplit
+                proto = urlsplit((request_template or {}).get("url", "")).scheme or "https"
+                run = outdir / "run.sh"
+                run.write_text(
+                    "#!/bin/sh\n"
+                    f"ffuf -request request.txt -w payloads-all.txt -request-proto {proto}\n",
+                    encoding="utf-8")
+                run.chmod(0o755)
+                logger.info("ffuf export written to %s/ (%s payloads; request.txt + run.sh ready)", outdir, count)
+            else:
+                logger.warning(
+                    "ffuf export: no target request/FUZZ marker supplied, so only wordlists were written "
+                    "to %s/. For a runnable attack, pass --target-profile with a `request` block "
+                    "(URL/method/headers/body containing FUZZ) so request.txt and run.sh can be generated.",
+                    outdir)
+        except Exception as exc:
+            logger.error("Error writing ffuf output to %s: %s", outdir, exc)
+        return count
 
     def _write_nuclei(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
                       request_template: Optional[Dict[str, Any]] = None) -> int:
@@ -1390,8 +1433,8 @@ def main():
                         help="Path to a custom payload template file (JSON or YAML)")
     parser.add_argument("--detection-only", action="store_true",
                         help="Generate benign payloads for detection and validation")
-    parser.add_argument("--output-format", choices=["text", "jsonl", "burp", "nuclei"], default="text",
-                        help="text/jsonl single file, burp (per-context wordlists + request template), or nuclei (runnable templates)")
+    parser.add_argument("--output-format", choices=["text", "jsonl", "burp", "ffuf", "nuclei"], default="text",
+                        help="text/jsonl single file, burp (per-context wordlists + optional Burp request), ffuf (wordlists + ready request.txt/run.sh when a profile request is given), or nuclei (runnable templates)")
     parser.add_argument("--oob-domain", default=None,
                         help="Collaborator/interactsh domain for out-of-band payloads; each payload gets a unique subdomain token")
     parser.add_argument("--verify-url", default=None,

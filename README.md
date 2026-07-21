@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.1.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.2.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -17,7 +17,7 @@ payload generation:
 - **Sink-aware target profiles** — describe the target once (denied characters, max length, needs-separator, blind, decodes-input) and emit only payloads that could actually fire.
 - **Auto-verification** — `--verify-url` fires payloads at an authorised target and reports which executed, using each payload's built-in oracle: a `match` regex, a reflected canary, or a timing delay. Confirmation is **differential**, so `confirmed` means execution and not coincidence: a timing hit must clear a noise-aware margin over a multi-sample baseline *and* reproduce on a re-fire, and a command-output signature already present in the payload-free response is reported `inconclusive` instead of a false positive.
 - **Built-in OOB listener** — `--listen` receives HTTP/DNS callbacks and correlates each back to the exact payload, closing the blind-RCE loop without a separate interactsh/Collaborator.
-- **Tooling integrations** — export as Burp/ffuf wordlists or runnable Nuclei templates with built-in OOB / time-based / reflection oracles.
+- **Tooling integrations** — export as context-split Burp wordlists, a ready-to-run ffuf attack (`request.txt` + `run.sh`) when a target profile is given, or runnable Nuclei templates with built-in OOB / time-based / reflection oracles.
 - **Safe by default** — a benign `--detection-only` canary mode, safety tiers, a consent gate, and audit logging.
 
 ## Install
@@ -62,7 +62,7 @@ and does not. Only run any of this against systems you are authorised to test.
 | `--categories` | Categories to generate | All |
 | `--contexts` | Injection contexts to generate | Default (language/structural) set |
 | `--encodings` | Encodings to apply | Default (self-contained) set |
-| `--output-format` | `text`, `jsonl`, `burp`, or `nuclei` | `text` |
+| `--output-format` | `text`, `jsonl`, `burp`, `ffuf`, or `nuclei` | `text` |
 | `--max-payloads` | Cap the number of payloads | Unlimited |
 | `--attacker-ip` / `--attacker-domain` | Substituted into reverse-shell / download payloads | `192.168.1.100` / `attacker.com` |
 | `--template-file` | Custom JSON/YAML payload templates | `templates/payloads.json` |
@@ -270,8 +270,11 @@ at the listener.
 ## Output Formats & Integrations
 
 - **`text` / `jsonl`** — payloads (or full JSONL records). A `<output>.map.jsonl` manifest is written for every payload that has an oracle — a correlation `token` or a machine-readable `match` regex — so a callback, reflected canary, or command-output signature is traceable to one payload and auto-confirmable.
-- **`burp`** — a `<output>_burp/` directory of deduplicated, watermark-free wordlists split per context, a combined `payloads-all.txt`, and a `request.txt` template. Load into Burp Intruder or `ffuf -request request.txt -w payloads-all.txt:FUZZ`.
+- **`burp`** — a `<output>_burp/` directory of deduplicated, watermark-free wordlists split per context (`payloads-<context>.txt`) plus a combined `payloads-all.txt`. Load a list as a Burp Intruder payload set and set the injection point from your captured request. A `request.txt` (with Burp's `§…§` position marker) is written **only** when a `--target-profile` supplies a real request — no generic placeholder is fabricated.
+- **`ffuf`** — a `<output>_ffuf/` directory with the same wordlists and, when a `--target-profile` supplies a `request` block, a ready-to-run `request.txt` (with a real `FUZZ` marker) and an executable `run.sh` (`ffuf -request request.txt -w payloads-all.txt -request-proto <scheme>`). Without a request there is nowhere to inject, so only the wordlists are written and a warning is printed.
 - **`nuclei`** — a `<output>_nuclei/` directory of runnable templates grouped by environment and oracle: OOB (`interactsh_protocol`), time-based (`duration>=6`), and reflection (canary in body). For the fullest pack, run `--detection-only --output-format nuclei`.
+
+The `burp`/`ffuf` wordlists honour whatever `--encodings` you selected: each distinct final payload is emitted as a literal line, so self-contained variants like `base64_decode_exec` (which Burp/ffuf can't reproduce with a processing rule) are kept. For a raw-only list, generate with `--encodings none`.
 
 ## Safety & Ethics
 
