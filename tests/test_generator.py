@@ -1175,5 +1175,54 @@ class VerifySafeByDefaultTestCase(unittest.TestCase):
             server.server_close()
 
 
+class DoctorTestCase(unittest.TestCase):
+    """Corpus integrity check and hard-fail on a missing/empty corpus."""
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        )
+
+    def test_check_integrity_ok_on_shipped_corpus(self):
+        ok, report = RCEKit().check_integrity()
+        self.assertTrue(ok)
+        self.assertTrue(any("file loaded and parsed" in line for line in report))
+
+    def test_check_integrity_fails_on_missing_corpus(self):
+        gen = RCEKit(template_path=Path("/no/such/corpus.json"))
+        ok, report = gen.check_integrity()
+        self.assertFalse(ok)
+        self.assertTrue(any("FAIL" in line for line in report))
+        self.assertFalse(gen.corpus_ready("exploit")[0])
+        self.assertFalse(gen.corpus_ready("detection")[0])
+
+    def test_corpus_ready_is_mode_aware(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tf = Path(tmp) / "only_detection.json"
+            tf.write_text(json.dumps(
+                {"detection_payloads": {"unix": ["echo DETECTION_{canary}"]}}))
+            gen = RCEKit(template_path=tf)
+            self.assertTrue(gen.corpus_ready("detection")[0])
+            self.assertFalse(gen.corpus_ready("exploit")[0])  # no exploit categories
+
+    def test_doctor_cli_exit_codes(self):
+        good = self._run("--doctor")
+        self.assertEqual(good.returncode, 0)
+        self.assertIn("[doctor] OK", good.stdout)
+        bad = self._run("--doctor", "--template-file", "/no/such/corpus.json")
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("PROBLEMS FOUND", bad.stdout)
+
+    def test_run_hard_fails_on_missing_corpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "d.txt"
+            res = self._run("--detection-only", "--template-file", "/no/such/corpus.json",
+                            "-o", str(out))
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("Refusing to run", res.stdout)
+            self.assertFalse(out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

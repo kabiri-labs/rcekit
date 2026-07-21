@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.5.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.6.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -53,6 +53,10 @@ python rcekit.py --listen --correlate payloads.txt.map.jsonl
 Exploitation payloads require `--acknowledge-consent`; `--detection-only` is benign
 and does not. Only run any of this against systems you are authorised to test.
 
+If the payload corpus is missing or corrupt (for example quarantined by EDR after
+clone), RCEKit refuses to run and exits non-zero instead of silently generating
+nothing. Run `python rcekit.py --doctor` to check corpus integrity.
+
 ## Options
 
 | Option | Description | Default |
@@ -66,6 +70,7 @@ and does not. Only run any of this against systems you are authorised to test.
 | `--max-payloads` | Cap the number of payloads | Unlimited |
 | `--attacker-ip` / `--attacker-domain` | Substituted into reverse-shell / download payloads | `192.168.1.100` / `attacker.com` |
 | `--template-file` | Custom JSON/YAML payload templates | `templates/payloads.json` |
+| `--doctor` | Check corpus integrity (template found, parses, payload counts) and exit non-zero if missing/empty | Off |
 | `--detection-only` | Benign canary/timing probes for safe validation | Off |
 | `--include-metadata` | Write a `.meta.jsonl` sidecar (indicators, safety tiers, notes) | Off |
 | `--max-safety` | Highest safety tier: `safe`, `intrusive`, `stateful` | `safe` (detection) / `intrusive` |
