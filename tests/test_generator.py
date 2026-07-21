@@ -610,6 +610,53 @@ class GeneratorTestCase(unittest.TestCase):
             self.assertFalse((outdir / "request.txt").exists())
             self.assertFalse((outdir / "run.sh").exists())
 
+    def test_ffuf_export_path_only_profile_is_not_runnable(self):
+        # A path-only URL cannot name the target host, so ffuf has nothing to run
+        # against -> wordlists only, no misleading request.txt/run.sh pointing at
+        # a placeholder host.
+        request = {"url": "/api/v1/lookup", "method": "POST",
+                   "headers": {"Content-Type": "application/json"},
+                   "body": '{"host": "FUZZ"}'}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="ffuf", request_template=request,
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["json"], selected_encodings=["none"],
+            )
+            outdir = Path(tmp) / "run_ffuf"
+            self.assertTrue((outdir / "payloads-all.txt").exists())
+            self.assertFalse((outdir / "request.txt").exists())
+            self.assertFalse((outdir / "run.sh").exists())
+
+    def test_ffuf_export_clears_stale_request_artifacts(self):
+        # A profile-backed run followed by a wordlist-only run on the same output
+        # directory must not leave the old request.txt/run.sh behind, or an
+        # operator could fire a stale runner at the previous target.
+        abs_request = {"url": "https://target.example/api/v1/lookup", "method": "POST",
+                       "headers": {"Content-Type": "application/json"},
+                       "body": '{"host": "FUZZ"}'}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run.txt"
+            outdir = Path(tmp) / "run_ffuf"
+            # First run: concrete host -> request.txt + run.sh created.
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="ffuf", request_template=abs_request,
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["json"], selected_encodings=["none"],
+            )
+            self.assertTrue((outdir / "request.txt").exists())
+            self.assertTrue((outdir / "run.sh").exists())
+            # Second run on the same dir with no profile -> stale runner is gone.
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="ffuf",
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            self.assertTrue((outdir / "payloads-all.txt").exists())
+            self.assertFalse((outdir / "request.txt").exists())
+            self.assertFalse((outdir / "run.sh").exists())
+
     def test_export_is_profile_request_aware(self):
         request = {"url": "/api/v1/lookup", "method": "POST",
                    "headers": {"Content-Type": "application/json"},
