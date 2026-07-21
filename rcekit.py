@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -991,36 +991,45 @@ class RCEKit:
 
     def _write_ffuf(self, output_path: Path, records: Iterator[PayloadRecord], max_payloads: Optional[int],
                     request_template: Optional[Dict[str, Any]] = None) -> int:
-        """Write ffuf wordlists plus, when a target profile supplies a request, a
-        ready-to-run ``request.txt`` (with a real ``FUZZ`` marker) and ``run.sh``.
+        """Write ffuf wordlists plus, when a target profile supplies a request
+        with a concrete host, a ready-to-run ``request.txt`` (with a real ``FUZZ``
+        marker) and ``run.sh``.
 
-        Without a request/injection point ffuf has nowhere to inject, so only the
-        wordlists are written and the caller is warned — no unusable placeholder
-        request is fabricated.
+        Without a request/injection point — or with only a path-only URL that
+        can't name the target host — ffuf has nothing runnable to point at, so
+        only the wordlists are written, any stale request/runner is removed, and
+        the caller is warned. No unusable placeholder request is fabricated.
         """
+        from urllib.parse import urlsplit
         outdir = self._format_outdir(output_path, "ffuf")
         outdir.mkdir(parents=True, exist_ok=True)
+        request_path = outdir / "request.txt"
+        run_path = outdir / "run.sh"
         count = 0
         try:
             count, _ = self._write_wordlists(outdir, records, max_payloads)
             rendered = self._render_request(request_template, "FUZZ", "FUZZ", "")
-            if rendered:
-                (outdir / "request.txt").write_text(rendered + "\n", encoding="utf-8")
-                from urllib.parse import urlsplit
-                proto = urlsplit((request_template or {}).get("url", "")).scheme or "https"
-                run = outdir / "run.sh"
-                run.write_text(
+            # ffuf parses the Host from the raw request itself, so a runnable
+            # export needs a concrete host — a path-only profile URL only yields a
+            # `Host: TARGET-HOST` placeholder, which would run against nothing.
+            parts = urlsplit((request_template or {}).get("url", "") if request_template else "")
+            if rendered and parts.netloc:
+                request_path.write_text(rendered + "\n", encoding="utf-8")
+                run_path.write_text(
                     "#!/bin/sh\n"
-                    f"ffuf -request request.txt -w payloads-all.txt -request-proto {proto}\n",
+                    f"ffuf -request request.txt -w payloads-all.txt -request-proto {parts.scheme or 'https'}\n",
                     encoding="utf-8")
-                run.chmod(0o755)
+                run_path.chmod(0o755)
                 logger.info("ffuf export written to %s/ (%s payloads; request.txt + run.sh ready)", outdir, count)
             else:
+                # Wordlist-only: never leave a stale runnable request behind from a
+                # previous profile-backed run against a different target.
+                request_path.unlink(missing_ok=True)
+                run_path.unlink(missing_ok=True)
                 logger.warning(
-                    "ffuf export: no target request/FUZZ marker supplied, so only wordlists were written "
-                    "to %s/. For a runnable attack, pass --target-profile with a `request` block "
-                    "(URL/method/headers/body containing FUZZ) so request.txt and run.sh can be generated.",
-                    outdir)
+                    "ffuf export: no runnable request (needs a --target-profile whose `request.url` is an "
+                    "absolute URL including the host, e.g. https://target.example/path, with a FUZZ marker), "
+                    "so only wordlists were written to %s/.", outdir)
         except Exception as exc:
             logger.error("Error writing ffuf output to %s: %s", outdir, exc)
         return count
