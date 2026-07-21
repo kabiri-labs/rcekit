@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -602,7 +602,7 @@ class RCEKit:
         include_blocking: bool = False,
         oob_domain: Optional[str] = None,
     ) -> Iterator[PayloadRecord]:
-        generated_payloads: Set[str] = set()
+        generated_payloads: Set[Tuple[str, str]] = set()
         contexts = selected_contexts if selected_contexts else list(self.default_contexts)
         encodings = selected_encodings if selected_encodings else (
             self.safe_detection_encodings if mode == "detection" else list(self.default_encodings)
@@ -725,7 +725,7 @@ class RCEKit:
         sink: Optional[str],
         context_name: str,
         encodings: List[str],
-        generated_payloads: Set[str],
+        generated_payloads: Set[Tuple[str, str]],
         mode: str,
         watermark_token: Optional[str],
         max_safety: str,
@@ -784,7 +784,7 @@ class RCEKit:
         payload: str,
         context_name: str,
         encodings: List[str],
-        generated_payloads: Set[str],
+        generated_payloads: Set[Tuple[str, str]],
         mode: str,
         category: str,
         environment: str,
@@ -832,9 +832,16 @@ class RCEKit:
                 escape = context.get("escape", "none")
                 escaped_payload = self._escape_for_context(encoded_payload, escape)
                 wrapped_payload = f"{context['prefix']}{escaped_payload}{context['suffix']}"
-                if wrapped_payload in generated_payloads:
+                # Dedup per environment, not by payload text alone: a command
+                # shared across environments (e.g. `whoami` on unix/docker/kube)
+                # keeps a record — and its provenance — for each, instead of
+                # collapsing to whichever environment happened to emit it first.
+                # Identical text within one environment still collapses; text
+                # outputs de-duplicate the lines again downstream.
+                dedup_key = (environment, wrapped_payload)
+                if dedup_key in generated_payloads:
                     continue
-                generated_payloads.add(wrapped_payload)
+                generated_payloads.add(dedup_key)
 
                 final_notes = list(notes)
                 if enc_name not in {"none", "url_encode", "double_url_encode"}:
@@ -932,6 +939,26 @@ class RCEKit:
                 continue
             yield record
 
+    @staticmethod
+    def _interleave(records: Iterator[PayloadRecord], key) -> Iterator[PayloadRecord]:
+        """Reorder records round-robin across buckets keyed by ``key`` so a
+        downstream ``--max-payloads`` cap yields a balanced sample spanning
+        categories/environments/sinks instead of exhausting the first bucket
+        (the old cap returned only the first category/environment/context).
+        Relative order within each bucket is preserved."""
+        from collections import deque
+        buckets: Dict[Any, "deque"] = {}
+        for record in records:
+            buckets.setdefault(key(record), deque()).append(record)
+        queues = list(buckets.values())
+        while queues:
+            nxt = []
+            for queue in queues:
+                yield queue.popleft()
+                if queue:
+                    nxt.append(queue)
+            queues = nxt
+
     def save_payloads_to_file(
         self,
         file_path: str,
@@ -959,6 +986,10 @@ class RCEKit:
         records = self.generate_payload_records(**kwargs)
         if deny_chars or max_length or needs_separator or blind:
             records = self._filter_by_profile(records, deny_chars, max_length, needs_separator, blind)
+        # When capping, interleave so the cap samples across the whole corpus
+        # rather than exhausting the first category/environment/context.
+        if max_payloads:
+            records = self._interleave(records, key=lambda r: (r.category, r.environment, r.sink))
 
         if output_format == "burp":
             return self._write_burp(output_path, records, max_payloads, request_template)
@@ -974,15 +1005,25 @@ class RCEKit:
         try:
             with output_path.open("w", encoding="utf-8") as file:
                 metadata_file = metadata_path.open("w", encoding="utf-8") if include_metadata and output_format == "text" else None
+                # Text output is a plain wordlist, so collapse duplicate payload
+                # lines that the per-environment records now produce; jsonl and
+                # the .map/.meta sidecars keep every record so multi-environment
+                # provenance is preserved.
+                text_seen: Set[str] = set()
                 try:
                     for record in records:
                         serialized = json.dumps(asdict(record), ensure_ascii=True)
                         if output_format == "jsonl":
                             file.write(serialized + "\n")
+                            wrote = True
+                        elif record.payload in text_seen:
+                            wrote = False
                         else:
                             file.write(record.payload + "\n")
                             if metadata_file:
                                 metadata_file.write(serialized + "\n")
+                            text_seen.add(record.payload)
+                            wrote = True
                         if record.token or record.match:
                             manifest.append({
                                 "token": record.token,
@@ -998,9 +1039,10 @@ class RCEKit:
                                 "match": record.match,
                                 "destructive": record.destructive,
                             })
-                        count += 1
-                        if max_payloads and count >= max_payloads:
-                            break
+                        if wrote:
+                            count += 1
+                            if max_payloads and count >= max_payloads:
+                                break
                 finally:
                     if metadata_file:
                         metadata_file.close()
@@ -1955,6 +1997,11 @@ def main():
                     yield record
 
             records = _drop_destructive(records)
+        # When capping, interleave so --max-payloads fires a balanced sample
+        # across categories/environments instead of exhausting the first bucket.
+        if args.max_payloads:
+            records = generator._interleave(
+                records, key=lambda r: (r.category, r.environment, r.sink))
         # Materialise (this also tallies the destructive skips) and show an
         # execution plan before anything is fired.
         records = list(records)

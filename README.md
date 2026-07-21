@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.6.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.7.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -67,7 +67,7 @@ nothing. Run `python rcekit.py --doctor` to check corpus integrity.
 | `--contexts` | Injection contexts to generate | Default (language/structural) set |
 | `--encodings` | Encodings to apply | Default (self-contained) set |
 | `--output-format` | `text`, `jsonl`, `burp`, `ffuf`, or `nuclei` | `text` |
-| `--max-payloads` | Cap the number of payloads | Unlimited |
+| `--max-payloads` | Cap the number of payloads (balanced round-robin sample across categories/environments) | Unlimited |
 | `--attacker-ip` / `--attacker-domain` | Substituted into reverse-shell / download payloads | `192.168.1.100` / `attacker.com` |
 | `--template-file` | Custom JSON/YAML payload templates | `templates/payloads.json` |
 | `--doctor` | Check corpus integrity (template found, parses, payload counts) and exit non-zero if missing/empty | Off |

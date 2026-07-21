@@ -1120,6 +1120,52 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertEqual(len(capped), 1)
 
 
+    def test_interleave_round_robins_buckets(self):
+        recs = ([make_record(payload=f"u{i}", environment="unix") for i in range(3)]
+                + [make_record(payload=f"w{i}", environment="windows") for i in range(2)])
+        out = list(RCEKit._interleave(recs, key=lambda r: r.environment))
+        self.assertEqual(len(out), 5)
+        # The first two span both buckets instead of exhausting 'unix' first.
+        self.assertEqual(out[0].environment, "unix")
+        self.assertEqual(out[1].environment, "windows")
+
+    def test_shared_payload_keeps_per_environment_provenance(self):
+        records = list(self.gen.generate_payload_records(
+            selected_categories=["basic_enum"], selected_environments=["unix", "windows"],
+            selected_contexts=["raw"], selected_encodings=["none"]))
+        whoami_envs = {r.environment for r in records if r.payload == "whoami"}
+        # A command shared across environments keeps a record for each, not just
+        # whichever emitted it first.
+        self.assertIn("unix", whoami_envs)
+        self.assertIn("windows", whoami_envs)
+
+    def test_max_payloads_samples_across_buckets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "c.jsonl"
+            self.gen.save_payloads_to_file(
+                file_path=str(out), max_payloads=30, output_format="jsonl",
+                selected_encodings=["none"])
+            rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            self.assertLessEqual(len(rows), 30)
+            self.assertGreater(len({r["category"] for r in rows}), 1,
+                               "a capped run must span more than one category")
+            self.assertGreater(len({r["environment"] for r in rows}), 1,
+                               "a capped run must span more than one environment")
+
+    def test_text_output_has_no_duplicate_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "c.txt"
+            self.gen.save_payloads_to_file(
+                file_path=str(out), output_format="text",
+                selected_categories=["basic_enum"],
+                selected_environments=["unix", "windows"],
+                selected_contexts=["raw"], selected_encodings=["none"])
+            lines = [line for line in out.read_text().splitlines() if line.strip()]
+            self.assertTrue(lines)
+            self.assertEqual(len(lines), len(set(lines)),
+                             "the text wordlist must not repeat payload lines")
+
+
 class VerifySafeByDefaultTestCase(unittest.TestCase):
     """The CLI must not fire high-impact payloads at a target by default."""
 
