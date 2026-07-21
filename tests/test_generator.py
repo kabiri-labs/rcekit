@@ -818,6 +818,103 @@ class GeneratorTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_encode_for_location(self):
+        # Each injection point gets its own on-the-wire encoding.
+        self.assertEqual(self.gen._encode_for_location("; id", "query_value"), "%3B%20id")
+        self.assertEqual(self.gen._encode_for_location("; id", "url_path"), "%3B%20id")
+        self.assertEqual(self.gen._encode_for_location("; id", "form_value"), "%3B+id")
+        # A JSON string body is escaped only — never percent-encoded.
+        self.assertEqual(self.gen._encode_for_location("; id", "json_string"), "; id")
+        self.assertEqual(self.gen._encode_for_location('a"b\\c', "json_string"), 'a\\"b\\\\c')
+        # Headers stay on one line.
+        self.assertEqual(self.gen._encode_for_location("a\r\nb", "header"), "a  b")
+        self.assertEqual(self.gen._encode_for_location("; id", "raw"), "; id")
+        with self.assertRaises(ValueError):
+            self.gen._encode_for_location("x", "bogus")
+
+    def test_detect_body_location(self):
+        # Body shape drives the default...
+        self.assertEqual(self.gen._detect_body_location('{"host": "FUZZ"}', []), "json_string")
+        self.assertEqual(self.gen._detect_body_location('host=FUZZ&x=1', []), "form_value")
+        self.assertEqual(self.gen._detect_body_location('FUZZ', []), "raw")
+        # ...and an explicit Content-Type wins over the shape.
+        self.assertEqual(
+            self.gen._detect_body_location('FUZZ', ["Content-Type: application/json"]), "json_string")
+        self.assertEqual(
+            self.gen._detect_body_location('FUZZ', ["Content-Type: application/x-www-form-urlencoded"]),
+            "form_value")
+
+    def test_build_verify_request_encodes_per_injection_point(self):
+        # The URL marker is percent-encoded (server URL-decodes it back)...
+        target, body, hdrs = self.gen._build_verify_request(
+            "; id", url="http://t/?x=FUZZ", data=None, headers=None,
+            url_location="query_value", body_location="raw")
+        self.assertEqual(target, "http://t/?x=%3B%20id")
+        # ...while a JSON body is escaped, NOT percent-encoded: the old blanket
+        # URL-encoding handed the sink a literal "%3B%20id" and broke every JSON
+        # injection. Regression guard for that bug.
+        _, body, _ = self.gen._build_verify_request(
+            "; id", url="http://t/api", data='{"host": "FUZZ"}', headers=None,
+            url_location="query_value", body_location="json_string")
+        self.assertEqual(body, b'{"host": "; id"}')
+        self.assertNotIn(b"%3B", body)
+        # Headers carry the payload verbatim on a single line.
+        _, _, hdrs = self.gen._build_verify_request(
+            "; id", url="http://t/", data=None, headers=["X-Fuzz: FUZZ"],
+            url_location="query_value", body_location="raw")
+        self.assertEqual(hdrs["X-Fuzz"], "; id")
+
+    def test_verify_confirms_execution_in_json_body(self):
+        # End-to-end regression: a JSON-body command-injection sink must be
+        # confirmed. With the old blanket URL-encoding the sink received
+        # "%3B%20id" and nothing ever executed.
+        import http.server
+        import json as _json
+        import os
+        import socketserver
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length).decode(errors="replace")
+                try:
+                    host = _json.loads(raw).get("host", "")
+                except Exception:
+                    host = ""
+                pipe = os.popen("echo " + host + " 2>&1")  # command injection sink
+                out = pipe.read()
+                pipe.close()
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            records = self.gen.generate_payload_records(
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"],
+            )
+            results = self.gen.run_verification(
+                records, url=f"http://127.0.0.1:{port}/api", method="POST",
+                data='{"host": "FUZZ"}',
+                headers=["Content-Type: application/json"],
+            )
+            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            self.assertTrue(confirmed, "a JSON-body RCE must be confirmed")
+            self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
