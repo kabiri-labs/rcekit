@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.2.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.3.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -76,6 +76,7 @@ and does not. Only run any of this against systems you are authorised to test.
 | `--oob-domain` | Collaborator/interactsh domain; each payload gets a unique subdomain token | None |
 | `--verify-url` | Authorised target URL with a `FUZZ` marker; fire and confirm execution | None |
 | `--verify-data` / `--verify-header` / `--verify-method` | Body (with `FUZZ`) / repeatable header / HTTP method | — |
+| `--verify-url-location` / `--verify-body-location` | How to encode the payload at the URL / body injection point | `query_value` / auto |
 | `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout | `0` / `8` |
 | `--verify-allow-destructive` | Let verification fire destructive payloads (persistence/backdoors); skipped by default | Off |
 | `--listen` + `--correlate <map.jsonl>` | Run the OOB listener and map callbacks to payloads | Off |
@@ -223,6 +224,23 @@ POST with `--verify-data`).
 python rcekit.py --acknowledge-consent \
   --environments unix --categories basic_enum file_operations waf_bypass \
   --verify-url "https://target.example/lookup?host=FUZZ"
+```
+
+The payload is encoded for the **injection point it lands in**, so it reaches the
+sink intact rather than being blanket URL-encoded. The URL marker is percent-
+encoded as a query value (`--verify-url-location url_path`/`raw` to change it),
+and the `--verify-data` marker is auto-detected from the `Content-Type`/body
+shape: a JSON body is JSON-escaped only (never percent-encoded, which would hand
+the sink a literal `%3B%20id`), an `x-www-form-urlencoded` body is form-encoded,
+anything else is sent verbatim. Override with `--verify-body-location
+json_string|form_value|raw`.
+
+```bash
+# JSON body: "; id" is delivered as-is inside the JSON string, not %3B%20id
+python rcekit.py --acknowledge-consent --environments unix --categories basic_enum \
+  --verify-url "https://target.example/api" --verify-method POST \
+  --verify-header "Content-Type: application/json" \
+  --verify-data '{"host": "FUZZ"}'
 ```
 
 ```

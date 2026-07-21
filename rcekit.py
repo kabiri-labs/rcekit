@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1150,6 +1150,79 @@ class RCEKit:
             f"{matcher}\n"
         )
 
+    # Injection-location encoders for live verification. Each turns the canonical
+    # payload (the exact bytes the sink must receive) into the on-the-wire form
+    # for one injection point, so the delivery layer never corrupts it:
+    #   * query_value / url_path — percent-encode; the server URL-decodes it back.
+    #   * form_value             — form percent-encode (x-www-form-urlencoded body).
+    #   * json_string            — JSON string escaping ONLY. A JSON body is not
+    #                              percent-decoded, so percent-encoding here would
+    #                              hand the sink the literal "%3B%20id" instead of
+    #                              "; id" and the oracle would never fire.
+    #   * header                 — keep the payload on one header line (strip CR/LF).
+    #   * raw                    — send verbatim (unknown/custom body).
+    _INJECTION_ENCODERS = {
+        "query_value": lambda p: urllib.parse.quote(p, safe=""),
+        "url_path": lambda p: urllib.parse.quote(p, safe="/"),
+        "form_value": lambda p: urllib.parse.quote_plus(p),
+        "json_string": lambda p: json.dumps(p)[1:-1],
+        "header": lambda p: p.replace("\r", " ").replace("\n", " "),
+        "raw": lambda p: p,
+    }
+
+    def _encode_for_location(self, payload: str, location: str) -> str:
+        encoder = self._INJECTION_ENCODERS.get(location)
+        if encoder is None:
+            raise ValueError(f"Unknown injection location: {location!r}")
+        return encoder(payload)
+
+    @staticmethod
+    def _content_type(headers: Optional[List[str]]) -> str:
+        for header in headers or []:
+            name, _, value = header.partition(":")
+            if name.strip().lower() == "content-type":
+                return value.strip().lower()
+        return ""
+
+    def _detect_body_location(self, data: Optional[str], headers: Optional[List[str]]) -> str:
+        """Pick the on-the-wire encoding for a payload injected into the request
+        body, from the Content-Type header first, then the body's own shape."""
+        ctype = self._content_type(headers)
+        if "json" in ctype:
+            return "json_string"
+        if "x-www-form-urlencoded" in ctype:
+            return "form_value"
+        stripped = (data or "").strip()
+        if stripped[:1] in "{[":
+            return "json_string"
+        if re.match(r"^[^\s=&]+=[^&]*(&[^\s=&]+=[^&]*)*$", stripped):
+            return "form_value"
+        return "raw"
+
+    def _build_verify_request(
+        self,
+        payload: str,
+        url: str,
+        data: Optional[str],
+        headers: Optional[List[str]],
+        url_location: str,
+        body_location: str,
+        mark: str = "FUZZ",
+    ) -> Tuple[str, Optional[bytes], Dict[str, str]]:
+        """Render one verification request, encoding the payload independently
+        for each injection point it lands in (URL / body / header). This replaces
+        the old blanket URL-encoding, which corrupted JSON bodies and
+        double-encoded already-encoded payloads."""
+        target = url.replace(mark, self._encode_for_location(payload, url_location))
+        body: Optional[bytes] = None
+        if data is not None:
+            body = data.replace(mark, self._encode_for_location(payload, body_location)).encode()
+        hdrs: Dict[str, str] = {"User-Agent": "rcekit-verify"}
+        for header in headers or []:
+            name, _, value = header.partition(":")
+            hdrs[name.strip()] = value.strip().replace(mark, self._encode_for_location(payload, "header"))
+        return target, body, hdrs
+
     def _evaluate_verify(self, record: PayloadRecord, status: Optional[int], body: str,
                          elapsed: float, baseline: float, margin: float = 2.0,
                          control_body: str = "", elapsed_confirm: Optional[float] = None) -> Tuple[str, str]:
@@ -1188,29 +1261,27 @@ class RCEKit:
     def run_verification(self, records: Iterator[PayloadRecord], url: str, method: str = "GET",
                          data: Optional[str] = None, headers: Optional[List[str]] = None,
                          delay: float = 0.0, timeout: float = 8.0,
-                         max_payloads: Optional[int] = None) -> List[Dict[str, Any]]:
+                         max_payloads: Optional[int] = None,
+                         url_location: str = "query_value",
+                         body_location: Optional[str] = None) -> List[Dict[str, Any]]:
         """Fire payloads at an AUTHORISED target and confirm execution via each
         payload's oracle (match regex / canary token / timing). The FUZZ marker in
-        the URL / data / headers is replaced with the payload.
+        the URL / data / headers is replaced with the payload, encoded for the
+        injection point it lands in: ``url_location`` for the URL, ``body_location``
+        for the request body (auto-detected from Content-Type/body shape when not
+        given), and single-line escaping for headers.
         """
         import time
         import urllib.request
         import urllib.error
 
-        MARK = "FUZZ"
-
-        def build(payload: str):
-            encoded = urllib.parse.quote(payload, safe="")
-            target = url.replace(MARK, encoded)
-            body = data.replace(MARK, encoded).encode() if data else None
-            hdrs: Dict[str, str] = {"User-Agent": "rcekit-verify"}
-            for header in headers or []:
-                name, _, value = header.partition(":")
-                hdrs[name.strip()] = value.strip().replace(MARK, payload)
-            return target, body, hdrs
+        resolved_body_location = body_location or self._detect_body_location(data, headers)
+        if data is not None:
+            logger.info("Verification body injected as '%s'", resolved_body_location)
 
         def fire(payload: str):
-            target, body, hdrs = build(payload)
+            target, body, hdrs = self._build_verify_request(
+                payload, url, data, headers, url_location, resolved_body_location)
             request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
             start = time.time()
             try:
@@ -1458,6 +1529,14 @@ def main():
                         help="Seconds to wait between verification requests (rate limiting)")
     parser.add_argument("--verify-timeout", type=float, default=8.0,
                         help="Per-request timeout for verification (seconds)")
+    parser.add_argument("--verify-url-location", choices=["query_value", "url_path", "raw"], default="query_value",
+                        help="How to encode the payload where FUZZ appears in --verify-url "
+                             "(default query_value: percent-encoded, as a query parameter)")
+    parser.add_argument("--verify-body-location", choices=["json_string", "form_value", "raw"], default=None,
+                        help="How to encode the payload where FUZZ appears in --verify-data "
+                             "(default: auto-detected from Content-Type/body shape). json_string "
+                             "escapes for a JSON body WITHOUT percent-encoding; form_value percent-"
+                             "encodes for x-www-form-urlencoded; raw sends it verbatim")
     parser.add_argument("--verify-allow-destructive", action="store_true",
                         help="Allow --verify-url to fire destructive payloads (persistence/backdoors/etc.); off by default")
     parser.add_argument("--listen", action="store_true",
@@ -1631,6 +1710,7 @@ def main():
             records, url=args.verify_url, method=method, data=args.verify_data,
             headers=args.verify_header, delay=args.verify_delay, timeout=args.verify_timeout,
             max_payloads=args.max_payloads,
+            url_location=args.verify_url_location, body_location=args.verify_body_location,
         )
         by_verdict: Dict[str, int] = {}
         for result in results:
