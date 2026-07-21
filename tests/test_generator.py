@@ -1004,6 +1004,97 @@ class GeneratorTestCase(unittest.TestCase):
         self.assertTrue(executed)
         self.assertEqual(executed[0]["verdict"], "confirmed")
 
+    def test_expected_delay_ms_is_runtime_aware(self):
+        cases = [
+            ("sleep 5", "unix", 5000),
+            ("sleep 2", "docker", 2000),
+            ("sleep 1", "ruby", 1000),
+            ("timeout /T 5", "windows", 5000),
+            ("Start-Sleep -Seconds 3", "powershell", 3000),
+            ("Start-Sleep -Milliseconds 500", "powershell", 500),
+            ("import time; time.sleep(2)", "python", 2000),
+            ("__import__('time').sleep(1)", "python", 1000),
+            ("Thread.sleep(2000)", "java", 2000),
+            ("System.Threading.Thread.Sleep(2000)", "dotnet", 2000),
+            ("select(undef, undef, undef, 1)", "perl", 1000),
+            ("time.Sleep(1 * time.Second)", "go", 1000),
+            ("SELECT pg_sleep(1)", "sql", 1000),
+            ("setTimeout(()=>console.log('x'), 1000)", "nodejs", 1000),
+            ("echo DETECTION_ABC", "unix", None),  # not a sleep
+        ]
+        for payload, env, expected in cases:
+            self.assertEqual(self.gen._expected_delay_ms(payload, env), expected,
+                             f"{payload!r} @ {env}")
+
+    def test_generated_blocking_record_carries_expected_delay(self):
+        records = list(self.gen.generate_payload_records(
+            mode="detection", selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"],
+            include_blocking=True))
+        sleeps = [r for r in records if r.payload == "sleep 5"]
+        self.assertTrue(sleeps, "the blocking 'sleep 5' detection payload should be present")
+        self.assertTrue(sleeps[0].blocking)
+        self.assertEqual(sleeps[0].expected_delay_ms, 5000)
+        # A non-blocking payload leaves the field unset.
+        echoes = [r for r in records if r.payload.startswith("echo DETECTION_")]
+        self.assertTrue(echoes)
+        self.assertIsNone(echoes[0].expected_delay_ms)
+
+    def test_oob_pending_survives_a_timed_out_delivery(self):
+        # An OOB payload is confirmed out-of-band, so a timed-out delivery
+        # request (status=None) must stay oob-pending, not become a flat error.
+        rec = make_record(payload="; curl http://x/", expected_channel="interactsh", token="TOK")
+        verdict, _ = self.gen._evaluate_verify(
+            rec, None, "timed out", elapsed=8.0, baseline=1.0, margin=2.0)
+        self.assertEqual(verdict, "oob-pending")
+
+    def test_timing_timeout_is_a_candidate_not_an_error(self):
+        rec = make_record(payload="; sleep 8", expected_channel="timing", blocking=True)
+        # Hung past the timeout for at least the margin -> the hang may be the
+        # sleep itself, so surface it as a candidate rather than a flat error.
+        verdict, _ = self.gen._evaluate_verify(
+            rec, None, "timed out", elapsed=6.0, baseline=1.0, margin=2.0)
+        self.assertEqual(verdict, "timing-candidate-on-timeout")
+        # A short hang that never cleared the margin is just an error.
+        verdict, _ = self.gen._evaluate_verify(
+            rec, None, "boom", elapsed=1.2, baseline=1.0, margin=2.0)
+        self.assertEqual(verdict, "error")
+
+    def test_verify_confirms_subsecond_sleep_via_expected_delay(self):
+        # A 1s sleep — impossible to confirm under the old flat 2s floor — is
+        # confirmed once the threshold adapts to the payload's expected delay.
+        import http.server
+        import socketserver
+        import threading
+        import time as _time
+        import urllib.parse as up
+
+        class Sleeper(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                q = up.parse_qs(up.urlparse(self.path).query)
+                host = q.get("host", [""])[0]
+                if "sleep" in host:
+                    _time.sleep(1.0)  # the injected 1s sleep executes here
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Sleeper)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            records = [make_record(payload="; sleep 1", expected_channel="timing",
+                                   blocking=True, expected_delay_ms=1000)]
+            results = self.gen.run_verification(
+                records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ")
+            self.assertEqual(results[0]["verdict"], "confirmed")
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
