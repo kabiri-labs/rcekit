@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1578,6 +1578,62 @@ class OOBListener:
         return True
 
 
+# Categories whose payloads have a real-world side effect when fired at a live
+# target (an outbound connection, a callback, credential access, a foothold),
+# as opposed to read-only enumeration. Surfaced in the verification plan and
+# held back unless the operator raises --verify-active-risk.
+HIGH_RISK_CATEGORIES = {
+    "reverse_shells", "download_execute", "credential_access",
+    "lateral_movement", "container_escape", "cloud_metadata", "persistence",
+}
+
+
+def build_verification_plan(records: List[PayloadRecord], method: str, url: str,
+                            attacker_ip: Optional[str] = None,
+                            attacker_domain: Optional[str] = None,
+                            max_payloads: Optional[int] = None):
+    """Summarise what a verification run will send *before* anything is fired,
+    so a high-impact set is never sent silently. Returns ``(lines, to_send)``
+    where ``to_send`` is the deduplicated, capped record list actually sent."""
+    to_send: List[PayloadRecord] = []
+    seen: Set[str] = set()
+    for record in records:
+        if record.payload in seen:
+            continue
+        seen.add(record.payload)
+        to_send.append(record)
+    if max_payloads:
+        to_send = to_send[:max_payloads]
+
+    by_safety: Dict[str, int] = {}
+    high_risk: Dict[str, int] = {}
+    destinations: Set[str] = set()
+    for record in to_send:
+        by_safety[record.safety] = by_safety.get(record.safety, 0) + 1
+        if record.category in HIGH_RISK_CATEGORIES:
+            high_risk[record.category] = high_risk.get(record.category, 0) + 1
+        if record.oob_host:
+            destinations.add(record.oob_host.split(".", 1)[-1] if "." in record.oob_host else record.oob_host)
+        if attacker_ip and attacker_ip in record.payload:
+            destinations.add(attacker_ip)
+        if attacker_domain and attacker_domain in record.payload:
+            destinations.add(attacker_domain)
+
+    lines = [
+        f"[plan] {method} {url}",
+        f"[plan] {len(to_send)} unique payloads to send"
+        + (f" (capped at --max-payloads {max_payloads})" if max_payloads else ""),
+        "[plan] safety tiers: " + (", ".join(f"{k}={v}" for k, v in sorted(by_safety.items())) or "none"),
+    ]
+    if high_risk:
+        lines.append("[plan] HIGH-IMPACT categories: "
+                     + ", ".join(f"{k}={v}" for k, v in sorted(high_risk.items())))
+    if destinations:
+        lines.append("[plan] network / out-of-band callback destinations: "
+                     + ", ".join(sorted(destinations)))
+    return lines, to_send
+
+
 def load_token_manifest(path: str) -> Dict[str, Dict[str, Any]]:
     """Load a .map.jsonl manifest into a token -> entry dict."""
     tokens: Dict[str, Dict[str, Any]] = {}
@@ -1644,6 +1700,11 @@ def main():
                              "encodes for x-www-form-urlencoded; raw sends it verbatim")
     parser.add_argument("--verify-allow-destructive", action="store_true",
                         help="Allow --verify-url to fire destructive payloads (persistence/backdoors/etc.); off by default")
+    parser.add_argument("--verify-active-risk", choices=["safe", "intrusive", "stateful"], default=None,
+                        help="Highest safety tier --verify-url may fire (default: safe). The default holds "
+                             "back reverse shells, download-execute, credential access, lateral movement, "
+                             "container escape, cloud-metadata and OOB payloads; pass 'intrusive' to include "
+                             "them. Independent of --max-safety, which only governs file output")
     parser.add_argument("--listen", action="store_true",
                         help="Run the built-in OOB listener (HTTP+DNS) that records callbacks and correlates them to payload tokens")
     parser.add_argument("--listen-http-port", type=int, default=8080,
@@ -1791,10 +1852,16 @@ def main():
         method = args.verify_method or ("POST" if args.verify_data else "GET")
         verify_token = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(8))
         generator.log_exploitation_usage(f"VERIFY:{verify_token} url={args.verify_url}", args)
+        # Safe by default: verification fires only low-impact proofs unless the
+        # operator explicitly raises the ceiling. This holds back reverse shells,
+        # download-execute, credential access, lateral movement, container
+        # escape, cloud-metadata and OOB payloads (all classified 'intrusive'),
+        # independent of --max-safety (which only governs file output).
+        verify_max_safety = args.verify_active_risk or "safe"
         records = generator.generate_payload_records(
             selected_contexts=selected_contexts, selected_categories=selected_categories,
             selected_encodings=selected_encodings, selected_environments=selected_environments,
-            mode=mode, watermark_token=watermark_token, max_safety=max_safety,
+            mode=mode, watermark_token=watermark_token, max_safety=verify_max_safety,
             include_blocking=include_blocking, oob_domain=oob_domain,
         )
         if deny_chars or max_length or needs_separator or blind:
@@ -1810,9 +1877,24 @@ def main():
                     yield record
 
             records = _drop_destructive(records)
+        # Materialise (this also tallies the destructive skips) and show an
+        # execution plan before anything is fired.
+        records = list(records)
+        plan_lines, to_send = build_verification_plan(
+            records, method, args.verify_url,
+            attacker_ip=generator.attacker_ip, attacker_domain=generator.attacker_domain,
+            max_payloads=args.max_payloads)
+        for line in plan_lines:
+            print(line)
+        if skipped_destructive[0]:
+            print(f"[plan] holding back {skipped_destructive[0]} destructive payloads "
+                  "(persistence/backdoors/etc.); pass --verify-allow-destructive to include them.")
+        if verify_max_safety == "safe":
+            print("[plan] low-impact (safe) payloads only; pass --verify-active-risk intrusive to also "
+                  "fire reverse shells, download-execute, credential access, lateral movement and OOB.")
         print(f"[verify] {method} {args.verify_url}  (authorised target)")
         results = generator.run_verification(
-            records, url=args.verify_url, method=method, data=args.verify_data,
+            to_send, url=args.verify_url, method=method, data=args.verify_data,
             headers=args.verify_header, delay=args.verify_delay, timeout=args.verify_timeout,
             max_payloads=args.max_payloads,
             url_location=args.verify_url_location, body_location=args.verify_body_location,
@@ -1823,9 +1905,6 @@ def main():
         confirmed = [r for r in results if r["verdict"] == "confirmed"]
         print(f"[verify] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
-        if skipped_destructive[0]:
-            print(f"[verify] skipped {skipped_destructive[0]} destructive payloads "
-                  "(persistence/backdoors/etc.); pass --verify-allow-destructive to include them.")
         if confirmed:
             print(f"\n[verify] CONFIRMED execution ({len(confirmed)}):")
             for result in confirmed:

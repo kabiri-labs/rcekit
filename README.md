@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.4.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.5.0** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -78,6 +78,7 @@ and does not. Only run any of this against systems you are authorised to test.
 | `--verify-data` / `--verify-header` / `--verify-method` | Body (with `FUZZ`) / repeatable header / HTTP method | — |
 | `--verify-url-location` / `--verify-body-location` | How to encode the payload at the URL / body injection point | `query_value` / auto |
 | `--verify-delay` / `--verify-timeout` | Seconds between requests / per-request timeout | `0` / `8` |
+| `--verify-active-risk` | Highest safety tier `--verify-url` may fire (`safe`/`intrusive`/`stateful`) | `safe` |
 | `--verify-allow-destructive` | Let verification fire destructive payloads (persistence/backdoors); skipped by default | Off |
 | `--listen` + `--correlate <map.jsonl>` | Run the OOB listener and map callbacks to payloads | Off |
 | `--listen-http-port` / `--listen-dns-port` / `--listen-answer-ip` / `--listen-log` | Listener HTTP/DNS ports, DNS answer IP, hit log | `8080` / `5335` / `127.0.0.1` / — |
@@ -265,6 +266,15 @@ is re-checked against a paired **same-token control** (the token in an inert,
 non-executing carrier at the same injection point), so a target that merely
 echoes input cannot pass as execution, and a command-output signature is checked
 against the payload-free baseline response.
+
+**Safe by default.** Verification fires only low-impact proofs (enumeration,
+file reads, code-execution and WAF-bypass signatures). Reverse shells,
+download-execute, credential access, lateral movement, container escape,
+cloud-metadata and OOB payloads are all held back unless you raise the ceiling
+with `--verify-active-risk intrusive` (independent of `--max-safety`, which only
+governs file output). Before anything is fired, an **execution plan** prints the
+request, the number of unique payloads, the safety-tier breakdown, any
+high-impact categories, and every network / out-of-band callback destination.
 
 Rate-limit with `--verify-delay` and cap with `--max-payloads`. OOB payloads are
 sent but confirmed out-of-band (see below). **Destructive payloads (persistence,

