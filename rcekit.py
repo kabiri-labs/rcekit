@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -168,11 +168,16 @@ class RCEKit:
         self.default_encodings = ["none", "url_encode", "double_url_encode", "random_case", "base64_decode_exec"]
 
     def _load_template_payloads(self) -> None:
-        """Load payload templates from JSON/YAML files."""
+        """Load payload templates from JSON/YAML files. Records the reason in
+        ``self.template_error`` (``None`` on success) so callers can hard-fail
+        on a missing or corrupt corpus instead of silently generating nothing."""
+        self.template_error: Optional[str] = None
         if not self.template_path.exists():
-            logger.warning("Template file %s not found. Using fallback templates.", self.template_path)
+            message = f"template file not found: {self.template_path}"
+            logger.warning("%s", message)
             self.payload_categories = {}
             self.detection_payloads = {}
+            self.template_error = message
             return
 
         try:
@@ -193,9 +198,63 @@ class RCEKit:
             self.payload_categories = data.get("payload_categories", {})
             self.detection_payloads = data.get("detection_payloads", {})
         except Exception as exc:
-            logger.error("Unable to load payload templates: %s", exc)
+            message = f"unable to parse {self.template_path}: {exc}"
+            logger.error("%s", message)
             self.payload_categories = {}
             self.detection_payloads = {}
+            self.template_error = message
+
+    def _corpus_stats(self) -> Tuple[int, int, Set[str]]:
+        """Return (exploit payload count, environment count, environments)."""
+        total = 0
+        envs: Set[str] = set()
+        for category in self.payload_categories.values():
+            if not isinstance(category, dict):
+                continue
+            for env, payloads in category.items():
+                envs.add(env)
+                if isinstance(payloads, dict):
+                    total += sum(len(items) for items in payloads.values())
+                else:
+                    total += len(payloads)
+        return total, len(envs), envs
+
+    def check_integrity(self) -> Tuple[bool, List[str]]:
+        """Validate the loaded payload corpus for the ``--doctor`` health check.
+        Returns ``(ok, report_lines)``."""
+        report = [f"template: {self.template_path}"]
+        if self.template_error:
+            report.append(f"  [FAIL] {self.template_error}")
+            return False, report
+        report.append("  [ok] file loaded and parsed")
+        total, env_count, _ = self._corpus_stats()
+        detection_total = sum(len(v) for v in self.detection_payloads.values())
+        report.append(f"  exploit categories: {len(self.payload_categories)}  "
+                      f"payloads: {total}  environments: {env_count}")
+        report.append(f"  detection environments: {len(self.detection_payloads)}  "
+                      f"payloads: {detection_total}")
+        ok = True
+        if not self.payload_categories:
+            report.append("  [warn] no exploit payload categories loaded")
+        if not self.detection_payloads:
+            report.append("  [warn] no detection payloads loaded")
+        if not self.payload_categories and not self.detection_payloads:
+            report.append("  [FAIL] corpus is empty")
+            ok = False
+        return ok, report
+
+    def corpus_ready(self, mode: str) -> Tuple[bool, str]:
+        """Whether the corpus can serve a run in ``mode`` ('detection' or
+        'exploit'). Returns ``(ok, reason)``; used to hard-fail before a run
+        would otherwise silently generate zero payloads."""
+        if self.template_error:
+            return False, self.template_error
+        if mode == "detection":
+            if not self.detection_payloads:
+                return False, "no detection payloads loaded from the corpus"
+        elif not self.payload_categories:
+            return False, "no exploit payload categories loaded from the corpus"
+        return True, ""
 
     def apply_watermark(self, payload: str, env: str, context_name: str, marker: str) -> str:
         """Embed a watermark comment or command into generated payloads where feasible."""
@@ -1705,6 +1764,8 @@ def main():
                              "back reverse shells, download-execute, credential access, lateral movement, "
                              "container escape, cloud-metadata and OOB payloads; pass 'intrusive' to include "
                              "them. Independent of --max-safety, which only governs file output")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Run a corpus integrity check (template found, parses, payload counts) and exit non-zero if it is missing or empty")
     parser.add_argument("--listen", action="store_true",
                         help="Run the built-in OOB listener (HTTP+DNS) that records callbacks and correlates them to payload tokens")
     parser.add_argument("--listen-http-port", type=int, default=8080,
@@ -1804,6 +1865,14 @@ def main():
         template_path=template_path,
     )
 
+    if args.doctor:
+        ok, report = generator.check_integrity()
+        print("[doctor] RCEKit corpus integrity check")
+        for line in report:
+            print(line)
+        print("[doctor] OK" if ok else "[doctor] PROBLEMS FOUND")
+        return 0 if ok else 1
+
     if sink_decodes:
         # The sink decodes these, so the encoded form is a valid, executable
         # delivery here — add them to the encoding set that is in effect.
@@ -1812,6 +1881,15 @@ def main():
         selected_encodings = list(dict.fromkeys(current + additions))
 
     mode = "detection" if args.detection_only else "exploit"
+
+    # Refuse to run on a missing or empty corpus rather than silently emitting
+    # zero payloads (e.g. the corpus file was quarantined by EDR after clone).
+    corpus_ok, corpus_reason = generator.corpus_ready(mode)
+    if not corpus_ok:
+        print(f"[!] Payload corpus is not usable: {corpus_reason}")
+        print("[!] Refusing to run with an incomplete corpus. Run "
+              "'python rcekit.py --doctor' to diagnose, or pass --template-file with a valid corpus.")
+        return 1
 
     if mode == "exploit" and not args.acknowledge_consent:
         print("[!] Exploitation mode requires explicit consent. Re-run with --acknowledge-consent after confirming authorization.")
@@ -1965,4 +2043,4 @@ def main():
     print(f"Generated {count} payloads to {args.output} in {mode} mode")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
