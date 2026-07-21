@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1235,9 +1235,13 @@ class RCEKit:
           (a noise-aware threshold, not a fixed constant) *and* reproduce on a
           second fire (``elapsed_confirm``); a one-off slow response is jitter,
           not a sleep, and is reported ``no-delay``.
-        * **reflection** — a ``match`` that is already present in the
-          payload-free ``control_body`` is not evidence of execution, so it is
-          reported ``inconclusive`` rather than a false ``confirmed``.
+        * **reflection** — a ``match`` that is also present in ``control_body``
+          is not evidence of execution, so it is reported ``inconclusive``
+          rather than a false ``confirmed``. For a canary token the caller
+          supplies a *same-token* control (the token in an inert, non-executing
+          carrier), so a target that merely echoes input cannot masquerade as
+          execution; for a command-output signature the control is the
+          payload-free baseline response.
         """
         if status is None:
             return "error", body[:80]
@@ -1253,6 +1257,9 @@ class RCEKit:
         if record.match:
             if re.search(record.match, body):
                 if control_body and re.search(record.match, control_body):
+                    if record.token:
+                        return "inconclusive", ("canary reflected by the target in an inert control "
+                                                "(no execution needed), so the match is not proof")
                     return "inconclusive", f"signature /{record.match}/ also present without the payload"
                 return "confirmed", f"matched /{record.match}/"
             return "no-match", ""
@@ -1322,8 +1329,21 @@ class RCEKit:
             is_timing = record.expected_channel == "timing" or record.blocking
             if is_timing and status is not None and elapsed - baseline >= margin:
                 _, _, elapsed_confirm = fire(record.payload)
+            # Paired negative control for a reflected canary. The canary token
+            # sits verbatim in the payload, so a target that merely echoes input
+            # returns it without executing anything. Re-fire the SAME token in an
+            # inert carrier (no command structure) at the same injection point:
+            # if the token still comes back, the match is reflection, not
+            # execution, and _evaluate_verify downgrades it to inconclusive. Only
+            # done when the primary actually matched, so it costs nothing on the
+            # vast majority of payloads.
+            reflection_control = control_body
+            if (record.token and record.match and not is_timing
+                    and record.expected_channel != "interactsh"
+                    and status is not None and re.search(record.match, body)):
+                _, reflection_control, _ = fire(f"rcekit-control-{record.token}")
             verdict, detail = self._evaluate_verify(
-                record, status, body, elapsed, baseline, margin, control_body, elapsed_confirm)
+                record, status, body, elapsed, baseline, margin, reflection_control, elapsed_confirm)
             results.append({
                 "verdict": verdict, "detail": detail, "status": status,
                 "payload": record.payload, "category": record.category,

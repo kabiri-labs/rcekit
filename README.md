@@ -1,6 +1,6 @@
 # RCEKit — RCE Testing Toolkit
 
-**Version 2.3.0** · MIT · Python 3.8+ · no third-party dependencies
+**Version 2.3.1** · MIT · Python 3.8+ · no third-party dependencies
 
 RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
@@ -15,7 +15,7 @@ payload generation:
 - **Targeted generation** — payloads tailored to the **environment** (Unix, Windows, Node.js, Python, PHP, Java, .NET, Ruby, Perl, Go, GraphQL, MongoDB/NoSQL, Docker, Kubernetes), the injection **context** (with container-aware escaping for JSON/XML/YAML/headers/shell-quoted strings), and the specific execution **sink** (OS commands, SSTI, SpEL/OGNL/Groovy, Mongo `$where`, …).
 - **Executable-only output** — every payload runs as-is on its channel/sink or carries its own decoder; non-runnable transforms are removed and decoder-required blobs are opt-in, so you never copy a payload that silently does nothing.
 - **Sink-aware target profiles** — describe the target once (denied characters, max length, needs-separator, blind, decodes-input) and emit only payloads that could actually fire.
-- **Auto-verification** — `--verify-url` fires payloads at an authorised target and reports which executed, using each payload's built-in oracle: a `match` regex, a reflected canary, or a timing delay. Confirmation is **differential**, so `confirmed` means execution and not coincidence: a timing hit must clear a noise-aware margin over a multi-sample baseline *and* reproduce on a re-fire, and a command-output signature already present in the payload-free response is reported `inconclusive` instead of a false positive.
+- **Auto-verification** — `--verify-url` fires payloads at an authorised target and reports which executed, using each payload's built-in oracle: a `match` regex, a reflected canary, or a timing delay. Confirmation is **differential**, so `confirmed` means execution and not coincidence: a timing hit must clear a noise-aware margin over a multi-sample baseline *and* reproduce on a re-fire, a reflected canary is re-checked against a paired same-token control so a target that merely echoes input is not mistaken for execution, and a command-output signature already present in the payload-free response is reported `inconclusive` instead of a false positive.
 - **Built-in OOB listener** — `--listen` receives HTTP/DNS callbacks and correlates each back to the exact payload, closing the blind-RCE loop without a separate interactsh/Collaborator.
 - **Tooling integrations** — export as context-split Burp wordlists, a ready-to-run ffuf attack (`request.txt` + `run.sh`) when a target profile is given, or runnable Nuclei templates with built-in OOB / time-based / reflection oracles.
 - **Safe by default** — a benign `--detection-only` canary mode, safety tiers, a consent gate, and audit logging.
@@ -254,8 +254,12 @@ python rcekit.py --acknowledge-consent --environments unix --categories basic_en
 Confirmation is differential to avoid false positives: the timing oracle samples
 the baseline several times and requires a candidate delay to both clear a
 noise-aware margin and reproduce on a second fire (a one-off slow response is
-reported `no-delay`), and the reflection oracle reports `inconclusive` when the
-command-output signature already appears in the payload-free response.
+reported `no-delay`), and the reflection oracle reports `inconclusive` rather
+than a false `confirmed` when the match is not proof of execution: a canary hit
+is re-checked against a paired **same-token control** (the token in an inert,
+non-executing carrier at the same injection point), so a target that merely
+echoes input cannot pass as execution, and a command-output signature is checked
+against the payload-free baseline response.
 
 Rate-limit with `--verify-delay` and cap with `--max-payloads`. OOB payloads are
 sent but confirmed out-of-band (see below). **Destructive payloads (persistence,

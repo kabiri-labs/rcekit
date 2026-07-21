@@ -915,6 +915,95 @@ class GeneratorTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_canary_oracle_rejects_reflected_token(self):
+        # The same-token control disambiguates reflection from execution.
+        rec = make_record(payload="echo DETECTION_ABC123", token="ABC123",
+                          match=r"ABC123", expected_channel="response")
+        # Token in the response AND in the inert same-token control -> the target
+        # echoes input, so the match is not proof of execution.
+        reflected, _ = self.gen._evaluate_verify(
+            rec, 200, "you sent: echo DETECTION_ABC123", elapsed=0.1, baseline=0.1,
+            control_body="you sent: rcekit-control-ABC123")
+        self.assertEqual(reflected, "inconclusive")
+        # Token in the response but absent from the inert control -> execution.
+        executed, _ = self.gen._evaluate_verify(
+            rec, 200, "DETECTION_ABC123", elapsed=0.1, baseline=0.1,
+            control_body="(command not found)")
+        self.assertEqual(executed, "confirmed")
+
+    def _run_detection_echo_verify(self, handler_cls):
+        import socketserver
+        import threading
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), handler_cls)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            records = [
+                r for r in self.gen.generate_payload_records(
+                    mode="detection", selected_environments=["unix"],
+                    selected_contexts=["raw"], selected_encodings=["none"])
+                if r.payload.startswith("echo DETECTION_")
+            ]
+            self.assertTrue(records, "expected a canary detection payload")
+            results = self.gen.run_verification(
+                records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ")
+            return [r for r in results if r["payload"].startswith("echo DETECTION_")]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_verify_canary_inconclusive_against_reflecting_target(self):
+        # A target that echoes input back returns the canary without executing
+        # anything, so it must never be reported as confirmed execution.
+        import http.server
+        import urllib.parse as up
+
+        class Reflect(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                q = up.parse_qs(up.urlparse(self.path).query)
+                host = q.get("host", [""])[0]
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(host.encode(errors="replace"))  # reflect, do NOT execute
+
+        echoed = self._run_detection_echo_verify(Reflect)
+        self.assertTrue(echoed)
+        self.assertEqual(echoed[0]["verdict"], "inconclusive")
+        self.assertFalse(any(r["verdict"] == "confirmed" for r in echoed),
+                         "a reflected canary must not confirm execution")
+
+    def test_verify_canary_confirmed_against_executing_target(self):
+        # A target that actually runs the input yields the canary only for the
+        # executing payload, not for the inert same-token control -> confirmed.
+        import http.server
+        import os
+        import urllib.parse as up
+
+        class Execute(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                q = up.parse_qs(up.urlparse(self.path).query)
+                host = q.get("host", [""])[0]
+                pipe = os.popen(host + " 2>/dev/null")  # runs the input directly
+                out = pipe.read()
+                pipe.close()
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        executed = self._run_detection_echo_verify(Execute)
+        self.assertTrue(executed)
+        self.assertEqual(executed[0]["verdict"], "confirmed")
+
 
 if __name__ == "__main__":
     unittest.main()
