@@ -6,6 +6,14 @@ RCEKit is an offensive **RCE testing toolkit** for authorised penetration
 testing, red teaming, and security research. It covers the full loop, not just
 payload generation:
 
+## Demo
+
+RCEKit doesn't just fire payloads — it **confirms execution out-of-band** and
+correlates each callback back to the exact payload that caused it. Here it
+auto-confirms a blind Log4Shell RCE via an OOB DNS callback:
+
+![RCEKit auto-confirming a blind Log4Shell RCE via an OOB callback, correlating the DNS hit back to the exact payload](confirmation-gifs/oob-confirm.gif)
+
 > **Generate** context-aware, sink-specific payloads → **deliver** them (or export
 > to Burp/Nuclei) → **verify** execution automatically against an authorised
 > target, including blind and out-of-band callbacks.
