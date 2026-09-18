@@ -35,6 +35,25 @@ cd rcekit        # Python 3.8+, standard library only — no dependencies
 python -m unittest discover -s tests
 ```
 
+The tool itself needs nothing but Python. **The suite additionally needs a POSIX
+`sh` on `PATH`**, because the fake vulnerable sinks it stands up are POSIX
+command-injection points (`echo <input> 2>&1`, `ping -c 1 <input>`) and every
+probe RCEKit builds for them is POSIX — `$((a+b))`, `${IFS}`, a backtick
+substitution. On Linux and macOS that is `/bin/sh` and there is nothing to do.
+On Windows it is the `sh` that ships with **Git for Windows**; without it those
+sinks run under `cmd.exe`, which echoes `$((a+b))` back as text, and the tests
+fail for a reason that has nothing to do with the code under test.
+
+Two further notes for running the suite on Windows:
+
+- Exclude your temp directory from real-time antivirus scanning. Several tests
+  copy `rcekit.py` somewhere else to prove the single-file shape works, and a
+  scanner treats a lone file full of payloads exactly as it treats malware —
+  blocking it from executing, or deleting it outright.
+- The suite is slower there. A closed loopback port answers with a RST on Linux
+  and is silently dropped on Windows, so each probe against a deliberately dead
+  target waits out the SYN retry instead of failing at once.
+
 ## Versioning and releases
 
 `__version__` in `rcekit.py` is **the** release version. Nothing else declares

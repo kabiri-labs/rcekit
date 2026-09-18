@@ -28,7 +28,7 @@ sys.path.insert(0, str(TESTS_DIR))
 sys.path.insert(0, str(TESTS_DIR / "bench"))
 
 import runner  # noqa: E402
-from test_generator import local_target  # noqa: E402
+from test_generator import local_target, sh_popen  # noqa: E402
 
 BENCH_ROOT = Path(__file__).resolve().parent / "bench"
 
@@ -38,10 +38,23 @@ def minimal_case(**overrides):
         "name": "example",
         "rce_class": "OS command injection",
         "target": "Example 1.0",
-        "invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected"],
+        # The default target is a port nothing listens on, which is the point for
+        # the tests that use it as-is. It is also why the budget flags are here:
+        # a closed loopback port answers with a RST on Linux and is silently
+        # *dropped* on Windows, where each probe waits out the SYN retry instead
+        # -- measured at ~2s per probe on this loopback. Unbounded, a case runs
+        # the whole ladder twice, once for the vulnerable half and once for the
+        # control, and pays that 2s every time: the unreachable-target case below
+        # measured 1800s that way, against 9.1s bounded. Three probes prove
+        # "nothing reached the target" exactly as well as forty do.
+        #
+        # Tests that override `invocation` with a live target are unaffected.
+        "invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected",
+                       "--max-payloads", "3", "--verify-timeout", "1"],
         "expect": "confirmed",
         "negative_control": {"invocation": ["--verify-url", "http://127.0.0.1:1/?y=FUZZ",
-                                            "--methods", "reflected"],
+                                            "--methods", "reflected",
+                                            "--max-payloads", "3", "--verify-timeout", "1"],
                              "expect": "negative"},
     }
     case.update(overrides)
@@ -229,7 +242,7 @@ class HarnessEndToEndTestCase(unittest.TestCase):
         def route(method, path, params, headers, body):
             if path.startswith("/safe"):
                 return 200, "<html>nothing executes here</html>"
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -249,7 +262,7 @@ class HarnessEndToEndTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -271,7 +284,13 @@ class HarnessEndToEndTestCase(unittest.TestCase):
         # Reporting a dead target as `negative` would read as "not vulnerable",
         # which is the misreport this whole project exists to avoid.
         case = minimal_case(
-            invocation=["--verify-url", "http://127.0.0.1:9/?x=FUZZ", "--methods", "reflected"],
+            # Bounded for the same reason minimal_case's default is: this proves
+            # a dead target reports `error`, and three probes prove it as well as
+            # the whole ladder does. On Windows, where a closed port is dropped
+            # rather than refused, this test measured 1800s unbounded and 9.1s
+            # bounded -- on its own, longer than the other 534 tests together.
+            invocation=["--verify-url", "http://127.0.0.1:9/?x=FUZZ", "--methods", "reflected",
+                        "--max-payloads", "3", "--verify-timeout", "1"],
             expect="error")
         outcome = runner.run_case(case)
         self.assertEqual(outcome["verdict"], "error")

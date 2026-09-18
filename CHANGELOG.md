@@ -8,6 +8,29 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The unit suite runs off Linux.** The fake vulnerable sinks in the tests are
+  POSIX command-injection points and every probe built for them is POSIX, but
+  they were executed through `os.popen` — which is `cmd.exe` on Windows. The
+  sink the test says executes did not execute, so the oracle correctly reported
+  no execution and five tests failed for a reason unrelated to the code under
+  test. Worse, the tests asserting a *negative* stayed green throughout: a
+  broken fixture that keeps its controls passing is the failure this project
+  takes seriously everywhere else. The sinks now name a POSIX `sh` explicitly;
+  on Linux and macOS that is the `/bin/sh` they always used.
+
+- **A deliberately dead target no longer costs minutes.** A closed loopback port
+  answers with a RST on Linux and is silently dropped on Windows, where each
+  probe waits out the SYN retry instead — measured at ~2s per probe. The
+  benchmark harness's own unreachable-target case paid that for the full ladder
+  twice, once for the vulnerable half and once for the control: 1800s for one
+  test, longer than the other 534 together. Bounded to three probes it measures
+  9.1s, and three probes prove "nothing reached the target" exactly as well as
+  forty do.
+
+Test-only: no version bump.
+
 ## [2.35.1] — 2026-08-21
 
 A robustness pass over error handling: no new capability, four ways the tool
