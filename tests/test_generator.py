@@ -1901,7 +1901,17 @@ class DetectionMethodTestCase(unittest.TestCase):
         strict = ssl.create_default_context()
         # It must reach further back on both axes an old server fails: the
         # protocol floor and the accepted cipher set.
-        self.assertLessEqual(ctx.minimum_version, strict.minimum_version)
+        #
+        # The floor is asserted against TLS 1.0 directly rather than compared
+        # with the default's. On Python 3.8 and 3.9 that default is the sentinel
+        # MINIMUM_SUPPORTED (-2), which marks "whatever this build allows"
+        # instead of naming a point on the ordering -- so `ours <= theirs` asks
+        # the enum a question it cannot answer, and fails on exactly the two
+        # interpreters where the default is already the most permissive value
+        # there is.
+        self.assertIn(ctx.minimum_version,
+                      (ssl.TLSVersion.MINIMUM_SUPPORTED, ssl.TLSVersion.TLSv1),
+                      "the permissive context must admit TLS 1.0 or lower")
         lenient = {c["name"] for c in ctx.get_ciphers()}
         modern = {c["name"] for c in strict.get_ciphers()}
         self.assertTrue(modern <= lenient,
