@@ -41,7 +41,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--verify-body-location` | How to encode `FUZZ` in the body: `json_string`, `form_value`, `raw` | auto |
 | `--verify-delay` | Seconds between verification requests (rate limiting) | `0` |
 | `--verify-timeout` | Per-request timeout in seconds | `8` |
-| `--insecure` | Skip TLS certificate verification, like `curl -k` | Off |
+| `--insecure` | Drop every TLS assurance: no certificate or hostname check, and OpenSSL's security level and minimum protocol version lowered so a legacy stack still completes a handshake | Off |
 | `--verify-chain` | JSON chain profile for multi-step, session-aware verification | None |
 
 ## Detection methods
