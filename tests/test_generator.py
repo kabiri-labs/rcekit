@@ -3269,6 +3269,147 @@ class NoProbesBuiltTestCase(unittest.TestCase):
         self.assertIn("NEVER REACHED THE TARGET", result.stdout)
 
 
+class TargetProfileProbeFilterTestCase(unittest.TestCase):
+    """`--deny-chars` / `--max-length` describe a filter the tester has already
+    measured. They reached the corpus and stopped there, so a run that had been
+    told "this target strips quotes" still spent its budget on every
+    quote-carrying rung of the probe ladder — requests structurally unable to
+    confirm, taken from the points that had not been tested yet.
+
+    The filter only ever *removes* probes, so the one way it could do harm is by
+    removing too many and manufacturing a false negative. Hence the two halves
+    below: the surviving shapes are pinned, and an emptied ladder must reach
+    `nothing-tested`, never `negative`."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.record = make_record(environment="unix", context="raw")
+
+    def _probes(self, method_cls=ReflectedMath, **config):
+        import random
+        method = method_cls(self.gen, config)
+        built = method.build_probes(self.record, random.Random(7))
+        kept, reasons = method.filter_probes(built)
+        return built, kept, reasons
+
+    def test_a_denied_separator_leaves_the_others_standing(self):
+        # The point of the separator table: a sink that strips ';' is still
+        # reachable through a pipe, a chain operator or a newline. Dropping the
+        # ';' rung must not drop those with it.
+        built, kept, reasons = self._probes(deny_chars=";")
+        self.assertTrue(kept, "denying ';' must not empty the ladder")
+        self.assertLess(len(kept), len(built))
+        self.assertFalse([p for p in kept if ";" in p.payload])
+        for survivor in ("| ", "&& ", "\n"):
+            self.assertTrue([p for p in kept if p.payload.startswith(survivor)],
+                            f"probes led by {survivor!r} must survive a ';' filter")
+        self.assertTrue(all("contains" in reason for reason in reasons))
+
+    def test_denied_quotes_drop_the_quote_carrying_shapes_only(self):
+        # The awk shape carries single quotes; the $(( )) and ${IFS} shapes do
+        # not. A quote filter must cost the first and keep the rest.
+        _, kept, _ = self._probes(deny_chars="'\"")
+        self.assertTrue(kept)
+        self.assertFalse([p for p in kept if "'" in p.payload or '"' in p.payload])
+        self.assertTrue([p for p in kept if "$((" in p.payload],
+                        "the arithmetic shape carries no quote and must survive")
+
+    def test_max_length_drops_the_long_shapes_and_keeps_the_short_ones(self):
+        built, kept, reasons = self._probes(max_length=40)
+        self.assertTrue(kept)
+        self.assertLess(len(kept), len(built))
+        self.assertTrue(all(len(p.payload) <= 40 for p in kept))
+        self.assertTrue(all("--max-length" in reason for reason in reasons))
+
+    def test_the_literal_form_is_what_is_checked(self):
+        # Deliberately stricter than the corpus check, which is applied to the
+        # *encoded* payload and so lets a URL-encoded quote through. Transport
+        # encoding is undone by the server before the value reaches the sink, so
+        # the literal character is what the application's filter will see.
+        method = ReflectedMath(self.gen, {"deny_chars": "'"})
+        self.assertIsNotNone(method._profile_rejects("awk 'BEGIN{print 1}'"))
+        self.assertIsNone(method._profile_rejects("awk %27BEGIN%27"))
+
+    def test_without_a_profile_the_ladder_is_untouched(self):
+        # Pinned, so the filter cannot start firing on runs that declared no
+        # profile — that would be the feature silently becoming the bug.
+        built, kept, reasons = self._probes()
+        self.assertEqual(len(kept), len(built))
+        self.assertEqual(reasons, [])
+
+    def test_the_gate_reaches_every_method_not_just_reflected(self):
+        # `_space_free_probes`, the bridges, EvalExpr and the aggregate methods
+        # each build payloads without going through `_wrap_variants`, which is
+        # why the gate sits at the engine rather than inside that helper.
+        import random
+        for method_cls in (ReflectedMath, EvalExpr, ParametricTime):
+            with self.subTest(method=method_cls.name):
+                method = method_cls(self.gen, {"deny_chars": "$"})
+                built = method.build_probes(self.record, random.Random(3))
+                if not built:
+                    continue
+                kept, _ = method.filter_probes(built)
+                self.assertFalse([p for p in kept if "$" in p.payload],
+                                 f"{method_cls.name} must honour the declared profile")
+
+    def test_the_cost_estimate_follows_the_profile(self):
+        # "An estimate that ignores --max-payloads is wrong precisely when
+        # someone is trying to bound the run" — the same holds for a filter the
+        # operator narrowed the run with.
+        records = [self.record]
+        plain = self.gen.estimate_detection_probes(records, ["reflected"], {})
+        filtered = self.gen.estimate_detection_probes(
+            records, ["reflected"], {"deny_chars": ";"})
+        self.assertLess(filtered, plain)
+        self.assertGreater(filtered, 0)
+
+    def test_drops_are_tallied_on_the_generator(self):
+        import random
+        method = ReflectedMath(self.gen, {"deny_chars": ";"})
+        built = method.build_probes(self.record, random.Random(5))
+        self.gen._apply_target_profile(method, built)
+        self.assertGreater(self.gen.profile_dropped_probes, 0)
+        self.assertTrue(any("';'" in reason for reason in self.gen.profile_drop_reasons))
+
+
+class TargetProfileEmptyLadderCLITestCase(unittest.TestCase):
+    """A profile strict enough to remove every probe means the target was never
+    measured. Reporting that as `negative` would read as "not vulnerable" — the
+    exact failure the nothing-tested path exists to prevent, arriving through a
+    new door."""
+
+    def _detect(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--acknowledge-consent", "--contexts", "raw",
+             "--environments", "unix", "--categories", "basic_enum", "--max-payloads", "3",
+             "--verify-url", "http://127.0.0.1:9/?q=FUZZ", "--methods", "reflected", *extra],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=180)
+
+    def test_an_emptied_ladder_is_nothing_tested_not_negative(self):
+        # 19 is chosen to sit between the two layers: corpus payloads this short
+        # exist, so records still reach the engine, while the shortest probe the
+        # ladder can build is 20 characters. That is the case worth pinning --
+        # the run has carriers and still sends nothing.
+        result = self._detect("--max-length", "19")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("NOTHING WAS TESTED", result.stdout)
+        self.assertNotIn("CONFIRMED execution", result.stdout)
+
+    def test_the_message_names_the_profile_as_the_cause(self):
+        result = self._detect("--max-length", "19")
+        self.assertIn("declared target profile removed every one", result.stdout)
+        self.assertIn("--max-length 19", result.stdout)
+
+    def test_a_partial_filter_reports_what_it_removed(self):
+        # Nothing listens on port 9, so the probes error — but they were built,
+        # sent, and the removal is stated rather than left to be inferred.
+        result = self._detect("--deny-chars", ";")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("declared target profile removed", result.stdout)
+        self.assertIn("could not have reached the sink", result.stdout)
+        self.assertNotIn("NOTHING WAS TESTED", result.stdout)
+
+
 class ProbeDepthTestCase(unittest.TestCase):
     """The canonical probes route their arithmetic through a command
     substitution and spell the command `echo`/`expr`. That is two blind spots,

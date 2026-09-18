@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.35.2"
+__version__ = "2.35.3"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -416,6 +416,14 @@ class RCEKit:
         self.template_path = template_path or Path(__file__).parent / "templates" / "payloads.json"
         # Which corpus actually loaded, for --doctor and the fallback notice.
         self.corpus_source: str = str(self.template_path)
+        # How many detection probes the operator's *declared* target profile
+        # removed, and why. Tallied across every wave and injection point of a
+        # run and read once by the caller. A ladder that silently shrinks is the
+        # one failure this filter could introduce -- it would turn the operator's
+        # own description of the target into a source of false negatives -- so
+        # the removal is reported, never assumed.
+        self.profile_dropped_probes = 0
+        self.profile_drop_reasons: Dict[str, int] = {}
         self.setup_components()
 
     def setup_components(self):
@@ -2481,6 +2489,11 @@ class RCEKit:
                     probes = meth.build_probes(record, rng)
                 except Exception:  # a cost estimate must never break the run
                     continue
+                # The same gate the run itself applies, so the figure describes
+                # the run about to happen rather than one without the operator's
+                # declared profile. A cost line that ignores a filter is wrong
+                # precisely for the operator who narrowed the run on purpose.
+                probes, _ = meth.filter_probes(probes)
                 if getattr(meth, "aggregate", False):
                     total += len(probes)
                     if max_payloads and total >= max_payloads:
@@ -2494,6 +2507,20 @@ class RCEKit:
                     if max_payloads and total >= max_payloads:
                         return max_payloads
         return total
+
+    def _apply_target_profile(self, meth: "DetectionMethod",
+                              probes: "List[Probe]") -> "List[Probe]":
+        """Drop the probes the declared target profile rules out, and record it.
+
+        Tallies onto the generator rather than returning a count, because a run
+        filters in several places -- one call per method per carrier, repeated
+        for every wave and every injection point -- and the operator needs one
+        honest number at the end, not a line per carrier."""
+        kept, reasons = meth.filter_probes(probes)
+        for reason in reasons:
+            self.profile_dropped_probes += 1
+            self.profile_drop_reasons[reason] = self.profile_drop_reasons.get(reason, 0) + 1
+        return kept
 
     def run_detection(self, records: Iterator[PayloadRecord], url: str,
                       methods: List[str], method: str = "GET",
@@ -2562,7 +2589,7 @@ class RCEKit:
                     # for an expensive measurement. Rounds are bounded so a
                     # method cannot loop the engine.
                     series: List[Tuple[Probe, Observation]] = []
-                    batch = meth.build_probes(record, rng)
+                    batch = self._apply_target_profile(meth, meth.build_probes(record, rng))
                     for _round in range(self.MAX_PROBE_ROUNDS):
                         if not batch:
                             break
@@ -2577,7 +2604,10 @@ class RCEKit:
                                 control_channels=control_channels)))
                             if delay:
                                 time.sleep(delay)
-                        batch = meth.next_probes(series)
+                        # A screening wave's follow-up probes go through the same
+                        # gate: a method that answers with a second round of
+                        # separators must not smuggle a denied one back in.
+                        batch = self._apply_target_profile(meth, meth.next_probes(series))
                     if not series:
                         # The method built no probes for this carrier, so there
                         # is nothing to judge. Falling through would ask an
@@ -2622,7 +2652,7 @@ class RCEKit:
                     if max_payloads and len(results) >= max_payloads:
                         return results
                     continue
-                for probe in meth.build_probes(record, rng):
+                for probe in self._apply_target_profile(meth, meth.build_probes(record, rng)):
                     if probe.payload in seen:
                         continue
                     seen.add(probe.payload)
@@ -3347,6 +3377,55 @@ class DetectionMethod:
         at the cost of more requests, so the operator can trade one for the
         other."""
         return self.config.get("probe_depth") or "full"
+
+    def _profile_rejects(self, payload: str) -> Optional[str]:
+        """Why the operator's declared target profile says this probe cannot
+        reach the sink, or ``None`` when nothing rules it out.
+
+        ``--deny-chars`` / ``--max-length`` (and their ``--target-profile``
+        equivalents) describe a filter the tester has already measured by hand.
+        They reached :meth:`RCEKit._filter_by_profile`, which drops *corpus
+        records* -- and stopped there, so the probes a detection method builds
+        from those records were sent regardless. An operator who had stated
+        "this target strips quotes" still paid for every quote-carrying rung of
+        the ladder, on requests structurally unable to confirm. Those requests
+        are not free: they are the budget the next injection point needed.
+
+        Checked on ``probe.payload`` -- the literal form, after the context wrap
+        and before the delivery layer percent-encodes it for its injection
+        point. That is deliberately stricter than the record check, which is
+        applied to the *encoded* payload and so lets a URL-encoded quote through
+        a quote filter. The two readings differ because the layers do: transport
+        encoding is undone by the server before the value reaches the sink, so a
+        percent-encoded quote is still a quote by the time the application's own
+        filter sees it."""
+        max_length = self.config.get("max_length")
+        if max_length and len(payload) > max_length:
+            return f"longer than --max-length {max_length}"
+        denied = self.config.get("deny_chars") or ""
+        present = sorted({char for char in denied if char in payload})
+        if present:
+            return "contains " + ", ".join(repr(char) for char in present)
+        return None
+
+    def filter_probes(self, probes: "List[Probe]") -> "Tuple[List[Probe], List[str]]":
+        """``(probes the declared profile allows, one reason per probe dropped)``.
+
+        The single gate every probe passes through. Deliberately *not* inside
+        :meth:`_wrap_variants`: ``_space_free_probes``, ``_bridge_variants``,
+        :class:`OobCallback`, :class:`EvalExpr` and :class:`DeserSink` each call
+        ``_wrap_context`` directly, so filtering there would reach some methods
+        and not others -- the same side path that once left ``file``, ``time``
+        and ``oob`` unable to send the raw rung."""
+        kept: "List[Probe]" = []
+        reasons: List[str] = []
+        for probe in probes:
+            reason = self._profile_rejects(probe.payload)
+            if reason is None:
+                kept.append(probe)
+            else:
+                reasons.append(reason)
+        return kept, reasons
 
     def _search(self, literal: str, body: str, boundary: bool = False) -> bool:
         """Encoded-aware literal search. Reuse the generator's ``_encoded_search``
@@ -6459,6 +6538,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             detection_config = {"webroot": args.webroot, "web_base_url": args.web_base_url,
                                 "file_write_path": args.file_write_path,
                                 "file_read_url": args.file_read_url,
+                                # The declared target profile, reaching the probe
+                                # ladder as well as the corpus. Resolved above,
+                                # so --target-profile and the explicit flags
+                                # arrive here already merged.
+                                "deny_chars": deny_chars, "max_length": max_length,
                                 "time_base": args.time_base, "evade": args.evade,
                                 "sink_raw": sink_raw, "separators": separators,
                                 "sink_shapes": sink_shapes, "sink_env": sink_env,
@@ -6723,6 +6807,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"[detect] methods: {', '.join(method_names)}")
             print(f"[detect] sent {len(results)} probes: " +
                   (", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())) or "none"))
+            if generator.profile_dropped_probes:
+                # A ladder that shrinks quietly is the one way this filter could
+                # manufacture a false negative, so the removal is stated with its
+                # reasons rather than left to be inferred from the traffic.
+                print(f"[detect] the declared target profile removed "
+                      f"{generator.profile_dropped_probes} probe(s) before sending — they "
+                      "could not have reached the sink:")
+                for reason, count in sorted(generator.profile_drop_reasons.items(),
+                                            key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {count} x {reason}")
             if not results:
                 # Nothing was tested. Saying so is the whole point: a run that
                 # built no probes used to end here in silence and exit 0, which
@@ -6730,6 +6824,25 @@ def main(argv: Optional[List[str]] = None) -> int:
                 selected_envs = sorted({record.environment for record in to_send})
                 print("[!] No probes were built, so NOTHING WAS TESTED — this is not a "
                       "negative result.")
+                if generator.profile_dropped_probes:
+                    # Name the profile as the cause before the generic advice
+                    # below sends the operator to widen --environments, which is
+                    # not what emptied this run. The surviving character set is
+                    # the actionable part: it says what a probe would have to be
+                    # written out of to reach this sink at all.
+                    denied = "".join(sorted(set(deny_chars or "")))
+                    print(f"[!] The declared target profile removed every one of the "
+                          f"{generator.profile_dropped_probes} probe(s) this run built. "
+                          "Nothing was sent, so the target was not measured.")
+                    if denied:
+                        print(f"[!]   Probes must avoid {', '.join(repr(c) for c in denied)}"
+                              + (f" and stay under {max_length} characters." if max_length
+                                 else "."))
+                    elif max_length:
+                        print(f"[!]   Every probe was longer than --max-length {max_length}.")
+                    print("[!]   Relax --deny-chars/--max-length (or the --target-profile that "
+                          "sets them) if the filter was a guess, or treat this sink as one the "
+                          "current probe vocabulary cannot reach.")
                 if not to_send:
                     print("[!] No payloads matched the selection: widen --categories/--environments"
                           "/--contexts, or raise --verify-active-risk.")
