@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.35.1"
+__version__ = "2.35.2"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -2136,15 +2136,54 @@ class RCEKit:
         (urllib's default, certificate-verifying) unless ``--insecure`` was set,
         in which case certificate verification is disabled — self-signed or
         hostname-mismatched certs are the norm on internal pentest targets, so
-        this is an explicit operator opt-in, not a default. Ignored for HTTP."""
+        this is an explicit operator opt-in, not a default. Ignored for HTTP.
+
+        Turning verification off is not enough to *reach* an old target.
+        OpenSSL 3.x ships security level 2, which refuses the key sizes and
+        signature algorithms that software of the era this tool gets pointed at
+        still offers. Webmin 1.910 — the target the README's `reflected` row
+        rests on — answers a modern client with ``SSLV3_ALERT_HANDSHAKE_FAILURE``
+        and nothing else. Every probe then comes back `error`: correct, and
+        useless. The run is honest about having measured nothing, and the sink
+        behind that handshake is never tested at all.
+
+        So the security level is lowered here too, and the minimum protocol
+        version with it. This does not widen the operator's exposure. With
+        ``check_hostname = False`` and ``CERT_NONE`` the connection is already
+        unauthenticated, so an active attacker is already unconstrained;
+        accepting a 1024-bit key or a SHA-1 signature on top of that gives away
+        nothing that was still being held. What it buys is the difference
+        between testing the target and reporting that it could not be reached.
+
+        ``--insecure`` is the flag that says TLS assurance is not what this run
+        is for. This makes it mean that consistently rather than halfway."""
         if not getattr(self, "insecure", False):
             return None
         ctx = getattr(self, "_insecure_ctx", None)
         if ctx is None:
             import ssl
+            import warnings
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
+            # Each rung is refused by some builds rather than all of them, and a
+            # context that lost one is still better than no context: a build
+            # that will not go below TLS 1.2 can still be handed a weak-key
+            # certificate, which is the commoner of the two failures.
+            try:
+                ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+            except ssl.SSLError:
+                logger.debug("OpenSSL build refuses SECLEVEL=0; keeping its default.")
+            try:
+                with warnings.catch_warnings():
+                    # Python deprecates naming TLS 1.0. Pointing a security tool
+                    # at software older than 1.2 is the case this exists for, so
+                    # the notice is suppressed rather than printed at an operator
+                    # who cannot act on it.
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    ctx.minimum_version = ssl.TLSVersion.TLSv1
+            except (ValueError, OSError):
+                logger.debug("OpenSSL build refuses TLS 1.0; keeping its minimum version.")
             self._insecure_ctx = ctx
         return ctx
 
@@ -5788,9 +5827,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--verify-timeout", type=float, default=8.0,
                         help="Per-request timeout for verification (seconds)")
     parser.add_argument("--insecure", action="store_true",
-                        help="Skip TLS certificate verification for verification/detection requests "
-                             "(self-signed or hostname-mismatched certs on internal targets). Opt-in, "
-                             "like curl -k; ignored for HTTP targets")
+                        help="Drop every TLS assurance for verification/detection requests: no "
+                             "certificate verification, no hostname check, and OpenSSL's security "
+                             "level and minimum protocol version lowered so a legacy stack (old "
+                             "ciphers, small keys, TLS 1.0) still completes a handshake. Self-signed "
+                             "certs and dated software are the norm on internal targets, so this is "
+                             "an explicit opt-in; ignored for HTTP targets")
     parser.add_argument("--verify-url-location", choices=["query_value", "url_path", "raw"], default="query_value",
                         help="How to encode the payload where FUZZ appears in --verify-url "
                              "(default query_value: percent-encoded, as a query parameter)")
@@ -6132,6 +6174,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         template_path=template_path,
     )
     generator.insecure = args.insecure
+    if args.insecure:
+        # Said once, plainly. The flag now gives up more than certificate
+        # identity, and an operator who reaches for it on a monitored engagement
+        # should see the full extent in the transcript rather than infer it from
+        # the help text.
+        print("[!] --insecure: TLS is unverified AND downgraded for this run (no certificate or "
+              "hostname check, OpenSSL security level 0, TLS 1.0 allowed) so that legacy targets "
+              "complete a handshake. The connection carries no authenticity guarantee.")
 
     # Never silent about a corpus that should have been there: someone who
     # thinks they are running an edited corpus must not discover only from the

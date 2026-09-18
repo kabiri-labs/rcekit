@@ -85,9 +85,19 @@ python rcekit.py --acknowledge-consent \
   --verify-header "X-Forwarded-For: FUZZ" --methods reflected
 ```
 
-Self-signed certificate on an internal box? Add `--insecure` (the same idea as
-`curl -k`). Without it, a TLS failure is reported as `error`, not `negative` —
-RCEKit will not let a connectivity problem read as "not vulnerable".
+Self-signed certificate on an internal box? Add `--insecure`. Without it, a TLS
+failure is reported as `error`, not `negative` — RCEKit will not let a
+connectivity problem read as "not vulnerable".
+
+`--insecure` drops **every** TLS assurance, not just the certificate check: it
+also lowers OpenSSL's security level and its minimum protocol version. That is
+deliberate. Not verifying a certificate is not the same as completing a
+handshake, and a modern OpenSSL refuses the key sizes and signature algorithms
+that dated software still offers — Webmin 1.910 answers a default client with
+`SSLV3_ALERT_HANDSHAKE_FAILURE` and nothing else, so every probe comes back
+`error` and the sink behind that handshake is never tested. The connection then
+carries no authenticity guarantee at all, and the run says so on its first
+line.
 
 ---
 

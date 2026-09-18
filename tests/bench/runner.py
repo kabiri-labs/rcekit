@@ -161,9 +161,26 @@ def wait_for_target(url: str, status: int = 200, timeout: float = 120.0,
     context = None
     if insecure and url.lower().startswith("https"):
         import ssl
+        import warnings
         context = ssl.create_default_context()
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
+        # The readiness gate has to be at least as permissive as the tool it
+        # gates. A bench target is deliberately old software, and OpenSSL 3.x
+        # refuses Webmin 1.910's handshake outright at its default security
+        # level — so a stricter probe here reports "target never became ready"
+        # about a container that is up and answering, and the case fails with
+        # nothing wrong in it.
+        try:
+            context.set_ciphers("DEFAULT@SECLEVEL=0")
+        except ssl.SSLError:
+            pass
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                context.minimum_version = ssl.TLSVersion.TLSv1
+        except (ValueError, OSError):
+            pass
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
