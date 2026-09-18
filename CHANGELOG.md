@@ -46,6 +46,55 @@ formats, or the template schema.
 
 Test-only: no version bump.
 
+## [2.35.3] — 2026-09-18
+
+The target profile an operator declares now reaches the probe ladder, not just
+the corpus.
+
+### Fixed
+
+- **`--deny-chars` / `--max-length` reach the detection probes.** They were
+  applied by `_filter_by_profile`, which drops *corpus records* — and stopped
+  there. The probes a detection method builds from those records went out
+  regardless, so a run that had been told "this target strips quotes" still paid
+  for every quote-carrying rung of the ladder, on requests structurally unable
+  to confirm. Those requests are not free: on a captured request with `-p all`
+  they are the budget the next injection point never got. The filter now sits at
+  the engine, where every probe passes through it — deliberately not inside
+  `_wrap_variants`, because `_space_free_probes`, the query-language bridges,
+  `eval`, `oob` and `deser` each build payloads without going through that
+  helper, and a gate that reaches some methods and not others is the side path
+  that once left `file`/`time`/`oob` unable to send the raw rung.
+
+  Denying a character narrows the ladder rather than emptying it: a target that
+  strips `;` is still probed through `|`, `||`, `&&` and the newline, which is
+  what the separator table has always been for.
+
+  Checked on the literal payload, before the delivery layer percent-encodes it
+  for its injection point. That is stricter than the corpus check, which is
+  applied to the encoded payload and so lets a URL-encoded quote through a quote
+  filter. The layers genuinely differ: transport encoding is undone by the
+  server before the value reaches the sink, so a percent-encoded quote is still
+  a quote when the application's own filter sees it.
+
+- **A profile strict enough to remove every probe reports `nothing-tested`.**
+  Not `negative`, which would read as "not vulnerable" from a run that sent
+  nothing. The message names the profile as the cause and the characters a probe
+  would have to avoid, instead of the generic advice to widen `--environments` —
+  which is not what emptied the run.
+
+- **The cost estimate follows the profile.** `[detect] cost:` builds the probes
+  and counts them, so it now counts the ones that will actually be sent. An
+  estimate that ignores a filter is wrong precisely for the operator who
+  narrowed the run on purpose.
+
+### Changed
+
+- A run that dropped probes says so, with the reason and a count per reason. A
+  ladder that shrinks quietly is the one way this filter could manufacture a
+  false negative, so the removal is stated rather than left to be inferred from
+  the traffic.
+
 ## [2.35.2] — 2026-09-18
 
 ### Fixed
@@ -1089,7 +1138,9 @@ this file and have not been restated here.
 - **[2.7.0]**
 - **[2.1.0]**
 
-[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...HEAD
+
+[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...HEAD
+[2.35.3]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...v2.35.3
 [2.35.2]: https://github.com/kabiri-labs/rcekit/compare/v2.35.1...v2.35.2
 [2.35.1]: https://github.com/kabiri-labs/rcekit/compare/v2.35.0...v2.35.1
 [2.35.0]: https://github.com/kabiri-labs/rcekit/compare/v2.34.1...v2.35.0

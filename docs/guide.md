@@ -697,7 +697,10 @@ supported; the corpus is JSON, because RCEKit is standard-library only.
 excluded everything — commonly `--environments sql` with a shell method, or a
 `--deny-chars` set that removed every candidate. A run that tested nothing is
 never reported as a clean result, which is why this is an error rather than a
-`negative`.
+`negative`. When the declared target profile is what emptied it, the message
+says so and names the characters a probe would have to avoid, rather than
+sending you to widen `--environments`. A run whose profile removed only *some*
+probes still reports how many and why, so a ladder never shrinks silently.
 
 **Everything comes back `error`.** The requests aren't reaching the target. Check
 the printed scheme if you used `-r` (see

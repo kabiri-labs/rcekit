@@ -670,8 +670,8 @@ and needs `--verify-active-risk intrusive` as well as `--oob-host`.
 | `--sink-needs-separator` | Input is concatenated mid-command — keep only separator-led payloads | Off |
 | `--sink-blind` | Sink returns no output — keep only OOB/timing-confirmable payloads | Off |
 | `--sink-decodes` | Encodings the sink decodes before use (e.g. `base64`) | None |
-| `--deny-chars` | Drop payloads containing any of these characters | None |
-| `--max-length` | Drop payloads longer than this | None |
+| `--deny-chars` | Drop payloads *and detection probes* containing any of these characters | None |
+| `--max-length` | Drop payloads *and detection probes* longer than this | None |
 | `--target-profile` | JSON profile supplying the above as defaults | None |
 
 ## Safety &amp; consent
