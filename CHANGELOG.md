@@ -46,6 +46,41 @@ formats, or the template schema.
 
 Test-only: no version bump.
 
+## [2.35.2] — 2026-09-18
+
+### Fixed
+
+- **`--insecure` now reaches a legacy TLS stack, not just an untrusted one.**
+  Turning certificate verification off is not the same as completing a
+  handshake. OpenSSL 3.x ships security level 2, which refuses the key sizes and
+  signature algorithms that software of the era this tool gets pointed at still
+  offers — Webmin 1.910, the build the README's `reflected` row rests on,
+  answers a default client with `SSLV3_ALERT_HANDSHAKE_FAILURE` and nothing
+  else. Every probe then came back `error`: correct, and useless. The run was
+  honest about having measured nothing, and the sink behind that handshake was
+  never tested at all. Found by running the coverage benchmark, which failed at
+  its readiness gate against a container that was up and answering.
+
+  `--insecure` now also lowers the security level and the minimum protocol
+  version. This does not widen exposure: with `check_hostname = False` and
+  `CERT_NONE` the connection is already unauthenticated, so an active attacker
+  is already unconstrained — accepting a 1024-bit key or a SHA-1 signature on
+  top of that gives away nothing that was still being held. What it buys is the
+  difference between testing the target and reporting that it could not be
+  reached. A run without the flag is untouched and still verifies certificates.
+
+- **The benchmark's readiness gate is as permissive as the tool it gates.**
+  `wait_for_target` built its own strict context, so a case against deliberately
+  old software reported "target never became ready" about a container that was
+  up — a case failure with nothing wrong in it.
+
+### Changed
+
+- A run that passes `--insecure` states the full extent of the downgrade on its
+  first line. The flag gives up more than certificate identity now, and an
+  operator on a monitored engagement should read that in the transcript rather
+  than infer it from the help text.
+
 ## [2.35.1] — 2026-08-21
 
 A robustness pass over error handling: no new capability, four ways the tool
@@ -1054,7 +1089,8 @@ this file and have not been restated here.
 - **[2.7.0]**
 - **[2.1.0]**
 
-[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.1...HEAD
+[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...HEAD
+[2.35.2]: https://github.com/kabiri-labs/rcekit/compare/v2.35.1...v2.35.2
 [2.35.1]: https://github.com/kabiri-labs/rcekit/compare/v2.35.0...v2.35.1
 [2.35.0]: https://github.com/kabiri-labs/rcekit/compare/v2.34.1...v2.35.0
 [2.34.1]: https://github.com/kabiri-labs/rcekit/compare/v2.34.0...v2.34.1

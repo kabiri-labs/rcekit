@@ -77,6 +77,9 @@ portless capture cannot record whether it was TLS — so RCEKit infers `http` an
 prints the scheme it chose; `--request-scheme https` pins it. The certificate is
 self-signed, so without `--insecure` every probe is reported `error`, **not**
 `negative`: a connectivity failure is never allowed to read as "not vulnerable".
+`--insecure` is doing more than waving the certificate through here — Webmin
+1.910's TLS is old enough that a current OpenSSL refuses the handshake outright,
+so the flag also lowers the security level and protocol floor to reach it.
 RCEKit will also warn that the capture carries a `Cookie` header, because pinning
 the scheme is what keeps it off the wire in cleartext.
 

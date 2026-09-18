@@ -1882,6 +1882,41 @@ class DetectionMethodTestCase(unittest.TestCase):
         self.assertEqual(ctx.verify_mode, ssl.CERT_NONE)
         self.assertFalse(ctx.check_hostname)
 
+    def test_insecure_reaches_back_to_a_legacy_tls_stack(self):
+        """Not verifying a certificate is not the same as completing a handshake.
+
+        OpenSSL 3.x refuses the key sizes and signature algorithms that software
+        of the era this tool gets pointed at still offers, so a context that only
+        turned verification off never reaches the target: Webmin 1.910 — the
+        build the README's `reflected` row rests on — answers
+        `SSLV3_ALERT_HANDSHAKE_FAILURE`, every probe comes back `error`, and the
+        sink behind that handshake is never tested at all.
+
+        Asserted on the context rather than against a live legacy server: the
+        certificate such a server needs cannot be generated with the standard
+        library, and this project takes no dependency to find out."""
+        import ssl
+        self.gen.insecure = True
+        ctx = self.gen._verify_ssl_context()
+        strict = ssl.create_default_context()
+        # It must reach further back on both axes an old server fails: the
+        # protocol floor and the accepted cipher set.
+        self.assertLessEqual(ctx.minimum_version, strict.minimum_version)
+        lenient = {c["name"] for c in ctx.get_ciphers()}
+        modern = {c["name"] for c in strict.get_ciphers()}
+        self.assertTrue(modern <= lenient,
+                        "the permissive context must keep everything a modern default accepts")
+        self.assertTrue(lenient - modern,
+                        "the permissive context must accept ciphers a modern default refuses")
+
+    def test_a_run_that_did_not_ask_stays_strict(self):
+        # The one thing this must not do: weaken a run that never opted in.
+        # Without --insecure the context is still None, which is urllib's own
+        # certificate-verifying default.
+        fresh = RCEKit()
+        self.assertIsNone(fresh._verify_ssl_context())
+        self.assertFalse(getattr(fresh, "insecure", False))
+
     def test_reflected_math_confirms_on_executing_target_only(self):
         # /vuln runs the injected string through a shell (real execution);
         # /reflect echoes it verbatim without executing. ReflectedMath must
@@ -2693,6 +2728,30 @@ class ReflectionControlTestCase(unittest.TestCase):
             results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+
+
+class InsecureDowngradeNoticeTestCase(unittest.TestCase):
+    """`--insecure` now gives up more than certificate identity, so the run says
+    so. An operator on a monitored engagement should read the full extent in the
+    transcript rather than infer it from a help string."""
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--acknowledge-consent", "--categories", "basic_enum",
+             "--environments", "unix", "--max-payloads", "1",
+             "--verify-url", "https://127.0.0.1:1/?q=FUZZ", *extra],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120)
+
+    def test_the_downgrade_is_stated_when_it_is_taken(self):
+        result = self._run("--insecure")
+        self.assertIn("--insecure", result.stdout)
+        self.assertIn("downgraded", result.stdout)
+        self.assertIn("no authenticity guarantee", result.stdout)
+
+    def test_a_run_without_the_flag_says_nothing_about_a_downgrade(self):
+        # The notice must describe this run, not TLS in general.
+        result = self._run()
+        self.assertNotIn("downgraded", result.stdout)
 
 
 class CLIExitCodeTestCase(unittest.TestCase):
