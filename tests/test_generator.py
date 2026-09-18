@@ -2813,7 +2813,16 @@ class CleartextCaptureWarningTestCase(unittest.TestCase):
     def _run_with_request(self, raw, *extra):
         with tempfile.TemporaryDirectory() as tmp:
             req = Path(tmp) / "req.txt"
-            req.write_text(raw)
+            # Bytes, not text. A capture is what came off the wire, and `raw`
+            # already spells its own CRLF line endings -- writing it in text mode
+            # translates the `\n` of each `\r\n` again, so the file on disk holds
+            # `\r\r\n` and the parser finds no headers at all. The fixture then
+            # tested the "could not build a request" path while claiming to test
+            # the scheme notice.
+            #
+            # `write_text(..., newline="")` would say the same thing, but it
+            # arrived in Python 3.10 and this project supports 3.8.
+            req.write_bytes(raw.encode())
             return subprocess.run(
                 [sys.executable, str(SCRIPT), "--acknowledge-consent",
                  "--categories", "basic_enum", "--environments", "unix",
@@ -2844,6 +2853,23 @@ class CleartextCaptureWarningTestCase(unittest.TestCase):
             "--request-scheme", "http")
         self.assertNotIn("inferred http", result.stdout)
         self.assertNotIn("replayed over plain HTTP", result.stdout)
+
+    def test_the_capture_reaches_disk_byte_for_byte(self):
+        """The fixture is the thing under test here, and it was broken.
+
+        Two of the three tests above assert that something *is* printed, so they
+        failed when the capture stopped parsing. The third asserts that nothing
+        is printed — and passed throughout, for the wrong reason: a request that
+        cannot be built prints no scheme notice either. A control that stays
+        green while the fixture rots is exactly what this project refuses to
+        accept from a benchmark case, so the fixture gets its own guard."""
+        raw = "GET /q?a=FUZZ HTTP/1.1\r\nHost: 127.0.0.1:1\r\n\r\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            req = Path(tmp) / "req.txt"
+            req.write_bytes(raw.encode())
+            on_disk = req.read_bytes()
+        self.assertEqual(on_disk, raw.encode())
+        self.assertNotIn(b"\r\r\n", on_disk)
 
 
 class OutputFailureTestCase(unittest.TestCase):
