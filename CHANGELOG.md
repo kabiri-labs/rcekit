@@ -29,6 +29,21 @@ formats, or the template schema.
   9.1s, and three probes prove "nothing reached the target" exactly as well as
   forty do.
 
+- **A captured-request fixture reaches disk byte for byte.** The cleartext-capture
+  tests write a raw HTTP request whose text already spells its own CRLF line
+  endings, through `Path.write_text` — which on Windows translates the newline of
+  each one again. The file on disk held a doubled carriage return, the parser
+  found no headers, and two tests failed against a fixture that had stopped being
+  an HTTP request at all.
+
+  The third test in that class passed throughout, for the wrong reason: it
+  asserts that a notice is *absent*, and a request that cannot be built prints no
+  notice either. A control that stays green while its fixture rots is precisely
+  what this project refuses to accept from a benchmark case, so the fixture now
+  has a guard of its own. The capture is written as bytes; the `newline` argument
+  that would say the same thing arrived in Python 3.10, and this project
+  supports 3.8.
+
 Test-only: no version bump.
 
 ## [2.35.1] — 2026-08-21
