@@ -52,6 +52,66 @@ def make_record(**overrides):
 
 
 import contextlib  # noqa: E402
+import shutil  # noqa: E402
+
+# The shell the fake vulnerable sinks in this file run their injected input
+# through. Every one of them models a POSIX command-injection point -- `echo
+# <input> 2>&1`, `ping -c 1 <input>`, `sh -c "..."` -- and every probe RCEKit
+# builds for them is POSIX: `$((a+b))`, `${IFS}`, a backtick substitution.
+#
+# `os.popen` does not run any of that on Windows. It runs cmd.exe, which echoes
+# `$((466489+622859))` back as text, so the sink that the test says executes
+# does not execute and the oracle correctly reports no execution. The tests then
+# fail for a reason that has nothing to do with the code under test -- while the
+# ones asserting a *negative* keep passing, for the wrong reason.
+#
+# So the shell is named rather than inherited from the platform. On Linux and
+# macOS `shutil.which("sh")` is `/bin/sh` and nothing changes; on Windows it is
+# the `sh` that ships with Git, which runs the same POSIX syntax.
+POSIX_SHELL = shutil.which("sh")
+if POSIX_SHELL is None:  # pragma: no cover - depends on the host, not the code
+    print("[tests] WARNING: no POSIX `sh` on PATH. The command-injection sinks in "
+          "this file will fall back to the platform shell, and every test that "
+          "expects a POSIX sink to execute will fail. Install Git for Windows (it "
+          "ships `sh`), or run the suite on Linux/macOS.")
+
+
+class _ShellOutput:
+    """The two methods the call sites use from an ``os.popen`` handle."""
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def read(self) -> str:
+        return self._text
+
+    def close(self):
+        return None
+
+
+def shell_writable_dir() -> str:
+    """A throwaway directory both Python and a POSIX shell can name.
+
+    ``tempfile.mkdtemp()`` hands back a backslash path on Windows, and a POSIX
+    shell reads a backslash as an escape -- so a probe told to write into such
+    a directory writes nothing the test can find, and a method that works
+    reports no confirmation. Forward slashes are understood by both: Windows
+    accepts a ``C:/...`` path at the API level, and ``sh`` passes it through
+    unchanged. A no-op on Linux and macOS."""
+    return Path(tempfile.mkdtemp()).as_posix()
+
+
+def sh_popen(command: str):
+    """``os.popen``, but guaranteed to be a POSIX shell.
+
+    Returns stdout only, exactly as ``os.popen`` does: a `2>&1` or `2>/dev/null`
+    in the command string is the *shell's* redirection and is left to do its own
+    work, so a sink modelled as discarding stderr still discards it."""
+    if POSIX_SHELL is None:  # pragma: no cover - see the warning above
+        return os.popen(command)
+    completed = subprocess.run([POSIX_SHELL, "-c", command],
+                               capture_output=True, text=True, timeout=60)
+    return _ShellOutput(completed.stdout)
 
 
 @contextlib.contextmanager
@@ -872,7 +932,7 @@ class GeneratorTestCase(unittest.TestCase):
             def do_GET(self):
                 q = up.parse_qs(up.urlparse(self.path).query)
                 host = q.get("host", [""])[0]
-                pipe = os.popen("echo " + host + " 2>&1")  # command injection sink
+                pipe = sh_popen("echo " + host + " 2>&1")  # command injection sink
                 out = pipe.read()
                 pipe.close()
                 self.send_response(200)
@@ -1034,7 +1094,7 @@ class GeneratorTestCase(unittest.TestCase):
                     host = _json.loads(raw).get("host", "")
                 except Exception:
                     host = ""
-                pipe = os.popen("echo " + host + " 2>&1")  # command injection sink
+                pipe = sh_popen("echo " + host + " 2>&1")  # command injection sink
                 out = pipe.read()
                 pipe.close()
                 self.send_response(200)
@@ -1139,7 +1199,7 @@ class GeneratorTestCase(unittest.TestCase):
             def do_GET(self):
                 q = up.parse_qs(up.urlparse(self.path).query)
                 host = q.get("host", [""])[0]
-                pipe = os.popen(host + " 2>/dev/null")  # runs the input directly
+                pipe = sh_popen(host + " 2>/dev/null")  # runs the input directly
                 out = pipe.read()
                 pipe.close()
                 self.send_response(200)
@@ -1628,7 +1688,7 @@ class VerifyChainTestCase(unittest.TestCase):
                 length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(length).decode()
                 cmd = up.parse_qs(body).get("cmd", [""])[0]
-                pipe = os.popen("echo " + cmd + " 2>&1")  # command injection sink
+                pipe = sh_popen("echo " + cmd + " 2>&1")  # command injection sink
                 out = pipe.read(); pipe.close()
                 self.send_response(200); self.end_headers()
                 try:
@@ -1842,7 +1902,7 @@ class DetectionMethodTestCase(unittest.TestCase):
                 self.send_response(200)
                 self.end_headers()
                 if parsed.path == "/vuln":
-                    pipe = os.popen("echo " + cmd + " 2>&1")  # command-injection sink
+                    pipe = sh_popen("echo " + cmd + " 2>&1")  # command-injection sink
                     out = pipe.read()
                     pipe.close()
                 else:  # /reflect: echo input, never execute
@@ -1889,7 +1949,7 @@ class DetectionMethodTestCase(unittest.TestCase):
 
             def do_GET(self):
                 ip = up.parse_qs(up.urlparse(self.path).query).get("ip", [""])[0]
-                out = os.popen("ping -c 1 " + ip + " 2>&1").read()  # injection sink
+                out = sh_popen("ping -c 1 " + ip + " 2>&1").read()  # injection sink
                 self.send_response(200)
                 self.end_headers()
                 # Echoes the raw input verbatim next to the executed output.
@@ -2037,7 +2097,7 @@ class RawRequestInputTestCase(unittest.TestCase):
 
             def do_GET(self):
                 cmd = up.parse_qs(up.urlparse(self.path).query).get("host", [""])[0]
-                out = os.popen("echo " + cmd + " 2>&1").read()
+                out = sh_popen("echo " + cmd + " 2>&1").read()
                 self.send_response(200)
                 self.end_headers()
                 try:
@@ -2123,7 +2183,7 @@ class FileBasedTestCase(unittest.TestCase):
         import threading
         import urllib.parse as up
 
-        webroot = tempfile.mkdtemp()
+        webroot = shell_writable_dir()
 
         def make_handler(execute):
             class Handler(http.server.BaseHTTPRequestHandler):
@@ -2135,7 +2195,7 @@ class FileBasedTestCase(unittest.TestCase):
                     if parsed.path == "/vuln":
                         cmd = up.parse_qs(parsed.query).get("host", [""])[0]
                         if execute:
-                            os.popen("echo " + cmd + " 2>&1").read()
+                            sh_popen("echo " + cmd + " 2>&1").read()
                         self.send_response(200)
                         self.end_headers()
                         self.wfile.write(b"ok")
@@ -2486,7 +2546,7 @@ class EvadeTestCase(unittest.TestCase):
 
             def do_GET(self):
                 cmd = up.parse_qs(up.urlparse(self.path).query).get("host", [""])[0]
-                out = os.popen("echo " + cmd + " 2>&1").read()
+                out = sh_popen("echo " + cmd + " 2>&1").read()
                 self.send_response(200)
                 self.end_headers()
                 try:
@@ -2526,7 +2586,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, base64.b64encode(out.encode()).decode()
@@ -2544,7 +2604,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
 
         def route(method, path, params, headers, body):
             ip = params.get("ip", "").replace("$(", "")
-            pipe = os.popen("ping -c 1 " + ip + " 2>&1")
+            pipe = sh_popen("ping -c 1 " + ip + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, "PING " + ip + "\n" + out
@@ -2949,7 +3009,7 @@ class SeparatorSweepTestCase(unittest.TestCase):
 
         def route(method, path, params, headers, body):
             query = params.get("q", "").replace(";", "").replace("&", "")
-            pipe = os.popen("echo probing " + query + " 2>&1")
+            pipe = sh_popen("echo probing " + query + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3006,7 +3066,7 @@ class SelfSeparatingContextTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("sh -c \"echo probing '" + params.get("q", "") + "'\" 2>&1")
+            pipe = sh_popen("sh -c \"echo probing '" + params.get("q", "") + "'\" 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3065,7 +3125,7 @@ class ShellCapableEnvironmentTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo pinging " + params.get("q", "") + " 2>&1")
+            pipe = sh_popen("echo pinging " + params.get("q", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3197,7 +3257,7 @@ class ProbeDepthTestCase(unittest.TestCase):
             query = params.get("q", "")
             if "$(" in query or "`" in query:
                 return 200, "BLOCKED"
-            pipe = os.popen("echo probing " + query + " 2>/dev/null")
+            pipe = sh_popen("echo probing " + query + " 2>/dev/null")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3215,7 +3275,7 @@ class ProbeDepthTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo probing " + params.get("q", "") + " | grep -c NOTHINGHERE")
+            pipe = sh_popen("echo probing " + params.get("q", "") + " | grep -c NOTHINGHERE")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3285,7 +3345,7 @@ class QuotedShellCarrierTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo probing '" + params.get("q", "") + "' 2>/dev/null")
+            pipe = sh_popen("echo probing '" + params.get("q", "") + "' 2>/dev/null")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3399,7 +3459,7 @@ class OobCallbackTestCase(unittest.TestCase):
 
         def route(method, path, params, headers, body):
             # Blind: runs the command, returns nothing about it.
-            pipe = os.popen("echo probing " + params.get("q", "") + " >/dev/null 2>&1")
+            pipe = sh_popen("echo probing " + params.get("q", "") + " >/dev/null 2>&1")
             pipe.read()
             pipe.close()
             return 200, "queued"
@@ -3535,7 +3595,7 @@ class SpaceFilterTestCase(unittest.TestCase):
 
         def route(method, path, params, headers, body):
             query = params.get("q", "").replace(" ", "")
-            pipe = os.popen("echo probing " + query + " 2>/dev/null")
+            pipe = sh_popen("echo probing " + query + " 2>/dev/null")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3626,7 +3686,7 @@ class BlindSinkAdviceCLITestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo probing " + params.get("q", "") + " >/dev/null 2>&1")
+            pipe = sh_popen("echo probing " + params.get("q", "") + " >/dev/null 2>&1")
             pipe.read()
             pipe.close()
             return 200, "queued"
@@ -3639,7 +3699,7 @@ class BlindSinkAdviceCLITestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo probing " + params.get("q", "") + " 2>/dev/null")
+            pipe = sh_popen("echo probing " + params.get("q", "") + " 2>/dev/null")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -3697,7 +3757,7 @@ class QuoteWrappingContextTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo probing " + params.get("q", "") + " 2>/dev/null")
+            pipe = sh_popen("echo probing " + params.get("q", "") + " 2>/dev/null")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -4044,7 +4104,7 @@ class FileReadBackTestCase(unittest.TestCase):
                     with open(served) as handle:
                         return 200, handle.read()
                 return 404, "not found"
-            pipe = os.popen("echo LOOKUP " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo LOOKUP " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -4054,7 +4114,7 @@ class FileReadBackTestCase(unittest.TestCase):
         # The case the method could not reach before: somewhere writable that no
         # web server serves, plus a handler that reads a path back.
         import tempfile
-        writedir = tempfile.mkdtemp()
+        writedir = shell_writable_dir()
         with local_target(self._target(writedir, serve_webroot=False)) as base:
             without = self.gen.run_detection(
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
@@ -4070,7 +4130,7 @@ class FileReadBackTestCase(unittest.TestCase):
 
     def test_the_webroot_alias_still_confirms_on_a_web_root(self):
         import tempfile
-        writedir = tempfile.mkdtemp()
+        writedir = shell_writable_dir()
         with local_target(self._target(writedir, serve_webroot=True)) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
@@ -4122,7 +4182,7 @@ class FileReadBackTestCase(unittest.TestCase):
         # target that had executed every probe.
         import os
         import tempfile
-        writedir = tempfile.mkdtemp()
+        writedir = shell_writable_dir()
 
         def route(method, path, params, headers, body):
             if path == "/download":
@@ -4133,7 +4193,7 @@ class FileReadBackTestCase(unittest.TestCase):
                     with open(served) as handle:
                         return 200, handle.read()
                 return 200, "missing"
-            pipe = os.popen("echo LOOKUP " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo LOOKUP " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -4155,7 +4215,7 @@ class FileReadBackTestCase(unittest.TestCase):
 
     def test_a_clean_target_stays_negative_through_the_new_channel(self):
         import tempfile
-        writedir = tempfile.mkdtemp()
+        writedir = shell_writable_dir()
         with local_target(lambda *a: (200, "<html>static</html>")) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
@@ -4313,7 +4373,7 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         import tempfile
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo CGI " + headers.get("User-Agent", "") + " 2>&1")
+            pipe = sh_popen("echo CGI " + headers.get("User-Agent", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -4872,7 +4932,7 @@ class SinkShapeLadderTestCase(unittest.TestCase):
         import os
         import tempfile
 
-        webroot = tempfile.mkdtemp()
+        webroot = shell_writable_dir()
 
         def route(method, path, params, headers, body):
             if path.startswith("/files/"):
@@ -4882,7 +4942,7 @@ class SinkShapeLadderTestCase(unittest.TestCase):
                         return 200, handle.read()
                 return 404, "not found"
             raw = params.get("host", "").replace('"', "")
-            pipe = os.popen('echo PING "%s" 2>&1' % raw)
+            pipe = sh_popen('echo PING "%s" 2>&1' % raw)
             out = pipe.read()
             pipe.close()
             return 200, out
@@ -5132,7 +5192,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, "<html>no output here</html>", [("X-Cmd-Out", out.replace("\n", " "))]
@@ -5150,7 +5210,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         import os
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 500, "Traceback: rendering failed\n" + out
@@ -5170,7 +5230,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         nesting = deep_json_nesting()
 
         def route(method, path, params, headers, body):
-            pipe = os.popen("echo " + params.get("host", "") + " 2>&1")
+            pipe = sh_popen("echo " + params.get("host", "") + " 2>&1")
             out = pipe.read()
             pipe.close()
             return 200, "[" * nesting + json.dumps(out) + "]" * nesting
