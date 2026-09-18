@@ -300,8 +300,16 @@ def compose_command(case: Dict[str, Any], action: str) -> Optional[List[str]]:
 def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
             expect_method: Optional[str], wait_for: Optional[Dict[str, Any]],
             compose_case: Dict[str, Any], vulhub_root: Optional[Path],
-            keep_up: bool = False, verbose: bool = False) -> Tuple[bool, str, Dict[str, Any]]:
-    """Bring a target up, run RCEKit against it, tear it down, and judge."""
+            keep_up: bool = False, verbose: bool = False,
+            timeout: Optional[float] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    """Bring a target up, run RCEKit against it, tear it down, and judge.
+
+    ``timeout`` is how long that one run may take. A case may raise it, because
+    the methods do not cost the same: the Webmin tier-ceiling control fires a
+    timing regression, and every probe in it is a real sleep. Measured at 1174s
+    against the live target, which the 900s default cut short — and a run killed
+    part-way reports `error`, so the case failed as though the tool had broken
+    rather than as though the clock had run out."""
     cwd = None
     if "vulhub_path" in compose_case:
         if not vulhub_root:
@@ -324,7 +332,7 @@ def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
                                     wait_for.get("timeout", 120))
             if not ready:
                 return False, f"target never became ready at {wait_for['url']}", {}
-        report = run_rcekit(invocation)
+        report = run_rcekit(invocation, timeout=timeout or 900.0)
         ok, detail = check_report(report, expect, expect_method)
         return ok, detail, report
     finally:
@@ -348,7 +356,8 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
                                "target": case["target"]}
     ok, detail, report = run_one(
         case, case["invocation"], case["expect"], case.get("expect_method"),
-        case.get("wait_for"), case, vulhub_root, keep_up, verbose)
+        case.get("wait_for"), case, vulhub_root, keep_up, verbose,
+        timeout=case.get("timeout"))
     outcome["vulnerable_ok"] = ok
     outcome["vulnerable_detail"] = detail
     outcome["verdict"] = report.get("verdict", "nothing-tested")
@@ -360,7 +369,10 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
         control_case, control_invocation,
         control.get("expect", "negative"), control.get("expect_method"),
         control.get("wait_for", case.get("wait_for")), control_case, vulhub_root,
-        keep_up, verbose)
+        keep_up, verbose,
+        # The control gets its own budget: it is often the slower half, because
+        # the method that must NOT be promoted is usually the expensive one.
+        timeout=control.get("timeout", case.get("timeout")))
     outcome["control_ok"] = control_ok
     outcome["control_detail"] = control_detail
     outcome["control_verdict"] = control_report.get("verdict", "nothing-tested")

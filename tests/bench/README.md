@@ -91,6 +91,7 @@ success.
 | `vulhub_path` | Directory under `--vulhub-root`; the runner runs `docker compose up -d` there |
 | `compose` / `compose_down` | Explicit argv, when the standard compose commands are not enough |
 | `wait_for` | Poll until the target answers, so a slow boot is not read as a regression |
+| `timeout` | Seconds one run may take (default 900). `negative_control` may set its own, and usually needs to: the method a tier-ceiling control exercises is the expensive one |
 | `invocation` | RCEKit arguments; `--acknowledge-consent` and `--detect-json` are added by the runner |
 | `expect` | `confirmed`, `needs-review`, `negative`, `inconclusive`, `error`, `nothing-tested` |
 | `expect_method` | Optional. `reflected`, or the full carrier `reflected/unix/raw` |
@@ -125,14 +126,37 @@ README table must not outrun the engine.
 
 ## Status
 
-The two shipped cases are transcribed from
-[`docs/verify-it-yourself.md`](../../docs/verify-it-yourself.md), whose
-reproductions are documented as verified against vulhub. **They have not yet been
-executed through this harness** — it was written in an environment with no Docker
-daemon — so treat the first run as validation of the case files themselves. The
-`struts2-s2-001` case in particular guesses `/login.action` and `username` from
-vulhub's defaults, where that document deliberately tells the operator to read
-the form off the running app; its `notes` say so and how to check.
+Both shipped cases have now been executed through this harness, against vulhub
+on Docker. The first run is what the section above says it is: validation of the
+case files, and both needed correcting.
 
-Nothing in the repository's README has been changed to claim benchmark results.
-The coverage table becomes generated output once these cases have actually run.
+`struts2-s2-001` reported `negative` from 700 probes **against a target that is
+vulnerable** — the benchmark's own false negative, and the one failure it exists
+to prevent. It POSTed only `username`, and the login action throws before it
+re-renders the form unless `password` is present too, so every probe got an
+HTTP 500 and the injected value was never evaluated. The case now sends both
+fields and confirms with 70 of 700 probes through the `%{a*b}` OGNL form, while
+its class-attribution control stays clean at 844 probes.
+
+`webmin-cve-2019-15107` confirmed on the vulnerable half but its control was cut
+short: a timing regression sends real sleeps, and 1174s of them did not fit the
+900s default. The control now carries its own `timeout`, and the case reaches
+`needs-review` there as it always should have.
+
+Reaching Webmin at all needed a fix in the tool rather than the case — a current
+OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
+until `--insecure` was made to lower the security level as well as the
+certificate check.
+
+`python tests/bench/runner.py --all` is green: 2/2.
+
+    | RCE class | Target | Method | Verdict | Control | Result |
+    |---|---|---|---|---|---|
+    | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
+    | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
+
+That covers three of the four rows in the repository README's coverage table:
+the `reflected` and `eval` confirmations, and the `time` tier ceiling, which is
+the Webmin control here. The fourth -- Log4Shell through the OOB listener --
+still has no case, so it remains a claim this harness cannot reproduce. It needs
+a JNDI/lookup probe path before a case can be written for it.

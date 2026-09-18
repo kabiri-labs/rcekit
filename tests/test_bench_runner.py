@@ -221,6 +221,57 @@ class MarkdownTableTestCase(unittest.TestCase):
         self.assertNotIn("reflected/unix/raw", table)
 
 
+class CaseTimeoutTestCase(unittest.TestCase):
+    """A case may buy itself more clock, because the methods do not cost alike.
+
+    The Webmin tier-ceiling control fires a timing regression and every probe in
+    it is a real sleep: measured at 1174s against the live target, against a
+    900s default. Cut short, the run reports `error` — so the case failed as
+    though the tool had broken rather than as though the clock had run out, and
+    the benchmark said nothing true about the thing it exists to check."""
+
+    def _captured(self, case):
+        """The timeout each half would be given, without running anything."""
+        seen = []
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+            seen.append(timeout)
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original = runner.run_rcekit
+        runner.run_rcekit = fake_run_rcekit
+        try:
+            runner.run_case(case)
+        finally:
+            runner.run_rcekit = original
+        return seen
+
+    def test_without_a_timeout_both_halves_get_the_default(self):
+        self.assertEqual(self._captured(minimal_case()), [900.0, 900.0])
+
+    def test_a_case_timeout_covers_both_halves(self):
+        self.assertEqual(self._captured(minimal_case(timeout=1500)), [1500, 1500])
+
+    def test_the_control_may_raise_its_own(self):
+        # The common shape: the control is the slower half, because the method
+        # that must NOT be promoted is usually the expensive one.
+        case = minimal_case()
+        case["negative_control"]["timeout"] = 2400
+        self.assertEqual(self._captured(case), [900.0, 2400])
+
+    def test_a_control_timeout_wins_over_the_case_one(self):
+        case = minimal_case(timeout=1200)
+        case["negative_control"]["timeout"] = 2400
+        self.assertEqual(self._captured(case), [1200, 2400])
+
+    def test_the_shipped_webmin_control_carries_one(self):
+        # Without it this case cannot pass on any machine: the measured run is
+        # longer than the default allows.
+        case = runner.load_case(BENCH_ROOT / "cases" / "webmin-cve-2019-15107.json")
+        self.assertGreater(case["negative_control"]["timeout"], 1174,
+                           "the control's budget must exceed its measured runtime")
+
+
 class HarnessEndToEndTestCase(unittest.TestCase):
     """The run-and-judge path against a real socket, with no Docker involved.
 
