@@ -72,6 +72,16 @@ Example profiles ship in [`profiles/`](../profiles/).
 so a URL-encoded quote survives a `deny_chars` quote filter, because the literal
 character is no longer there.
 
+They also reach the **detection probe ladder** (`--methods`), where the check is
+deliberately stricter: a probe is judged on its literal form, before the delivery
+layer percent-encodes it for its injection point. The layers genuinely differ —
+transport encoding is undone by the server before the value reaches the sink, so
+a percent-encoded quote is still a quote when the application's own filter sees
+it. Denying a character narrows the ladder rather than emptying it: a target that
+strips `;` is still probed through `|`, `||`, `&&` and the newline. A profile
+strict enough to remove *every* probe reports `nothing-tested`, never
+`negative` — a run that sent nothing has not measured the target.
+
 **Sink shape** is the higher-leverage knob:
 
 | Key / flag | Meaning |
