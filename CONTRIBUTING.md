@@ -94,16 +94,34 @@ To add one:
 4. Add a `/vuln` (executes) vs `/reflect` (echoes) test to
    `DetectionMethodTestCase`: the method must `confirm` on `/vuln` and stay
    unconfirmed on `/reflect`. No third-party deps; keep the suite green on 3.8+.
-5. Add a **bench case** (see below). A unit test proves the method reaches the
-   right verdict from a given response; only a bench case proves it reaches that
-   verdict against the real software.
+5. Add a **bench case** (see below) where one can be arranged. A unit test
+   proves the method reaches the right verdict from a given response; only a
+   bench case proves it reaches that verdict against the real software. It is
+   not a per-PR gate, and a method whose case cannot run yet still ships --
+   with the reason written down in `tests/bench/README.md`, not left implicit.
+6. Do not add a row to the README's **CVE table** without a bench run behind it.
+   That table is the reproduced claim, and it carries the version it was last
+   verified at. The **methods table** describes capability, and the unit suite
+   is what backs that.
 
 ## Adding a bench case
 
 `tests/bench/` runs RCEKit against real vulnerable targets and checks the
-verdicts, so a coverage claim can be checked rather than asserted. It needs
-Docker and a [vulhub](https://github.com/vulhub/vulhub) checkout, so it is
-deliberately **not** part of `python -m unittest discover -s tests`:
+verdicts. What it measures is **the gap between a fixture and real software** --
+not which CVEs this tool catches. The oracle is generic, so a case proves a
+method works against *that build*, not that the method works; the unit suite
+already proves the second.
+
+That gap is where it earns its keep. Two findings it produced that no unit test
+could have: `--insecure` failing every TLS handshake against a legacy stack, so
+every probe came back `error` on any dated target; and a case reporting
+`negative` against a target that was vulnerable, because it omitted a form field
+the application needed before it would evaluate anything.
+
+So run it on a cadence, or when touching delivery, TLS, or a method's probe
+construction -- not on every change. It needs Docker and a
+[vulhub](https://github.com/vulhub/vulhub) checkout, and is deliberately **not**
+part of `python -m unittest discover -s tests`:
 
 ```bash
 python tests/bench/runner.py --list

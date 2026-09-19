@@ -3377,7 +3377,14 @@ class Verdict:
     evidence), ``inconclusive`` (evidence not attributable to execution), or
     ``error`` (the request never reached the target — a delivery/TLS failure,
     which is deliberately NOT a ``negative`` so a connectivity problem is never
-    read as 'not vulnerable')."""
+    read as 'not vulnerable').
+
+    Two further statuses are *proven findings about something other than
+    execution*, and exist so neither has to be squeezed into one of the above:
+    ``deserialization-sink`` (the endpoint reconstructed an attacker-supplied
+    object graph) and ``lookup-sink`` (the sink resolved a URI the tool chose).
+    Both outrank ``negative``, and neither ever becomes ``confirmed`` -- which
+    stays reserved for execution."""
     status: str
     evidence: str
 
@@ -4955,7 +4962,14 @@ class LookupCallback(DetectionMethod):
     Requires ``--oob-host``. Without it there are no probes, which is
     ``nothing-tested`` -- never ``negative``."""
     name = "lookup"
-    tier = "confirmed"
+    # NOT `confirmed`. A callback proves the sink resolved a URI RCEKit chose --
+    # that it evaluated the expression it was handed. It does not prove the
+    # target ran attacker code: Log4Shell becomes RCE when the LDAP server
+    # answers with a malicious class, and this listener answers with nothing.
+    # `confirmed` is reserved for execution and has to stay that way to mean
+    # anything, so this gets its own proven-sink tier beside
+    # `deserialization-sink` -- the same distinction, drawn for the same reason.
+    tier = "lookup-sink"
     # Callbacks are asynchronous: one can arrive well after the response that
     # triggered it, so no probe can be judged until the batch has been fired.
     aggregate = True
@@ -5050,7 +5064,7 @@ class LookupCallback(DetectionMethod):
             if hit:
                 scheme = self._scheme.get(probe.expected, "jndi")
                 out.append((probe, Verdict(
-                    "confirmed",
+                    "lookup-sink",
                     "target resolved a %s lookup RCEKit chose, calling back over %s with "
                     "token %r -- the sink evaluated the expression it was handed. The "
                     "listener served no object, so this proves the lookup, not a gadget "
@@ -5066,9 +5080,9 @@ class LookupCallback(DetectionMethod):
         # confirm_each carries the real logic; this only runs if an engine calls
         # the series form, and must agree with it.
         each = self.confirm_each(series) or []
-        confirmed = [verdict for _, verdict in each if verdict.status == "confirmed"]
-        if confirmed:
-            return confirmed[0]
+        proven = [verdict for _, verdict in each if verdict.status == "lookup-sink"]
+        if proven:
+            return proven[0]
         return Verdict("negative", "no lookup callback received for any probe")
 
 
@@ -5380,7 +5394,9 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     # attacker-controlled object data -- and a suspected RCE outranks a proven
     # non-RCE in triage. It never becomes `confirmed`, which is reserved for
     # execution and has to stay that way to mean anything.
-    for tier in ("confirmed", "needs-review", "deserialization-sink"):
+    # `lookup-sink` joins it on the same terms: proven, about a different
+    # property, and never folded into execution.
+    for tier in ("confirmed", "needs-review", "deserialization-sink", "lookup-sink"):
         if tier in verdicts:
             return tier
     if verdicts == {"error"}:
@@ -6821,12 +6837,49 @@ def main(argv: Optional[List[str]] = None) -> int:
                           "allow it.")
                     return 1
                 listener = OOBListener(answer_ip=args.listen_answer_ip, log_path=args.listen_log)
-                try:
-                    listener.start_http(args.listen_http_port)
-                except OSError as exc:
-                    print(f"[!] OOB listener could not bind HTTP port {args.listen_http_port}: {exc}")
-                    return 1
+                # HTTP is `oob`'s channel, not `lookup`'s. A JNDI lookup reaches
+                # this listener through DNS and nothing else, so a bound port
+                # 8080 must not abort a run that never needed it.
+                if OobCallback.name in callback_methods:
+                    try:
+                        listener.start_http(args.listen_http_port)
+                    except OSError as exc:
+                        print(f"[!] OOB listener could not bind HTTP port "
+                              f"{args.listen_http_port}: {exc}")
+                        return 1
+                else:
+                    try:
+                        listener.start_http(args.listen_http_port)
+                    except OSError as exc:
+                        print(f"[detect] HTTP port {args.listen_http_port} is unavailable ({exc}); "
+                              "continuing, because lookup probes call back over DNS.")
                 dns_up = listener.start_dns(args.listen_dns_port)
+                if LookupCallback.name in callback_methods and not dns_up:
+                    # Every lookup probe resolves its callback host before doing
+                    # anything else, and `lookup` has no second channel to fall
+                    # back to the way `oob` has HTTP. With no DNS listener the
+                    # probes go out, nothing can ever arrive, and every one of
+                    # them is recorded `negative` -- "we reached the target and
+                    # found nothing", about a channel that was never open. That
+                    # is the misreport this tool exists to prevent, so the run
+                    # stops instead.
+                    print(f"[!] --methods lookup confirms only through DNS, and the listener could "
+                          f"not take DNS port {args.listen_dns_port}. Every probe would be sent and "
+                          "every callback lost, which would be reported as `negative` on a target "
+                          "that may well be vulnerable. Free the port, or pass --listen-dns-port "
+                          "with one this host can bind.")
+                    return 1
+                if LookupCallback.name in callback_methods and args.listen_dns_port != 53:
+                    # Bound, but not where a resolver will look. A JNDI lookup
+                    # goes through the system resolver, which asks port 53 --
+                    # so a listener on any other port hears nothing unless the
+                    # operator has delegated the domain to something that
+                    # forwards here. Say so rather than let the run look clean.
+                    print(f"[!] --methods lookup: the DNS listener is on :{args.listen_dns_port}, but a "
+                          "JNDI lookup resolves through the system resolver, which asks :53. Unless "
+                          f"{args.oob_host} is delegated to something that forwards here, no callback "
+                          "can arrive and a `negative` would mean nothing. Use --listen-dns-port 53 "
+                          "(needs privilege) or a delegated domain.")
                 detection_config["oob_listener"] = listener
                 print(f"[detect] OOB listener up on HTTP :{args.listen_http_port}"
                       f"{f', DNS :{args.listen_dns_port}' if dns_up else ' (DNS port unavailable)'}; "
@@ -7127,6 +7180,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("  → the endpoint reconstructs attacker-supplied object graphs. Reaching "
                       "RCE from here depends on gadgets in the target's classpath, which is "
                       "outside what RCEKit confirms.")
+            lookup_sinks = [r for r in results if r["verdict"] == "lookup-sink"]
+            if lookup_sinks:
+                # Its own section for the same reason `deser` has one: the
+                # finding is proven and the thing it proves is not execution.
+                print(f"\n[detect] {len(lookup_sinks)} EXPRESSION-LOOKUP SINK(S) \u2014 "
+                      "NOT proof of RCE:")
+                for result in lookup_sinks:
+                    at = f" at {result['point']}" if result.get("point") else ""
+                    print(f"  [{result['method']}/{result['context']}]{at} "
+                          f"{result['payload'][:100]}   ({result['detail']})")
+                print("  \u2192 the sink resolved a URI RCEKit chose, so it evaluates the "
+                      "expressions it is given. Reaching RCE from here needs a server that "
+                      "answers the lookup with a loadable class; this listener answers with "
+                      "nothing, which is why the tier stops short of execution.")
             needs_review = [r for r in results if r["verdict"] == "needs-review"]
             if needs_review:
                 print(f"\n[detect] {len(needs_review)} NEEDS-REVIEW candidates "
