@@ -8,6 +8,33 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Added
+
+- **A tier correction has to reach the prose, not only the class.** Four tests
+  now read the tier from `DETECTION_METHODS[name].tier` and hold the sentences
+  an operator actually sees against it.
+
+  `lookup` moved from `confirmed` to `lookup-sink` on the class, and the move
+  was made in the README's CVE table -- but `blind_sink_advice` went on
+  offering `--methods lookup` as a method that "confirms", in the list where
+  `oob` and `file` do mean confirmed execution, and the README's Log4Shell demo
+  heading still said `confirmed` over alt text calling the run
+  "auto-confirming a blind Log4Shell RCE". Three places, one correction, and
+  nothing compared them: the existing test pinned the one line it was written
+  for (`time` is marked needs-review only) rather than asking every line the
+  same question.
+
+  So: every `blind_sink_advice` line naming a method must state that method's
+  tier and no other; every demo heading must match its row in the CVE table;
+  a CVE row may claim `confirmed` only for a method whose ceiling is
+  `confirmed`; and a recording below `confirmed` may not be described as
+  confirming, alt text included, since that is the sentence a screen reader
+  reads out. Each one was checked by reintroducing the defect it exists for,
+  and each carries a floor on how much it inspected -- a parser that matched
+  nothing would otherwise pass as silently as a clean run.
+
+  Test-only: no version bump, and nothing about a run changes.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added
