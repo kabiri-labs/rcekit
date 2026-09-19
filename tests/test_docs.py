@@ -315,18 +315,34 @@ class DemoTierTestCase(unittest.TestCase):
                 rows[(advisory.group(1), method.group(1))] = tier.group(1)
         return rows
 
-    def test_the_table_never_claims_a_tier_above_the_method_s_ceiling(self):
-        """`tier` on the class is the most a method can ever report, so a row
-        promising more than that is promising something the code cannot do."""
+    def test_every_row_states_the_tier_its_method_reports(self):
+        """The table is the source the heading and the alt text are checked
+        against, so it has to be checked against the code.
+
+        Only `confirmed` was compared at first, which left the table free to
+        drift anywhere below it: a `lookup` row reading `needs-review`, or
+        `deserialization-sink` -- a tier that method cannot emit at all --
+        would have passed, the heading would have matched the table, the alt
+        text would have matched the heading, and all three would have
+        disagreed with `LookupCallback.tier` in silence.
+
+        `tier` is a ceiling rather than an exact value: `write` reports
+        `needs-review` for a write that is served but not interpreted, and
+        `deser` does the same for a shape fingerprint. This asks for equality
+        anyway, because every row here is a headline demonstration of a method
+        at its ceiling. A row that genuinely belongs below one should widen
+        this deliberately -- the failure says so -- rather than be waved
+        through by a rule loose enough to miss the case above."""
         for (advisory, method), tier in self.rows.items():
             with self.subTest(advisory=advisory, method=method):
                 self.assertIn(method, rcekit.DETECTION_METHODS)
                 ceiling = rcekit.DETECTION_METHODS[method].tier
-                if tier == "confirmed":
-                    self.assertEqual(
-                        ceiling, "confirmed",
-                        f"the {advisory} row claims confirmed execution for `{method}`, "
-                        f"whose tier is {ceiling}")
+                self.assertEqual(
+                    tier, ceiling,
+                    f"the {advisory} row says `{method}` reached {tier}, but that "
+                    f"method's tier is {ceiling}. If the row is right and the "
+                    "demonstration really sat below the method's ceiling, widen this "
+                    "test on purpose")
 
     def test_every_demo_heading_matches_its_row_in_the_table(self):
         seen = 0
