@@ -4264,6 +4264,58 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         joined = "\n".join(rcekit.blind_sink_advice(["reflected"], self._Args()))
         self.assertRegex(joined, r"--methods time.*needs-review only")
 
+    # How each tier may be spelled in prose. A tier missing from this map is one
+    # no advice line knows how to describe, which the test below says out loud
+    # rather than passing over.
+    _TIER_WORDS = {
+        "confirmed": ("confirms",),
+        "needs-review": ("needs-review",),
+        "lookup-sink": ("lookup sink", "lookup-sink"),
+        "deserialization-sink": ("deserialization sink", "deserialization-sink"),
+    }
+
+    def test_every_line_states_the_tier_its_method_actually_reaches(self):
+        """Advice is a command the operator will run, so the tier it promises
+        has to be the tier the method can reach.
+
+        `--methods lookup` shipped in this list saying "confirms" while the
+        method reported `lookup-sink` -- beside `oob` and `file`, where the same
+        word does mean confirmed execution, and `time`, which is marked
+        needs-review only. The correction had already landed on
+        `LookupCallback.tier`; nothing compared the class to the sentence
+        describing it, so the sentence the operator reads kept the old claim.
+
+        Pinning one line by name is what let that happen, so this asks every
+        line the same question and sources the answer from the class."""
+        lines = rcekit.blind_sink_advice(["reflected"], self._Args())
+        self.assertTrue(lines)
+        named = 0
+        for line in lines:
+            match = re.search(r"--methods (\w+)", line)
+            if not match:
+                continue
+            name = match.group(1)
+            named += 1
+            with self.subTest(method=name):
+                self.assertIn(name, rcekit.DETECTION_METHODS,
+                              "the advice names a method that does not exist")
+                tier = rcekit.DETECTION_METHODS[name].tier
+                self.assertIn(tier, self._TIER_WORDS,
+                              f"{name} reports {tier!r}, which this test cannot spell -- "
+                              "add it to _TIER_WORDS rather than dropping the check")
+                self.assertTrue(
+                    any(word in line for word in self._TIER_WORDS[tier]),
+                    f"the {name} line never says it reaches {tier}: {line}")
+                for other, words in self._TIER_WORDS.items():
+                    if other == tier:
+                        continue
+                    for word in words:
+                        self.assertNotIn(
+                            word, line,
+                            f"the {name} line promises {other} for a method whose "
+                            f"tier is {tier}: {line}")
+        self.assertGreaterEqual(named, 3, "the advice named no methods to check")
+
 
 class BlindSinkAdviceCLITestCase(unittest.TestCase):
     """The advice has to reach the operator through the real CLI, and only when

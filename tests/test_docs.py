@@ -261,6 +261,130 @@ class ComparisonSectionTestCase(unittest.TestCase):
             )
 
 
+class DemoTierTestCase(unittest.TestCase):
+    """The README states each demo's tier three times, and they have to agree.
+
+    Once in the CVE table's verdict column, once in the heading above the
+    recording, and once in the recording's alt text. A tier that moves has to
+    move in all three; `lookup` moved from `confirmed` to `lookup-sink` in the
+    table and the heading below it went on saying `confirmed`, with alt text
+    calling the run "auto-confirming a blind Log4Shell RCE". The table row was
+    the one anybody looked at.
+
+    Nothing here reads a tier from prose and trusts it: the ceiling comes from
+    the method class, and the table is what the other two are checked against.
+    """
+
+    ROW_RE = re.compile(r"^\|(.+)\|\s*$")
+    ADVISORY_RE = re.compile(r"(CVE-\d{4}-\d{4,}|S2-\d+)")
+    TIER_RE = re.compile(r"`([a-z][a-z-]*)`")
+    SUMMARY_RE = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
+    DETAILS_RE = re.compile(r"<details[^>]*>(.*?)</details>", re.DOTALL)
+    HEADING_TIER_RE = re.compile(r"→\s*<code>([a-z][a-z-]*)</code>")
+    METHOD_RE = re.compile(r"<code>([a-z][a-z-]*)</code>")
+    ALT_RE = re.compile(r"!\[([^\]]*)\]\(")
+    # "never confirmed", "not confirmed on its own" -- a denial is the opposite
+    # of the claim being looked for, so it is removed before looking.
+    DENIAL_RE = re.compile(r"\b(?:never|not|no)\s+`?confirm\w*`?", re.IGNORECASE)
+
+    def setUp(self):
+        self.body = README.read_text(encoding="utf-8")
+        self.rows = self._cve_table()
+        self.assertTrue(self.rows, "the README's CVE table was not found")
+
+    def _cve_table(self):
+        """The CVE table as {(advisory, method): tier}, read from the one table
+        whose header ends in a Verdict column."""
+        rows = {}
+        in_table = False
+        for line in self.body.splitlines():
+            match = self.ROW_RE.match(line)
+            if not match:
+                in_table = False
+                continue
+            cells = [cell.strip() for cell in match.group(1).split("|")]
+            if len(cells) == 4 and cells[3] == "Verdict":
+                in_table = True
+                continue
+            if not in_table or len(cells) != 4 or set(cells[0]) <= set("- :"):
+                continue
+            method = self.TIER_RE.search(cells[1])
+            advisory = self.ADVISORY_RE.search(cells[2])
+            tier = self.TIER_RE.search(cells[3])
+            if method and advisory and tier:
+                rows[(advisory.group(1), method.group(1))] = tier.group(1)
+        return rows
+
+    def test_the_table_never_claims_a_tier_above_the_method_s_ceiling(self):
+        """`tier` on the class is the most a method can ever report, so a row
+        promising more than that is promising something the code cannot do."""
+        for (advisory, method), tier in self.rows.items():
+            with self.subTest(advisory=advisory, method=method):
+                self.assertIn(method, rcekit.DETECTION_METHODS)
+                ceiling = rcekit.DETECTION_METHODS[method].tier
+                if tier == "confirmed":
+                    self.assertEqual(
+                        ceiling, "confirmed",
+                        f"the {advisory} row claims confirmed execution for `{method}`, "
+                        f"whose tier is {ceiling}")
+
+    def test_every_demo_heading_matches_its_row_in_the_table(self):
+        seen = 0
+        for summary in self.SUMMARY_RE.findall(self.body):
+            heading_tier = self.HEADING_TIER_RE.search(summary)
+            advisory = self.ADVISORY_RE.search(summary)
+            if not (heading_tier and advisory):
+                continue
+            seen += 1
+            with self.subTest(summary=summary):
+                candidates = {key: tier for key, tier in self.rows.items()
+                              if key[0] == advisory.group(1)}
+                self.assertTrue(candidates,
+                                "the demo names an advisory the CVE table does not")
+                methods = [name for name in self.METHOD_RE.findall(summary)
+                           if name in rcekit.DETECTION_METHODS]
+                if methods:
+                    key = (advisory.group(1), methods[0])
+                    self.assertIn(key, candidates,
+                                  "the demo pairs a method with an advisory the table "
+                                  "does not pair them with")
+                    expected = candidates[key]
+                else:
+                    self.assertEqual(
+                        len(candidates), 1,
+                        "the demo names no method and its advisory has more than one "
+                        "row, so there is nothing to check it against")
+                    expected = next(iter(candidates.values()))
+                self.assertEqual(
+                    heading_tier.group(1), expected,
+                    f"the demo heading says {heading_tier.group(1)} where the table "
+                    f"says {expected}")
+        self.assertGreaterEqual(seen, 3, "no demo headings were checked")
+
+    def test_a_recording_below_confirmed_is_not_described_as_confirming(self):
+        """The heading is one claim and the alt text is another.
+
+        Both said `confirmed` for the Log4Shell demo. Changing the heading alone
+        would have left "auto-confirming a blind Log4Shell RCE" underneath it,
+        which is the sentence a screen reader reads out."""
+        seen = 0
+        for details in self.DETAILS_RE.findall(self.body):
+            heading_tier = self.HEADING_TIER_RE.search(details)
+            alt = self.ALT_RE.search(details)
+            if not (heading_tier and alt):
+                continue
+            if heading_tier.group(1) == "confirmed":
+                continue
+            seen += 1
+            with self.subTest(tier=heading_tier.group(1)):
+                claim = self.DENIAL_RE.sub("", alt.group(1))
+                self.assertNotIn(
+                    "confirm", claim.lower(),
+                    f"a {heading_tier.group(1)} recording is described as confirming: "
+                    f"{alt.group(1)}")
+        self.assertGreaterEqual(seen, 1, "no sub-confirmed recordings were checked")
+
+
 class CLIDocumentationTestCase(unittest.TestCase):
     """Guard against the CLI and its reference page drifting apart."""
 
