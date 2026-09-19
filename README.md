@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.35.5** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.36.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -192,7 +192,8 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Internal / no-egress** targets | `file` | Writes a random token and fetches it back through *any* read-back path — a web root, an LFI parameter, a download or export handler, a `/tmp`-backed preview. Proves execution **plus** a write primitive, with no external listener. |
 | **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `confirmed` RCE, the source coming back verbatim is `needs-review` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
-| **Blind / out-of-band** — Log4Shell/JNDI, exfil, async | *(OOB listener)* | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload. |
+| **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
+| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Confirms on the callback alone — the listener serves no object, so this proves the lookup, not a gadget chain. |
 
 Three things widen where those methods can reach, without changing what any of
 them will call `confirmed`:

@@ -8,6 +8,41 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.36.0] — 2026-09-19
+
+### Added
+
+- **`--methods lookup`: confirmation for an expression-lookup sink**, the shape
+  Log4Shell has, where the sink resolves a URI instead of running a command.
+
+  `oob` could not reach one. Its `applicable` does admit `java` -- a Java
+  application can shell out, so the environment is genuinely shell-capable --
+  but every probe it builds is a shell command: `nslookup`, `curl`, `certutil`,
+  `iwr`. A sink that interpolates `${jndi:...}` runs none of them, so the method
+  applied, sent its whole ladder, and came back `negative` on a target that is
+  exploitable. The README's Log4Shell row rested on the standalone listener and
+  a generated payload file, which produce no verdict row at all, so nothing in
+  the engine could reproduce that claim.
+
+  The probes are lookups and nothing else, and they depend on the injection
+  context rather than the environment, exactly as `eval`'s do. The oracle is the
+  one `oob` already uses: a token the target could only have learned by
+  resolving what it was handed. Every form starts by resolving
+  `<token>.<host>`, so the in-process DNS listener catches all three schemes --
+  no LDAP or RMI server is needed, and none is started.
+
+  **The listener never serves a class.** `jndi:dns://` is a name lookup and can
+  be nothing else; `ldap://` and `rmi://` do attempt a connection, but what
+  answers is the DNS listener, which returns no object, so nothing is fetched or
+  deserialized. The proof is the callback and the finding is "this sink resolved
+  a URI I chose" -- the same line `deser` draws, drawn here before it can be
+  crossed.
+
+  Behind the same two gates as `oob`, and sharing its listener: it needs
+  `--oob-host`, and it is held back at the default safety tier because it makes
+  the target open outbound connections. Without `--oob-host` it builds no probes
+  at all, which the engine reports as `nothing-tested` -- never `negative`.
+
 ## [2.35.5] — 2026-09-19
 
 ### Fixed
@@ -1182,7 +1217,9 @@ this file and have not been restated here.
 - **[2.1.0]**
 
 
-[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...HEAD
+
+[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.36.0]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...v2.36.0
 [2.35.5]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...v2.35.5
 [2.35.4]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...v2.35.4
 [2.35.3]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...v2.35.3
