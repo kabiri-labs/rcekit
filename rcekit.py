@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.35.3"
+__version__ = "2.35.4"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -2589,11 +2589,19 @@ class RCEKit:
                     # for an expensive measurement. Rounds are bounded so a
                     # method cannot loop the engine.
                     series: List[Tuple[Probe, Observation]] = []
-                    batch = self._apply_target_profile(meth, meth.build_probes(record, rng))
+                    # `built` is what the method offered; `batch` is what the
+                    # declared profile allows to be sent. The two are tracked
+                    # apart on purpose. A wave the profile emptied is NOT a
+                    # method that has run out of ideas: an adaptive method holds
+                    # its separators back in waves, and a filter that removes the
+                    # first wave's usually leaves later ones intact -- a sink
+                    # that strips ';' and '|' still takes '&&', a newline, or the
+                    # bare command. Treating an emptied wave as the end skipped
+                    # every one of those and reported `nothing-tested` for a sink
+                    # the ladder could still have reached.
+                    built = meth.build_probes(record, rng)
                     for _round in range(self.MAX_PROBE_ROUNDS):
-                        if not batch:
-                            break
-                        for probe in batch:
+                        for probe in self._apply_target_profile(meth, built):
                             req_timeout = timeout + (probe.delay_s or 0.0) + 2.0
                             status, body, chans, elapsed = self._fire_channels(
                                 probe.payload, url, method, data, headers, url_location,
@@ -2604,10 +2612,14 @@ class RCEKit:
                                 control_channels=control_channels)))
                             if delay:
                                 time.sleep(delay)
+                        if not built:
+                            break
                         # A screening wave's follow-up probes go through the same
                         # gate: a method that answers with a second round of
-                        # separators must not smuggle a denied one back in.
-                        batch = self._apply_target_profile(meth, meth.next_probes(series))
+                        # separators must not smuggle a denied one back in. The
+                        # round cap still bounds this, so a method whose every
+                        # wave is filtered cannot spin the engine.
+                        built = meth.next_probes(series)
                     if not series:
                         # The method built no probes for this carrier, so there
                         # is nothing to judge. Falling through would ask an
