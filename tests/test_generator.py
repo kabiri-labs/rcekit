@@ -3325,6 +3325,30 @@ class FilteredWaveTestCase(unittest.TestCase):
         self.assertIn("needs-review", {r["verdict"] for r in results},
                       "the sink is reachable through a surviving separator")
 
+    def test_the_cost_estimate_counts_the_wave_the_run_will_send(self):
+        """The preflight line is an audit or it is noise.
+
+        The estimate is documented as a floor, because a wave an adaptive method
+        picks *after seeing timings* cannot be predicted from here. A floor of
+        zero on a run that fires six requests is not a conservative floor
+        though, it is a wrong one -- and that is what this configuration
+        produced once the run learned to continue past an emptied wave."""
+        import random
+
+        record = make_record(environment="unix", context="raw")
+        # One carrier, first wave entirely denied, later separators intact.
+        config = {"time_base": 1, "deny_chars": ";|",
+                  "sink_shapes": ("sep", "chain", "newline", "raw")}
+        method = ParametricTime(RCEKit(), config)
+        first = method.build_probes(record, random.Random(0))
+        self.assertTrue(first, "precondition: the method offers a first wave")
+        self.assertEqual(method.filter_probes(first)[0], [],
+                         "precondition: the profile empties that wave")
+
+        estimate = RCEKit().estimate_detection_probes([record], ["time"], config)
+        self.assertGreater(estimate, 0,
+                           "the floor must cover the wave the run will actually send")
+
     def test_a_method_with_nothing_left_to_offer_still_stops(self):
         # The other half of the same branch: when the method itself is done, the
         # loop must end rather than spin to the round cap.
