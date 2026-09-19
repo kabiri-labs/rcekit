@@ -3774,6 +3774,121 @@ class QuotedShellCarrierTestCase(unittest.TestCase):
         self.assertTrue(any(r["context"] == "shell_single_quoted" for r in confirmed))
 
 
+class LookupCallbackTestCase(unittest.TestCase):
+    """The expression-lookup sink -- Log4Shell's shape, where the sink resolves
+    a URI instead of running a command.
+
+    `oob` applies to a `java` record (a Java app can shell out) but every probe
+    it builds is a shell command, so it sends its whole ladder at a Log4j sink
+    and reports `negative` on a target that is exploitable. That is the gap this
+    method exists for, and the control below is exactly that comparison."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="java", context="raw")
+
+    def _probes(self, config):
+        import random as _random
+        method = rcekit.LookupCallback(self.gen, config)
+        return method, method.build_probes(self.rec, _random.Random(1))
+
+    def test_it_does_not_run_without_an_oob_host(self):
+        # It makes the target open outbound connections, so it stays off until
+        # the operator names the host. No probes is `nothing-tested`, which the
+        # engine reports for itself -- never `negative`.
+        self.assertFalse(rcekit.LookupCallback(self.gen, {}).applicable(self.rec))
+        self.assertTrue(
+            rcekit.LookupCallback(self.gen, {"oob_host": "x.example"}).applicable(self.rec))
+
+    def test_every_probe_is_a_lookup_and_never_a_command(self):
+        _, probes = self._probes({"oob_host": "x.example"})
+        self.assertTrue(probes)
+        for probe in probes:
+            with self.subTest(payload=probe.payload):
+                self.assertIn("jndi:", probe.payload)
+                # The thing that makes this method necessary: no shell anywhere.
+                for shellish in ("nslookup", "curl", "wget", "certutil", "iwr", ";", "|", "&&"):
+                    self.assertNotIn(shellish, probe.payload)
+
+    def test_each_probe_carries_its_own_token(self):
+        # Sharing one token would mark every scheme confirmed as soon as any one
+        # called back, and the report would name payloads that did nothing.
+        _, probes = self._probes({"oob_host": "x.example"})
+        tokens = [p.expected for p in probes]
+        self.assertEqual(len(tokens), len(set(tokens)))
+        for probe in probes:
+            self.assertIn(probe.expected, probe.payload)
+
+    def test_a_bare_ip_builds_nothing_rather_than_unattributable_probes(self):
+        # `<token>.10.0.0.1` resolves nowhere, and a lookup has no second channel
+        # to carry the token. Probes that could never be correlated are requests
+        # that cannot confirm.
+        _, probes = self._probes({"oob_host": "10.0.0.1"})
+        self.assertEqual(probes, [])
+
+    def test_the_token_rides_in_the_payload_so_observe_must_skip_it(self):
+        # The second-order channel may only look for a value the payload does
+        # not already carry, or a target that merely stores the payload would
+        # hand the token back by reflection and every probe would read confirmed.
+        _, probes = self._probes({"oob_host": "x.example"})
+        for probe in probes:
+            result = {"expected": probe.expected, "payload": probe.payload}
+            self.assertFalse(RCEKit._observable(result))
+
+    def test_it_confirms_on_a_resolving_sink_and_not_on_a_reflecting_one(self):
+        """The direct false-positive gate: /vuln resolves the URI it was handed,
+        /reflect echoes it verbatim."""
+        import random as _random
+        import re as _re
+
+        listener = rcekit.OOBListener()
+        config = {"oob_host": "x.example", "oob_listener": listener, "oob_wait": 0.2}
+        method = rcekit.LookupCallback(self.gen, config)
+        probes = method.build_probes(self.rec, _random.Random(3))
+        self.assertTrue(probes)
+
+        # /vuln: the sink resolves the name inside the expression, which is what
+        # a lookup sink does -- recorded here as the listener would record it.
+        for probe in probes:
+            host = _re.search(r"jndi:\w+://([^/]+)/", probe.payload).group(1)
+            listener.record("dns", "10.0.0.9", host)
+        resolved = method.confirm_each([(p, Observation(200, "ok")) for p in probes])
+        self.assertTrue(resolved)
+        for probe, verdict in resolved:
+            self.assertEqual(verdict.status, "confirmed", probe.payload)
+            self.assertIn("proves the lookup, not a gadget chain", verdict.evidence)
+
+        # /reflect: the payload comes back in the body and nothing is resolved.
+        quiet = rcekit.OOBListener()
+        echo = rcekit.LookupCallback(
+            self.gen, {"oob_host": "x.example", "oob_listener": quiet, "oob_wait": 0.2})
+        echoed = echo.build_probes(self.rec, _random.Random(4))
+        verdicts = echo.confirm_each([(p, Observation(200, p.payload)) for p in echoed])
+        self.assertTrue(verdicts)
+        for probe, verdict in verdicts:
+            self.assertNotEqual(verdict.status, "confirmed", probe.payload)
+
+    def test_a_delivery_failure_is_an_error_not_a_negative(self):
+        import random as _random
+        listener = rcekit.OOBListener()
+        method = rcekit.LookupCallback(
+            self.gen, {"oob_host": "x.example", "oob_listener": listener, "oob_wait": 0.1})
+        probes = method.build_probes(self.rec, _random.Random(5))
+        verdicts = method.confirm_each([(p, Observation(None, "connection refused")) for p in probes])
+        self.assertTrue(all(v.status == "error" for _, v in verdicts))
+
+    def test_without_a_listener_it_reports_error(self):
+        import random as _random
+        method = rcekit.LookupCallback(self.gen, {"oob_host": "x.example"})
+        probes = method.build_probes(self.rec, _random.Random(6))
+        verdicts = method.confirm_each([(p, Observation(200, "ok")) for p in probes])
+        self.assertTrue(all(v.status == "error" for _, v in verdicts))
+
+    def test_it_is_registered_and_keeps_the_confirmed_tier(self):
+        self.assertIs(rcekit.DETECTION_METHODS["lookup"], rcekit.LookupCallback)
+        self.assertEqual(rcekit.LookupCallback.tier, "confirmed")
+
+
 class OobCallbackTestCase(unittest.TestCase):
     """Out-of-band detection. A fully blind sink -- nothing in the response, no
     writable web root -- had no path to a `confirmed` verdict at all."""
