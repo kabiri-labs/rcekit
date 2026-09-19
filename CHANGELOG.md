@@ -17,9 +17,15 @@ formats, or the template schema.
   HTTP target all announced a TLS downgrade that never happened -- and it named
   both downgrade rungs even on an OpenSSL build that had refused one of them.
   Reporting a downgrade on a run that opened no TLS connection is the same
-  defect as reporting a probe that was never sent. The notice now fires the
-  first time a context is actually built for an HTTPS target, and lists the
-  rungs that took.
+  defect as reporting a probe that was never sent, in the one line written to
+  be an audit of the run.
+
+  Building the context and saying so are now separate questions. The context is
+  built whatever the target's scheme is -- urllib follows a redirect with the
+  handler it was given, so an `http://` target that lands on a self-signed or
+  legacy `https://` one needs it as much as a direct HTTPS target does. The
+  notice fires once, when a connection has actually reached TLS, and lists only
+  the rungs that took.
 
 - **A benchmark case may set `timeout` to zero.** `timeout or 900.0` replaced
   an explicit `0` with the fifteen-minute default, so a case deliberately

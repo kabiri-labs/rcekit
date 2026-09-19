@@ -2795,7 +2795,8 @@ class InsecureDowngradeNoticeTestCase(unittest.TestCase):
         generator.insecure = True
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            ctx = generator._verify_ssl_context("https://target.example/")
+            ctx = generator._verify_ssl_context()
+            generator._announce_insecure("https://target.example/")
         printed = buffer.getvalue()
         self.assertIn("no certificate or hostname check", printed)
         self.assertEqual("OpenSSL security level 0" in printed,
@@ -2803,6 +2804,39 @@ class InsecureDowngradeNoticeTestCase(unittest.TestCase):
                          != {c["name"] for c in ssl.create_default_context().get_ciphers()})
         self.assertEqual("TLS 1.0 allowed" in printed,
                          ctx.minimum_version == ssl.TLSVersion.TLSv1)
+
+    def test_the_context_survives_a_redirect_into_tls(self):
+        """An `http://` target may land on a self-signed `https://` one.
+
+        urllib follows a redirect with the handler it was given, so gating the
+        context on the *original* scheme made `--insecure` stop working on
+        exactly the flow an operator reaches for it on: the redirected request
+        went out through the default verifying handler and failed, with the flag
+        set. The context is built whatever the scheme; only the notice waits to
+        learn whether TLS was really used."""
+        generator = RCEKit()
+        generator.insecure = True
+        self.assertIsNotNone(generator._verify_ssl_context(),
+                             "the permissive context must exist for a possible redirect")
+        generator_without = RCEKit()
+        self.assertIsNone(generator_without._verify_ssl_context(),
+                          "a run that did not ask still verifies certificates")
+
+    def test_a_redirect_into_tls_is_announced_after_the_fact(self):
+        # The notice follows the connection, not the argument: nothing is said
+        # for the http:// target, and it is said once the response reveals TLS.
+        import contextlib
+        import io
+
+        generator = RCEKit()
+        generator.insecure = True
+        generator._verify_ssl_context()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            generator._announce_insecure("http://target.example/")
+            self.assertEqual(buffer.getvalue(), "", "plain HTTP announces nothing")
+            generator._announce_insecure("https://target.example/after")
+        self.assertIn("--insecure:", buffer.getvalue())
 
     def test_the_notice_is_printed_once_per_run(self):
         import contextlib
@@ -2812,7 +2846,8 @@ class InsecureDowngradeNoticeTestCase(unittest.TestCase):
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
             for _ in range(5):
-                generator._verify_ssl_context("https://target.example/")
+                generator._verify_ssl_context()
+                generator._announce_insecure("https://target.example/")
         self.assertEqual(buffer.getvalue().count("--insecure:"), 1)
 
 
