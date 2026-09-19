@@ -252,6 +252,13 @@ class CaseTimeoutTestCase(unittest.TestCase):
     def test_a_case_timeout_covers_both_halves(self):
         self.assertEqual(self._captured(minimal_case(timeout=1500)), [1500, 1500])
 
+    def test_an_explicit_zero_is_honoured_rather_than_defaulted_away(self):
+        # `timeout or 900.0` replaced an explicit 0 with the fifteen-minute
+        # default, so a case deliberately bounded to no time at all ran far
+        # longer than it asked for. Validation does not reject zero and
+        # run_rcekit already handles the expiry, so zero has to mean zero.
+        self.assertEqual(self._captured(minimal_case(timeout=0)), [0, 0])
+
     def test_the_control_may_raise_its_own(self):
         # The common shape: the control is the slower half, because the method
         # that must NOT be promoted is usually the expensive one.

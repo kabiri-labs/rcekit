@@ -332,7 +332,7 @@ def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
                                     wait_for.get("timeout", 120))
             if not ready:
                 return False, f"target never became ready at {wait_for['url']}", {}
-        report = run_rcekit(invocation, timeout=timeout or 900.0)
+        report = run_rcekit(invocation, timeout=900.0 if timeout is None else timeout)
         ok, detail = check_report(report, expect, expect_method)
         return ok, detail, report
     finally:

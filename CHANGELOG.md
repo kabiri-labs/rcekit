@@ -8,6 +8,23 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.35.5] — 2026-09-19
+
+### Fixed
+
+- **The `--insecure` notice describes the run it is in.** It was printed as
+  soon as the flag was seen, so a generation-only run, `--doctor`, or a plain
+  HTTP target all announced a TLS downgrade that never happened -- and it named
+  both downgrade rungs even on an OpenSSL build that had refused one of them.
+  Reporting a downgrade on a run that opened no TLS connection is the same
+  defect as reporting a probe that was never sent. The notice now fires the
+  first time a context is actually built for an HTTPS target, and lists the
+  rungs that took.
+
+- **A benchmark case may set `timeout` to zero.** `timeout or 900.0` replaced
+  an explicit `0` with the fifteen-minute default, so a case deliberately
+  bounded to no time at all ran for much longer than it asked for.
+
 ## [2.35.4] — 2026-09-19
 
 ### Fixed
@@ -31,8 +48,6 @@ formats, or the template schema.
   allows to be sent, and ends only when the method itself is done. The round cap
   still bounds it, so a method whose every wave is filtered cannot spin the
   engine.
-
-### Fixed
 
 - **The unit suite runs off Linux.** The fake vulnerable sinks in the tests are
   POSIX command-injection points and every probe built for them is POSIX, but
@@ -67,8 +82,6 @@ formats, or the template schema.
   has a guard of its own. The capture is written as bytes; the `newline` argument
   that would say the same thing arrived in Python 3.10, and this project
   supports 3.8.
-
-Test-only: no version bump.
 
 ## [2.35.3] — 2026-09-18
 
@@ -1163,7 +1176,8 @@ this file and have not been restated here.
 - **[2.1.0]**
 
 
-[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...HEAD
+[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...HEAD
+[2.35.5]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...v2.35.5
 [2.35.4]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...v2.35.4
 [2.35.3]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...v2.35.3
 [2.35.2]: https://github.com/kabiri-labs/rcekit/compare/v2.35.1...v2.35.2

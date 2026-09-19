@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.35.4"
+__version__ = "2.35.5"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -2089,7 +2089,7 @@ class RCEKit:
         target, body, hdrs = self._build_verify_request(
             payload, url, data, headers, url_location, body_location)
         request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
-        context = self._verify_ssl_context()
+        context = self._verify_ssl_context(target)
         start = time.time()
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
@@ -2139,7 +2139,7 @@ class RCEKit:
         except Exception:
             return [("response body", text)]
 
-    def _verify_ssl_context(self):
+    def _verify_ssl_context(self, target: Optional[str] = None):
         """SSL context for verification/detection requests. Returns ``None``
         (urllib's default, certificate-verifying) unless ``--insecure`` was set,
         in which case certificate verification is disabled — self-signed or
@@ -2164,8 +2164,16 @@ class RCEKit:
         between testing the target and reporting that it could not be reached.
 
         ``--insecure`` is the flag that says TLS assurance is not what this run
-        is for. This makes it mean that consistently rather than halfway."""
+        is for. This makes it mean that consistently rather than halfway.
+
+        ``target`` is the URL about to be fetched. A plain-HTTP target gets
+        ``None``: urllib would ignore the context anyway, and the announcement
+        below must describe what this run actually does. Reporting a TLS
+        downgrade on a run that never opened a TLS connection is the same
+        defect as reporting a probe that was never sent."""
         if not getattr(self, "insecure", False):
+            return None
+        if target and not str(target).lower().startswith("https"):
             return None
         ctx = getattr(self, "_insecure_ctx", None)
         if ctx is None:
@@ -2177,9 +2185,13 @@ class RCEKit:
             # Each rung is refused by some builds rather than all of them, and a
             # context that lost one is still better than no context: a build
             # that will not go below TLS 1.2 can still be handed a weak-key
-            # certificate, which is the commoner of the two failures.
+            # certificate, which is the commoner of the two failures. Which ones
+            # took is recorded, because the notice names what was applied rather
+            # than what was attempted.
+            applied = ["no certificate or hostname check"]
             try:
                 ctx.set_ciphers("DEFAULT@SECLEVEL=0")
+                applied.append("OpenSSL security level 0")
             except ssl.SSLError:
                 logger.debug("OpenSSL build refuses SECLEVEL=0; keeping its default.")
             try:
@@ -2190,9 +2202,17 @@ class RCEKit:
                     # who cannot act on it.
                     warnings.simplefilter("ignore", DeprecationWarning)
                     ctx.minimum_version = ssl.TLSVersion.TLSv1
+                applied.append("TLS 1.0 allowed")
             except (ValueError, OSError):
                 logger.debug("OpenSSL build refuses TLS 1.0; keeping its minimum version.")
             self._insecure_ctx = ctx
+            # Said once, at the moment it first applies. An operator on a
+            # monitored engagement should read the full extent in the transcript
+            # rather than infer it from the help text -- and should read what
+            # this build actually did, not what the flag asks for.
+            print("[!] --insecure: TLS is unverified AND downgraded for this run ("
+                  + ", ".join(applied) + ") so that legacy targets complete a handshake. "
+                  "The connection carries no authenticity guarantee.")
         return ctx
 
     def run_verification(self, records: Iterator[PayloadRecord], url: str, method: str = "GET",
@@ -6286,14 +6306,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         template_path=template_path,
     )
     generator.insecure = args.insecure
-    if args.insecure:
-        # Said once, plainly. The flag now gives up more than certificate
-        # identity, and an operator who reaches for it on a monitored engagement
-        # should see the full extent in the transcript rather than infer it from
-        # the help text.
-        print("[!] --insecure: TLS is unverified AND downgraded for this run (no certificate or "
-              "hostname check, OpenSSL security level 0, TLS 1.0 allowed) so that legacy targets "
-              "complete a handshake. The connection carries no authenticity guarantee.")
 
     # Never silent about a corpus that should have been there: someone who
     # thinks they are running an edited corpus must not discover only from the
