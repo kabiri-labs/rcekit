@@ -31,6 +31,13 @@ formats, or the template schema.
   `<token>.<host>`, so the in-process DNS listener catches all three schemes --
   no LDAP or RMI server is needed, and none is started.
 
+  **It reports `lookup-sink`, never `confirmed`.** A callback proves the sink
+  resolved a URI RCEKit chose -- that it evaluated the expression it was handed.
+  It does not prove the target ran attacker code: Log4Shell becomes RCE when the
+  LDAP server answers with a loadable class. So the method gets its own
+  proven-sink tier beside `deserialization-sink`, with its own section in the
+  report, and `confirmed` keeps meaning executed.
+
   **The listener never serves a class.** `jndi:dns://` is a name lookup and can
   be nothing else; `ldap://` and `rmi://` do attempt a connection, but what
   answers is the DNS listener, which returns no object, so nothing is fetched or

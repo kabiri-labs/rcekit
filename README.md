@@ -28,8 +28,28 @@ differenced against a payload-free control:
 |---|---|---|---|
 | OS command injection (results-based) | `reflected` | Webmin 1.910 — CVE-2019-15107 | **`confirmed`** |
 | Expression injection (OGNL) | `eval` | Apache Struts2 — S2-001 | **`confirmed`** |
-| Blind / out-of-band (Log4Shell/JNDI) | *OOB listener* | Log4Shell — CVE-2021-44228 | **`confirmed`** |
+| Expression-lookup (Log4Shell/JNDI) | `lookup` | Log4Shell — CVE-2021-44228 | `lookup-sink` † |
 | Blind command injection (no output) | `time` | Webmin 1.910 — CVE-2019-15107 | `needs-review` |
+
+Every row but the marked one is reproduced by
+[`tests/bench/`](tests/bench/), which runs RCEKit against these builds under
+Docker and checks the verdict **and** its negative control. Last run green at
+**2.35.5** (2026-09-19): 2/2 cases, with the Struts2 control `negative` and the
+Webmin `time` control held at `needs-review`. That is a point-in-time claim, not
+a continuous one -- the benchmark is run on a cadence, not on every change.
+
+† Verified by hand against vulhub at **2.17.0**, and written up step by step in
+[`docs/verify-it-yourself.md`](docs/verify-it-yourself.md) -- but not carried by
+the automated benchmark, so it is not re-checked on the cadence the other rows
+are. A JNDI lookup resolves its callback host through UDP 53, so a case needs a
+delegated domain or a DNS listener inside the target's own container network;
+neither is arranged yet. [`tests/bench/README.md`](tests/bench/README.md)
+records what would close it.
+
+The verdict on that row is `lookup-sink`, not `confirmed`, and always was in
+substance: what the callback proves is that the sink resolved a URI RCEKit
+chose. Reaching RCE needs a server that answers the lookup with a loadable
+class, which this listener never does.
 
 <details open>
 <summary><b><code>reflected</code> — OS command injection, Webmin CVE-2019-15107 → <code>confirmed</code></b></summary>
@@ -193,7 +213,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `confirmed` RCE, the source coming back verbatim is `needs-review` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
-| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Confirms on the callback alone — the listener serves no object, so this proves the lookup, not a gadget chain. |
+| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `confirmed`: the listener serves no object, so what is proven is the lookup, not a gadget chain. |
 
 Three things widen where those methods can reach, without changing what any of
 them will call `confirmed`:

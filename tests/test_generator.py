@@ -3835,7 +3835,7 @@ class LookupCallbackTestCase(unittest.TestCase):
             result = {"expected": probe.expected, "payload": probe.payload}
             self.assertFalse(RCEKit._observable(result))
 
-    def test_it_confirms_on_a_resolving_sink_and_not_on_a_reflecting_one(self):
+    def test_it_proves_the_sink_on_a_resolver_and_not_on_a_reflector(self):
         """The direct false-positive gate: /vuln resolves the URI it was handed,
         /reflect echoes it verbatim."""
         import random as _random
@@ -3855,7 +3855,7 @@ class LookupCallbackTestCase(unittest.TestCase):
         resolved = method.confirm_each([(p, Observation(200, "ok")) for p in probes])
         self.assertTrue(resolved)
         for probe, verdict in resolved:
-            self.assertEqual(verdict.status, "confirmed", probe.payload)
+            self.assertEqual(verdict.status, "lookup-sink", probe.payload)
             self.assertIn("proves the lookup, not a gadget chain", verdict.evidence)
 
         # /reflect: the payload comes back in the body and nothing is resolved.
@@ -3866,7 +3866,7 @@ class LookupCallbackTestCase(unittest.TestCase):
         verdicts = echo.confirm_each([(p, Observation(200, p.payload)) for p in echoed])
         self.assertTrue(verdicts)
         for probe, verdict in verdicts:
-            self.assertNotEqual(verdict.status, "confirmed", probe.payload)
+            self.assertNotEqual(verdict.status, "lookup-sink", probe.payload)
 
     def test_a_delivery_failure_is_an_error_not_a_negative(self):
         import random as _random
@@ -3884,9 +3884,43 @@ class LookupCallbackTestCase(unittest.TestCase):
         verdicts = method.confirm_each([(p, Observation(200, "ok")) for p in probes])
         self.assertTrue(all(v.status == "error" for _, v in verdicts))
 
-    def test_it_is_registered_and_keeps_the_confirmed_tier(self):
+    def test_it_is_registered_and_does_not_claim_execution(self):
+        """The tier rule, at the point it would have been broken.
+
+        A callback proves the sink resolved a URI RCEKit chose. It does not
+        prove the target ran attacker code -- Log4Shell becomes RCE when the
+        LDAP server answers with a loadable class, and this listener answers
+        with nothing. Emitting `confirmed` would print a DNS resolution under
+        CONFIRMED execution and hand it to JSON consumers as RCE."""
         self.assertIs(rcekit.DETECTION_METHODS["lookup"], rcekit.LookupCallback)
-        self.assertEqual(rcekit.LookupCallback.tier, "confirmed")
+        self.assertEqual(rcekit.LookupCallback.tier, "lookup-sink")
+        self.assertNotEqual(rcekit.LookupCallback.tier, "confirmed")
+
+    def test_a_callback_never_produces_a_confirmed_verdict(self):
+        import random as _random
+        import re as _re
+
+        listener = rcekit.OOBListener()
+        method = rcekit.LookupCallback(
+            self.gen, {"oob_host": "x.example", "oob_listener": listener, "oob_wait": 0.2})
+        probes = method.build_probes(self.rec, _random.Random(11))
+        for probe in probes:
+            host = _re.search(r"jndi:\w+://([^/]+)/", probe.payload).group(1)
+            listener.record("dns", "10.0.0.9", host)
+        verdicts = method.confirm_each([(p, Observation(200, "ok")) for p in probes])
+        self.assertTrue(verdicts)
+        for probe, verdict in verdicts:
+            self.assertEqual(verdict.status, "lookup-sink", probe.payload)
+
+    def test_the_overall_verdict_never_folds_it_into_execution(self):
+        # A proven sink outranks a clean run and is outranked by a suspected
+        # RCE, exactly as `deserialization-sink` is.
+        self.assertEqual(
+            rcekit.overall_detection_verdict([{"verdict": "lookup-sink"}]), "lookup-sink")
+        self.assertEqual(rcekit.overall_detection_verdict(
+            [{"verdict": "lookup-sink"}, {"verdict": "confirmed"}]), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(
+            [{"verdict": "lookup-sink"}, {"verdict": "needs-review"}]), "needs-review")
 
 
 class OobCallbackTestCase(unittest.TestCase):
