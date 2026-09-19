@@ -8,6 +8,30 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.35.4] — 2026-09-19
+
+### Fixed
+
+- **A wave the declared profile emptied is no longer read as a finished
+  method.** The probe filter drops probes between the method and the wire, and
+  when it emptied an adaptive method's *first* screening wave the engine took
+  the empty batch for "nothing left to send" and stopped before asking for the
+  next wave at all.
+
+  An adaptive method holds separators back in waves precisely because a filter
+  is expected: `time` screens two of them first and keeps `||`, `&&`, the
+  newline and the bare command for a second wave. A sink that strips `;` and
+  `|` removes exactly the first wave and leaves the rest intact -- and the rest
+  were never sent. Measured against a sink reachable only through `&&`, the run
+  reported **`negative`**: "the probes reached the target and found nothing",
+  about probes that were never sent. Worse than `nothing-tested`, which is at
+  least true.
+
+  The loop now tracks what the method offered separately from what the profile
+  allows to be sent, and ends only when the method itself is done. The round cap
+  still bounds it, so a method whose every wave is filtered cannot spin the
+  engine.
+
 ### Fixed
 
 - **The unit suite runs off Linux.** The fake vulnerable sinks in the tests are
@@ -1139,7 +1163,8 @@ this file and have not been restated here.
 - **[2.1.0]**
 
 
-[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...HEAD
+[Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...HEAD
+[2.35.4]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...v2.35.4
 [2.35.3]: https://github.com/kabiri-labs/rcekit/compare/v2.35.2...v2.35.3
 [2.35.2]: https://github.com/kabiri-labs/rcekit/compare/v2.35.1...v2.35.2
 [2.35.1]: https://github.com/kabiri-labs/rcekit/compare/v2.35.0...v2.35.1

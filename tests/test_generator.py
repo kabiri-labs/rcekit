@@ -3269,6 +3269,74 @@ class NoProbesBuiltTestCase(unittest.TestCase):
         self.assertIn("NEVER REACHED THE TARGET", result.stdout)
 
 
+class FilteredWaveTestCase(unittest.TestCase):
+    """An adaptive method holds separators back in waves. When the declared
+    profile empties the *first* wave, that is not the method running out of
+    ideas — a sink that strips `;` and `|` still takes `&&`, a newline, or the
+    bare command, and those live in the waves that follow.
+
+    Treating an emptied wave as the end skipped every one of them, and the
+    engine then reported `negative` from a series that never left wave one:
+    "we reached the target and found nothing", about probes that were never
+    sent. That is the exact misreport the tier rules exist to prevent, arriving
+    through the filter added to stop wasting probes."""
+
+    def _sink_reachable_only_by(self, token):
+        import http.server
+        import socketserver
+        import threading
+        import time as _time
+        import urllib.parse as up
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                query = up.parse_qs(up.urlparse(self.path).query).get("q", [""])[0]
+                # Executes only when broken out of with `token`; a sleep in any
+                # other shape is inert text, exactly as a filtered sink behaves.
+                if token in query and "sleep" in query:
+                    try:
+                        _time.sleep(float(query.split("sleep")[1].split()[0]))
+                    except (ValueError, IndexError):
+                        pass
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def test_a_later_wave_still_runs_when_the_profile_empties_the_first(self):
+        port = self._sink_reachable_only_by("&&")
+        gen = RCEKit()
+        results = gen.run_detection(
+            [make_record(environment="unix", context="raw")],
+            url=f"http://127.0.0.1:{port}/?q=FUZZ", methods=["time"],
+            # Removes every probe of the first screening wave and none of the
+            # second's.
+            config={"time_base": 1, "deny_chars": ";|"}, timeout=8)
+        self.assertTrue([r for r in results if "&&" in (r.get("payload") or "")],
+                        "the wave the filter left intact must still be sent")
+        self.assertIn("needs-review", {r["verdict"] for r in results},
+                      "the sink is reachable through a surviving separator")
+
+    def test_a_method_with_nothing_left_to_offer_still_stops(self):
+        # The other half of the same branch: when the method itself is done, the
+        # loop must end rather than spin to the round cap.
+        port = self._sink_reachable_only_by("&&")
+        gen = RCEKit()
+        results = gen.run_detection(
+            [make_record(environment="unix", context="raw")],
+            url=f"http://127.0.0.1:{port}/?q=FUZZ", methods=["time"],
+            config={"time_base": 1}, timeout=8)
+        self.assertTrue(results)
+
+
 class TargetProfileProbeFilterTestCase(unittest.TestCase):
     """`--deny-chars` / `--max-length` describe a filter the tester has already
     measured. They reached the corpus and stopped there, so a run that had been
