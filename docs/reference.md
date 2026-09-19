@@ -82,7 +82,7 @@ starting point — this page is for looking things up once you know what you wan
 | `file` | Execution + a write primitive, via write-and-fetch | `confirmed` |
 | `write` | A write primitive proven to be RCE, by executing the written file | `confirmed`, or `needs-review` for a write that is served but not interpreted |
 | `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `confirmed` |
-| `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:…}` URI rather than running a command, and calls back carrying a per-probe token | `lookup-sink` |
+| `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:dns://…}` URI rather than running a command, and calls back carrying a per-probe token. Needs a **name** for `--oob-host`; an address literal carries no token, so it builds nothing | `lookup-sink` |
 | `time` | Blind execution, via a `0/N/2N` regression | `needs-review` only |
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `deserialization-sink`, or `needs-review` for the shape fingerprint |
 

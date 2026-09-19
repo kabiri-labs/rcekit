@@ -178,7 +178,7 @@ reported separately.
 | A shell sink (`system()`, backticks, `exec`) | `reflected` | cheap |
 | A template engine or expression language | `eval` | cheap |
 | No output, but the target has egress | `oob` | one listener, no state change (see [Out-of-band callbacks](#out-of-band-callbacks)) |
-| The sink interpolates an expression rather than shelling out | `lookup` | same listener; `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them |
+| The sink interpolates an expression rather than shelling out | `lookup` | same listener; `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them. Proves a lookup sink, **not** execution |
 | No output, but you control a web root | `file` | writes files (see [No-egress targets](#no-egress-targets)) |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 

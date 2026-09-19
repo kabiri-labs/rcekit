@@ -4946,18 +4946,26 @@ class LookupCallback(DetectionMethod):
     template that interpolates is not a shell.
 
     The oracle is the one :class:`OobCallback` already uses -- a token the
-    target could only have learned by resolving what it was handed. Every form
-    starts by resolving ``<token>.<host>``, so RCEKit's own in-process DNS
-    listener catches all three; no LDAP or RMI server is needed, and none is
-    started.
+    target could only have learned by resolving what it was handed. The
+    expression resolves ``<token>.<host>``, so RCEKit's own in-process DNS
+    listener is the entire apparatus; no LDAP or RMI server is needed, and none
+    is started.
 
-    **The listener never serves a class.** ``jndi:dns://`` is a name lookup and
-    can be nothing else. ``ldap://`` and ``rmi://`` ship because sinks differ in
-    which schemes they allow, and they do attempt a connection -- but what
-    answers is RCEKit's DNS listener, which returns no object, so nothing is
-    ever fetched or deserialized. The proof is the callback, and the finding is
-    "this sink resolved a URI I chose", which is what a lookup sink *is*. That
-    is the same line ``deser`` draws, drawn here before it can be crossed.
+    **Only ``jndi:dns://`` is sent, and that is the security property rather
+    than a shortcut.** A name lookup can be nothing else. ``ldap://`` and
+    ``rmi://`` continue *past* resolution and open a connection to whatever
+    address the answer named -- by default ``127.0.0.1``, which is the target's
+    own loopback. Whatever replies on :389 or :1099 is not RCEKit, so a
+    reference could come back and a class be instantiated -- the tool crossing,
+    on its own initiative, the line this method exists to stop short of.
+    Dropping the two schemes also costs no coverage.
+    ``DnsContextFactory`` ships in the JDK, so ``dns://`` resolves wherever
+    ``ldap://`` would -- and on 2.15.0, which restricted the LDAP path and left
+    ``dns:`` working, on a build where ``ldap://`` no longer would.
+
+    The proof is the callback, and the finding is "this sink resolved a URI I
+    chose", which is what a lookup sink *is*. That is the same line ``deser``
+    draws, drawn here before it can be crossed.
 
     Requires ``--oob-host``. Without it there are no probes, which is
     ``nothing-tested`` -- never ``negative``."""
@@ -4974,9 +4982,10 @@ class LookupCallback(DetectionMethod):
     # triggered it, so no probe can be judged until the batch has been fired.
     aggregate = True
 
-    # The lookup schemes to try. dns:// first: it is the one that cannot do
-    # anything but resolve a name, so it is the shape to lead with.
-    _SCHEMES = ("dns", "ldap", "rmi")
+    # The one lookup scheme that cannot do anything but resolve a name. `ldap`
+    # and `rmi` are deliberately absent -- see the class docstring: they
+    # continue past resolution into a connection RCEKit does not control.
+    _SCHEMES = ("dns",)
     # The interpolation syntaxes a lookup sink may use. `${...}` is Log4j's and
     # JSP EL's; `#{...}` and `%{...}` are here because an expression evaluator
     # that refuses arithmetic may still resolve a URI, which is the case this
@@ -4995,11 +5004,6 @@ class LookupCallback(DetectionMethod):
         # prove, and a probe that cannot confirm is a request wasted.
         return bool(self.config.get("oob_host"))
 
-    @staticmethod
-    def _is_ip_literal(host: str) -> bool:
-        parts = host.split(".")
-        return len(parts) == 4 and all(p.isascii() and p.isdigit() for p in parts)
-
     def _token(self, rng: "random.Random") -> str:
         # Lowercase letters and digits only: a DNS label is case-insensitive and
         # the listener correlates case-folded, so a mixed-case token would only
@@ -5009,16 +5013,18 @@ class LookupCallback(DetectionMethod):
 
     def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
         host = str(self.config["oob_host"]).strip().rstrip(".")
-        if self._is_ip_literal(host):
-            # A bare IP cannot carry a token as a DNS label: there is nothing to
-            # delegate and `<token>.10.0.0.1` resolves nowhere. A lookup has no
-            # second channel to put the token in the way an HTTP probe does, so
-            # rather than send probes that could never be attributed, send none.
+        # `OobCallback`'s test, not a copy of it. An address literal cannot
+        # carry a token as a DNS label -- there is nothing to delegate, and
+        # `<token>.10.0.0.1` resolves nowhere while `<token>.[::1]` is not even
+        # a URL. A lookup has no second channel to put the token in the way an
+        # HTTP probe does, so rather than send probes that could never be
+        # attributed, send none. The private copy this replaces was a weaker
+        # test: it missed IPv6 entirely and took `999.1.2.3` for an address.
+        if OobCallback._is_ip_literal(host):
             return []
         listener = self.config.get("oob_listener")
-        schemes = self._SCHEMES if self._depth() != "quick" else self._SCHEMES[:1]
         probes: List[Probe] = []
-        for scheme in schemes:
+        for scheme in self._SCHEMES:
             for form in self._FORMS:
                 token = self._token(rng)
                 expr = "jndi:%s://%s.%s/a" % (scheme, token, host)
@@ -5482,7 +5488,7 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
                  "(needs egress from the target; confirms)")
     lines.append("[detect]   --methods lookup --oob-host HOST --verify-active-risk intrusive   "
                  "(same listener, for a sink that interpolates ${...} rather than shelling "
-                 "out; confirms)")
+                 "out; proves a lookup sink, NOT execution)")
     if not ((getattr(args, "webroot", None) and getattr(args, "web_base_url", None))
             or (getattr(args, "file_write_path", None)
                 and getattr(args, "file_read_url", None))):

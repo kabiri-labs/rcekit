@@ -49,7 +49,8 @@ records what would close it.
 The verdict on that row is `lookup-sink`, not `confirmed`, and always was in
 substance: what the callback proves is that the sink resolved a URI RCEKit
 chose. Reaching RCE needs a server that answers the lookup with a loadable
-class, which this listener never does.
+class, which this listener never does. Only `jndi:dns://` goes out, so there
+is no connection past the name lookup for such a server to answer on.
 
 <details open>
 <summary><b><code>reflected</code> — OS command injection, Webmin CVE-2019-15107 → <code>confirmed</code></b></summary>
@@ -70,11 +71,11 @@ class, which this listener never does.
 </details>
 
 <details>
-<summary><b>out-of-band — blind Log4Shell (CVE-2021-44228) via a DNS callback → <code>confirmed</code></b></summary>
+<summary><b>out-of-band — blind Log4Shell (CVE-2021-44228) via a DNS callback → <code>lookup-sink</code></b></summary>
 
 <br>
 
-![RCEKit auto-confirming a blind Log4Shell RCE (CVE-2021-44228) via an OOB DNS callback, correlating the DNS hit back to the exact payload](confirmation-gifs/oob-log4shell-cve-2021-44228.gif)
+![RCEKit correlating a blind Log4Shell (CVE-2021-44228) DNS callback back to the exact payload that produced it: the token in the queried name is one only the target could have learned by resolving the URI it was handed](confirmation-gifs/oob-log4shell-cve-2021-44228.gif)
 
 </details>
 
@@ -213,7 +214,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `confirmed` RCE, the source coming back verbatim is `needs-review` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
-| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `confirmed`: the listener serves no object, so what is proven is the lookup, not a gadget chain. |
+| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `confirmed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 
 Three things widen where those methods can reach, without changing what any of
 them will call `confirmed`:

@@ -3810,8 +3810,25 @@ class LookupCallbackTestCase(unittest.TestCase):
                 for shellish in ("nslookup", "curl", "wget", "certutil", "iwr", ";", "|", "&&"):
                     self.assertNotIn(shellish, probe.payload)
 
+    def test_every_probe_is_a_name_lookup_and_reaches_nothing_else(self):
+        """The one shape that cannot do anything but resolve a name.
+
+        `ldap://` and `rmi://` continue *past* resolution and connect to
+        whatever address the answer named -- by default 127.0.0.1, the target's
+        own loopback. Whatever replies on :389 or :1099 is not RCEKit, so a
+        reference could come back and a class be instantiated: the promise that
+        no object is served would be the tool's to break, not the target's."""
+        self.assertEqual(rcekit.LookupCallback._SCHEMES, ("dns",))
+        _, probes = self._probes({"oob_host": "x.example"})
+        self.assertTrue(probes)
+        for probe in probes:
+            with self.subTest(payload=probe.payload):
+                self.assertIn("jndi:dns://", probe.payload)
+                for reaches_a_service in ("ldap", "rmi", "iiop", "corbaname", "nis"):
+                    self.assertNotIn(reaches_a_service, probe.payload)
+
     def test_each_probe_carries_its_own_token(self):
-        # Sharing one token would mark every scheme confirmed as soon as any one
+        # Sharing one token would mark every form confirmed as soon as any one
         # called back, and the report would name payloads that did nothing.
         _, probes = self._probes({"oob_host": "x.example"})
         tokens = [p.expected for p in probes]
@@ -3825,6 +3842,20 @@ class LookupCallbackTestCase(unittest.TestCase):
         # that cannot confirm.
         _, probes = self._probes({"oob_host": "10.0.0.1"})
         self.assertEqual(probes, [])
+
+    def test_an_ipv6_literal_is_a_literal_too(self):
+        """A private copy of the address test was a weaker one.
+
+        It split on '.' and asked for four digit groups, so `::1` and `[::1]`
+        read as hostnames and became authorities like `rk….[::1]` -- not a DNS
+        label the token can ride in, and not a URL. The probes went out and
+        every one came back `negative`: "we reached the target and found
+        nothing", about a channel that was never addressable. `OobCallback`'s
+        test already knew this, so there is one test now and not two."""
+        for literal in ("::1", "[::1]", "2001:db8::4", "[2001:db8::4]"):
+            with self.subTest(oob_host=literal):
+                _, probes = self._probes({"oob_host": literal})
+                self.assertEqual(probes, [])
 
     def test_the_token_rides_in_the_payload_so_observe_must_skip_it(self):
         # The second-order channel may only look for a value the payload does
