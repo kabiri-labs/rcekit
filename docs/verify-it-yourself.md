@@ -195,6 +195,13 @@ label. A bare IP cannot carry one. Port 53 needs root, and `--listen-http-port`
 is moved off 8080 above so it does not collide with the Struts2 container if you
 still have it up.
 
+`--methods lookup` drives the same proof through the engine instead of by
+hand, so the run produces a verdict row: it sends only `${jndi:dns://...}`, in
+the three interpolation syntaxes, and reports `lookup-sink` on a callback. It
+needs the same delegated domain for the same reason, and it refuses to run when
+the DNS listener cannot bind rather than reporting `negative` from a channel
+that was never open.
+
 If you do not have a domain to delegate, this is the one demo you cannot
 reproduce locally — the [field guide](guide.md#out-of-band-callbacks) covers the
 setup, and demos 1 and 2 already show the confirmation model end to end.

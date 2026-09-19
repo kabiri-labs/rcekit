@@ -27,9 +27,9 @@ formats, or the template schema.
   The probes are lookups and nothing else, and they depend on the injection
   context rather than the environment, exactly as `eval`'s do. The oracle is the
   one `oob` already uses: a token the target could only have learned by
-  resolving what it was handed. Every form starts by resolving
-  `<token>.<host>`, so the in-process DNS listener catches all three schemes --
-  no LDAP or RMI server is needed, and none is started.
+  resolving what it was handed. The expression resolves `<token>.<host>`, so
+  the in-process DNS listener is the entire apparatus -- no LDAP or RMI server
+  is needed, and none is started.
 
   **It reports `lookup-sink`, never `confirmed`.** A callback proves the sink
   resolved a URI RCEKit chose -- that it evaluated the expression it was handed.
@@ -38,17 +38,29 @@ formats, or the template schema.
   proven-sink tier beside `deserialization-sink`, with its own section in the
   report, and `confirmed` keeps meaning executed.
 
-  **The listener never serves a class.** `jndi:dns://` is a name lookup and can
-  be nothing else; `ldap://` and `rmi://` do attempt a connection, but what
-  answers is the DNS listener, which returns no object, so nothing is fetched or
-  deserialized. The proof is the callback and the finding is "this sink resolved
-  a URI I chose" -- the same line `deser` draws, drawn here before it can be
-  crossed.
+  **Only `jndi:dns://` is sent, and that is the security property rather than a
+  shortcut.** A name lookup can be nothing else. `ldap://` and `rmi://` continue
+  *past* resolution and open a connection to whatever address the answer named
+  -- by default `127.0.0.1`, which is the target's own loopback. Whatever
+  replies on :389 or :1099 is not RCEKit, so a reference could come back and a
+  class be instantiated: the tool would have crossed the line this method exists
+  to stop short of, having promised it had not. Dropping the two schemes also
+  costs no coverage -- `DnsContextFactory` ships in the JDK, so `dns://`
+  resolves wherever `ldap://` would, and on 2.15.0 it still resolves where
+  `ldap://` no longer does. The proof is the callback and the finding is "this
+  sink resolved a URI I chose" -- the same line `deser` draws, drawn here before
+  it can be crossed.
 
   Behind the same two gates as `oob`, and sharing its listener: it needs
   `--oob-host`, and it is held back at the default safety tier because it makes
   the target open outbound connections. Without `--oob-host` it builds no probes
-  at all, which the engine reports as `nothing-tested` -- never `negative`.
+  at all, which the engine reports as `nothing-tested` -- never `negative`. An
+  address literal is a literal whichever family it is from: `::1` and `[::1]`
+  build nothing, the same as `10.0.0.1`, because a token can only ride in a DNS
+  label. `blind_sink_advice` names the method as proving a lookup sink and not
+  execution, in a list where `oob` and `file` mean confirmed execution, and the
+  README's Log4Shell demo heading says `lookup-sink` rather than `confirmed` --
+  it was left claiming execution beside the table row that no longer does.
 
 ## [2.35.5] — 2026-09-19
 
