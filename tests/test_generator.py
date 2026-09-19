@@ -220,14 +220,14 @@ class CLITestCase(unittest.TestCase):
             out = Path(tmp) / "d.txt"
             result = self._run("--detection-only", "--environments", "unix", "-o", str(out))
             self.assertEqual(result.returncode, 0)
-            self.assertTrue(out.exists() and out.read_text().strip())
+            self.assertTrue(out.exists() and out.read_text(encoding="utf-8").strip())
 
     def test_jsonl_records_are_valid(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "d.jsonl"
             self._run("--detection-only", "--environments", "unix",
                       "--output-format", "jsonl", "-o", str(out))
-            lines = [l for l in out.read_text().splitlines() if l.strip()]
+            lines = [l for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
             self.assertTrue(lines)
             for line in lines:
                 json.loads(line)  # each record must be valid JSON
@@ -247,7 +247,7 @@ class CLITestCase(unittest.TestCase):
             result = self._run("--acknowledge-consent", "--target-profile", str(profile),
                                "--encodings", "none", "-o", str(out))
             self.assertEqual(result.returncode, 0)
-            text = out.read_text()
+            text = out.read_text(encoding="utf-8")
             self.assertTrue(text.strip())
             self.assertNotIn('"', text)  # profile denies quote characters
 
@@ -732,7 +732,7 @@ class GeneratorTestCase(unittest.TestCase):
         profile = Path(__file__).resolve().parent.parent / "profiles" / "quote-filtered-unix.json"
         self.assertTrue(profile.exists(), "example profile should ship with the repo")
         import json
-        spec = json.loads(profile.read_text())
+        spec = json.loads(profile.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "p.txt"
             self.gen.save_payloads_to_file(
@@ -745,7 +745,7 @@ class GeneratorTestCase(unittest.TestCase):
                 selected_encodings=spec["encodings"],
                 oob_domain=spec.get("oob_domain"),
             )
-            lines = out.read_text().splitlines()
+            lines = out.read_text(encoding="utf-8").splitlines()
             self.assertTrue(lines)
             for line in lines:
                 self.assertNotIn('"', line)
@@ -778,7 +778,7 @@ class GeneratorTestCase(unittest.TestCase):
                 selected_categories=["basic_enum"], selected_environments=["unix"],
                 selected_contexts=["raw"], selected_encodings=["none", "base64_decode_exec"],
             )
-            allp = (Path(tmp) / "run_burp" / "payloads-all.txt").read_text()
+            allp = (Path(tmp) / "run_burp" / "payloads-all.txt").read_text(encoding="utf-8")
             self.assertIn("; id", allp)
             self.assertTrue(any("base64 -d" in line for line in allp.splitlines()),
                             "self-contained encoded variants must survive into the wordlist")
@@ -796,11 +796,11 @@ class GeneratorTestCase(unittest.TestCase):
             )
             outdir = Path(tmp) / "run_ffuf"
             self.assertTrue((outdir / "payloads-all.txt").exists())
-            req = (outdir / "request.txt").read_text()
+            req = (outdir / "request.txt").read_text(encoding="utf-8")
             # A real FUZZ marker, not Burp's section sign.
             self.assertIn('{"host": "FUZZ"}', req)
             self.assertNotIn("\xa7", req)
-            run = (outdir / "run.sh").read_text()
+            run = (outdir / "run.sh").read_text(encoding="utf-8")
             self.assertIn("ffuf -request request.txt -w payloads-all.txt", run)
             self.assertIn("-request-proto https", run)
 
@@ -878,7 +878,7 @@ class GeneratorTestCase(unittest.TestCase):
                 selected_categories=["basic_enum"], selected_environments=["unix"],
                 selected_contexts=["raw"], selected_encodings=["none"],
             )
-            burp_req = (Path(tmp) / "run_burp" / "request.txt").read_text()
+            burp_req = (Path(tmp) / "run_burp" / "request.txt").read_text(encoding="utf-8")
             self.assertIn("POST /api/v1/lookup HTTP/1.1", burp_req)
             self.assertIn("Content-Type: application/json", burp_req)
             self.assertIn('{"host": "\xa7payload\xa7"}', burp_req)
@@ -890,7 +890,7 @@ class GeneratorTestCase(unittest.TestCase):
                 selected_environments=["unix"], mode="detection",
                 max_safety="stateful", include_blocking=True,
             )
-            templates = "\n".join(t.read_text() for t in (Path(tmp) / "run2_nuclei").glob("*.yaml"))
+            templates = "\n".join(t.read_text(encoding="utf-8") for t in (Path(tmp) / "run2_nuclei").glob("*.yaml"))
             self.assertIn("POST /api/v1/lookup HTTP/1.1", templates)
             self.assertIn('{"host": "{{payload}}"}', templates)
 
@@ -906,14 +906,14 @@ class GeneratorTestCase(unittest.TestCase):
             outdir = Path(tmp) / "run_nuclei"
             templates = list(outdir.glob("*.yaml"))
             self.assertTrue(templates)
-            joined = "\n".join(t.read_text() for t in templates)
+            joined = "\n".join(t.read_text(encoding="utf-8") for t in templates)
             # OOB templates must use the interactsh placeholder, not a real host.
             self.assertIn("{{interactsh-url}}", joined)
             self.assertIn("interactsh_protocol", joined)
             # Time templates normalise sleeps and never include hanging tails.
             time_files = list(outdir.glob("*-time.yaml"))
             if time_files:
-                time_text = "\n".join(t.read_text() for t in time_files)
+                time_text = "\n".join(t.read_text(encoding="utf-8") for t in time_files)
                 self.assertIn("duration>=6", time_text)
                 self.assertNotIn("tail -f", time_text)
 
@@ -1354,7 +1354,7 @@ class GeneratorTestCase(unittest.TestCase):
             self.gen.save_payloads_to_file(
                 file_path=str(out), max_payloads=30, output_format="jsonl",
                 selected_encodings=["none"])
-            rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertLessEqual(len(rows), 30)
             self.assertGreater(len({r["category"] for r in rows}), 1,
                                "a capped run must span more than one category")
@@ -1369,7 +1369,7 @@ class GeneratorTestCase(unittest.TestCase):
                 selected_categories=["basic_enum"],
                 selected_environments=["unix", "windows"],
                 selected_contexts=["raw"], selected_encodings=["none"])
-            lines = [line for line in out.read_text().splitlines() if line.strip()]
+            lines = [line for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertTrue(lines)
             self.assertEqual(len(lines), len(set(lines)),
                              "the text wordlist must not repeat payload lines")
@@ -2998,7 +2998,7 @@ class AuditRedactionTestCase(unittest.TestCase):
                  "--verify-header", "Authorization: Bearer SUPERSECRET"],
                 cwd=tmp, capture_output=True, text=True, timeout=120)
             self.assertEqual(result.returncode, 0, result.stderr)
-            audit = (Path(tmp) / "exploit_audit.log").read_text()
+            audit = (Path(tmp) / "exploit_audit.log").read_text(encoding="utf-8")
         self.assertNotIn("SUPERSECRET", audit)
         self.assertIn("Authorization", audit)
         self.assertIn("redacted", audit)
@@ -6345,7 +6345,12 @@ class QueryLanguageBridgeTestCase(unittest.TestCase):
             program = re.search(r"COPY \w+ FROM PROGRAM '([^']*)'", query)
             if not honour_program or not program:
                 return 200, query
-            out = _sub.run(["/bin/sh", "-c", program.group(1)],
+            # POSIX_SHELL, not a hardcoded /bin/sh: that path does not exist on
+            # Windows, the subprocess call fails, the fake database returns no
+            # program output, and the bridge reports `negative` against a target
+            # that ran the command. The same platform assumption the sinks in
+            # this file already had.
+            out = _sub.run([POSIX_SHELL, "-c", program.group(1)],
                            capture_output=True, text=True).stdout
             return 200, "rows:\n" + out
 
@@ -6569,13 +6574,28 @@ class TruncatedErrorResponseTestCase(unittest.TestCase):
         server.listen(8)
         port = server.getsockname()[1]
 
+        def drain_then_handle(conn):
+            # Read the request before answering. A socket closed while inbound
+            # data is still unread is reset rather than shut down gracefully --
+            # on Windows that RST discards the send buffer, so the response this
+            # fixture just wrote never reaches the client and the test sees a
+            # connection error instead of the 500 it staged. Measured: the same
+            # handler confirms 500 when it drains and reports WinError 10053
+            # when it does not.
+            conn.settimeout(5)
+            try:
+                conn.recv(65536)
+            except OSError:
+                pass
+            handler(conn)
+
         def loop():
             while True:
                 try:
                     conn, _ = server.accept()
                 except OSError:
                     return
-                threading.Thread(target=handler, args=(conn,), daemon=True).start()
+                threading.Thread(target=drain_then_handle, args=(conn,), daemon=True).start()
 
         threading.Thread(target=loop, daemon=True).start()
         self.addCleanup(server.close)
@@ -6593,10 +6613,16 @@ class TruncatedErrorResponseTestCase(unittest.TestCase):
         status, body, channels, elapsed = generator._fire_channels(
             "probe", f"http://127.0.0.1:{port}/x?cmd=FUZZ", "GET", None, None,
             "query_value", "json_string", 5)
-        # The status is what the caller needs most; an unreadable body is
-        # reported as empty rather than as a traceback.
-        self.assertIn(status, (500, None))
-        self.assertIsInstance(body, str)
+        # Exactly what the guard promises: the status survives, and the body it
+        # could not finish reading comes back empty rather than as a traceback.
+        #
+        # This used to accept `None` as well, which is what a *failed delivery*
+        # looks like -- so it stayed green for years on a fixture that never
+        # delivered the response at all (see _serve). A test that admits the
+        # broken outcome alongside the correct one cannot tell them apart, and
+        # this project treats that as the failure it is everywhere else.
+        self.assertEqual(status, 500)
+        self.assertEqual(body, "")
         self.assertIsInstance(channels, list)
         self.assertGreaterEqual(elapsed, 0.0)
 
