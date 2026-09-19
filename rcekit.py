@@ -2089,14 +2089,24 @@ class RCEKit:
         target, body, hdrs = self._build_verify_request(
             payload, url, data, headers, url_location, body_location)
         request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
-        context = self._verify_ssl_context(target)
+        # The context is built whatever the scheme: urllib follows a redirect
+        # with the handler it was given, so an http:// target that lands on a
+        # self-signed or legacy https:// one still needs it. Only the *notice*
+        # waits to learn whether TLS was really used.
+        context = self._verify_ssl_context()
+        self._announce_insecure(target)
         start = time.time()
         try:
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+                # A redirect may have taken this to TLS after all.
+                self._announce_insecure(getattr(response, "url", None))
                 text = response.read().decode(errors="replace")
                 return (response.status, text, self._channels_from_response(response, text, target),
                         time.time() - start)
         except urllib.error.HTTPError as exc:
+            # An HTTPError still came off a connection, and it carries the
+            # URL it finally reached.
+            self._announce_insecure(getattr(exc, "url", None))
             # Reading the error body can itself fail: a target that truncates
             # its own error response -- a Content-Length it never delivers,
             # then a reset -- raises here, mid-`except`. An exception raised
@@ -2139,7 +2149,7 @@ class RCEKit:
         except Exception:
             return [("response body", text)]
 
-    def _verify_ssl_context(self, target: Optional[str] = None):
+    def _verify_ssl_context(self):
         """SSL context for verification/detection requests. Returns ``None``
         (urllib's default, certificate-verifying) unless ``--insecure`` was set,
         in which case certificate verification is disabled — self-signed or
@@ -2166,14 +2176,17 @@ class RCEKit:
         ``--insecure`` is the flag that says TLS assurance is not what this run
         is for. This makes it mean that consistently rather than halfway.
 
-        ``target`` is the URL about to be fetched. A plain-HTTP target gets
-        ``None``: urllib would ignore the context anyway, and the announcement
-        below must describe what this run actually does. Reporting a TLS
-        downgrade on a run that never opened a TLS connection is the same
-        defect as reporting a probe that was never sent."""
+        Built whatever the target's scheme is. urllib follows a redirect with
+        the handler it was given, so an ``http://`` target that lands on a
+        self-signed or legacy ``https://`` one needs this context as much as a
+        direct HTTPS target does -- withholding it there made ``--insecure``
+        silently stop working on exactly the flow it was reached for.
+
+        Saying so is a separate question, and :meth:`_announce_insecure` answers
+        it: the transcript must describe what this run actually did, and a TLS
+        downgrade reported on a run that opened no TLS connection is the same
+        defect as a probe reported that was never sent."""
         if not getattr(self, "insecure", False):
-            return None
-        if target and not str(target).lower().startswith("https"):
             return None
         ctx = getattr(self, "_insecure_ctx", None)
         if ctx is None:
@@ -2206,14 +2219,30 @@ class RCEKit:
             except (ValueError, OSError):
                 logger.debug("OpenSSL build refuses TLS 1.0; keeping its minimum version.")
             self._insecure_ctx = ctx
-            # Said once, at the moment it first applies. An operator on a
-            # monitored engagement should read the full extent in the transcript
-            # rather than infer it from the help text -- and should read what
-            # this build actually did, not what the flag asks for.
-            print("[!] --insecure: TLS is unverified AND downgraded for this run ("
-                  + ", ".join(applied) + ") so that legacy targets complete a handshake. "
-                  "The connection carries no authenticity guarantee.")
+            self._insecure_applied = applied
         return ctx
+
+    def _announce_insecure(self, url: Optional[str]) -> None:
+        """Say once that this run gave up its TLS assurances, when it did.
+
+        Called with the URL about to be fetched and again with the one actually
+        reached, because a plain-HTTP target may redirect into TLS. Neither a
+        generation-only run nor ``--doctor`` ever gets here, and a run that
+        stays on HTTP never opened the connection this describes.
+
+        The line names the rungs that *took*. Each is applied in its own
+        ``try`` because some OpenSSL builds refuse one and not the other, so
+        listing both unconditionally would make the transcript claim something
+        the build had declined."""
+        if not getattr(self, "insecure", False) or getattr(self, "_insecure_said", False):
+            return
+        if not url or not str(url).lower().startswith("https"):
+            return
+        applied = getattr(self, "_insecure_applied", None) or ["no certificate or hostname check"]
+        self._insecure_said = True
+        print("[!] --insecure: TLS is unverified AND downgraded for this run ("
+              + ", ".join(applied) + ") so that legacy targets complete a handshake. "
+              "The connection carries no authenticity guarantee.")
 
     def run_verification(self, records: Iterator[PayloadRecord], url: str, method: str = "GET",
                          data: Optional[str] = None, headers: Optional[List[str]] = None,
