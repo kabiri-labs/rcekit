@@ -2763,6 +2763,58 @@ class InsecureDowngradeNoticeTestCase(unittest.TestCase):
         result = self._run()
         self.assertNotIn("downgraded", result.stdout)
 
+    def test_a_plain_http_target_is_not_told_its_tls_was_downgraded(self):
+        # urllib ignores an SSL context on http://, so nothing was downgraded.
+        # Announcing it anyway is the same defect as reporting a probe that was
+        # never sent, in the one line written to be an audit of the run.
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--acknowledge-consent", "--categories", "basic_enum",
+             "--environments", "unix", "--max-payloads", "1", "--insecure",
+             "--verify-url", "http://127.0.0.1:1/?q=FUZZ"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120)
+        self.assertNotIn("downgraded", result.stdout)
+
+    def test_a_run_that_opens_no_connection_says_nothing_either(self):
+        # Generation only: --insecure is accepted, no TLS context is ever built.
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent", "--categories",
+                 "basic_enum", "--environments", "unix", "--max-payloads", "1", "--insecure",
+                 "-o", str(Path(tmp) / "out.txt")],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120)
+        self.assertNotIn("downgraded", result.stdout)
+
+    def test_the_notice_names_only_the_rungs_that_took(self):
+        # A build may refuse either rung; the line must report what was applied,
+        # not what was asked for.
+        import contextlib
+        import io
+        import ssl
+
+        generator = RCEKit()
+        generator.insecure = True
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            ctx = generator._verify_ssl_context("https://target.example/")
+        printed = buffer.getvalue()
+        self.assertIn("no certificate or hostname check", printed)
+        self.assertEqual("OpenSSL security level 0" in printed,
+                         {c["name"] for c in ctx.get_ciphers()}
+                         != {c["name"] for c in ssl.create_default_context().get_ciphers()})
+        self.assertEqual("TLS 1.0 allowed" in printed,
+                         ctx.minimum_version == ssl.TLSVersion.TLSv1)
+
+    def test_the_notice_is_printed_once_per_run(self):
+        import contextlib
+        import io
+        generator = RCEKit()
+        generator.insecure = True
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            for _ in range(5):
+                generator._verify_ssl_context("https://target.example/")
+        self.assertEqual(buffer.getvalue().count("--insecure:"), 1)
+
 
 class CLIExitCodeTestCase(unittest.TestCase):
     """Every refusal to run must exit non-zero so CI and wrapper scripts can
