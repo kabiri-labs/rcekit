@@ -4267,12 +4267,21 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
     # How each tier may be spelled in prose. A tier missing from this map is one
     # no advice line knows how to describe, which the test below says out loud
     # rather than passing over.
+    #
+    # Stems, not words. "confirms" alone would have let the overclaim back in
+    # through "confirming RCE", "confirmed execution" or "confirmation" -- an
+    # assertion that answers the same way for the right reason and the broken
+    # one, which is the defect this whole file exists to catch.
     _TIER_WORDS = {
-        "confirmed": ("confirms",),
+        "confirmed": ("confirm",),
         "needs-review": ("needs-review",),
         "lookup-sink": ("lookup sink", "lookup-sink"),
         "deserialization-sink": ("deserialization sink", "deserialization-sink"),
     }
+    # "cannot be confirmed by reflected/eval" is the opposite of a claim to
+    # confirm, so a denial is removed before the stems are looked for.
+    _DENIAL_RE = re.compile(r"\b(?:never|not|no|cannot(?:\s+be)?)\s+confirm\w*",
+                            re.IGNORECASE)
 
     def test_every_line_states_the_tier_its_method_actually_reaches(self):
         """Advice is a command the operator will run, so the tier it promises
@@ -4296,6 +4305,7 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
                 continue
             name = match.group(1)
             named += 1
+            claim = self._DENIAL_RE.sub("", line)
             with self.subTest(method=name):
                 self.assertIn(name, rcekit.DETECTION_METHODS,
                               "the advice names a method that does not exist")
@@ -4304,14 +4314,14 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
                               f"{name} reports {tier!r}, which this test cannot spell -- "
                               "add it to _TIER_WORDS rather than dropping the check")
                 self.assertTrue(
-                    any(word in line for word in self._TIER_WORDS[tier]),
+                    any(stem in claim for stem in self._TIER_WORDS[tier]),
                     f"the {name} line never says it reaches {tier}: {line}")
-                for other, words in self._TIER_WORDS.items():
+                for other, stems in self._TIER_WORDS.items():
                     if other == tier:
                         continue
-                    for word in words:
+                    for stem in stems:
                         self.assertNotIn(
-                            word, line,
+                            stem, claim,
                             f"the {name} line promises {other} for a method whose "
                             f"tier is {tier}: {line}")
         self.assertGreaterEqual(named, 3, "the advice named no methods to check")

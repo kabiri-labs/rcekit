@@ -25,13 +25,19 @@ formats, or the template schema.
   same question.
 
   So: every `blind_sink_advice` line naming a method must state that method's
-  tier and no other; every demo heading must match its row in the CVE table;
-  a CVE row may claim `confirmed` only for a method whose ceiling is
-  `confirmed`; and a recording below `confirmed` may not be described as
-  confirming, alt text included, since that is the sentence a screen reader
-  reads out. Each one was checked by reintroducing the defect it exists for,
-  and each carries a floor on how much it inspected -- a parser that matched
-  nothing would otherwise pass as silently as a clean run.
+  tier and no other; every CVE row must state the tier its method reports;
+  every demo heading must match its row in that table; and a recording below
+  `confirmed` may not be described as confirming, alt text included, since
+  that is the sentence a screen reader reads out.
+
+  The wording checks match stems rather than words, and denials such as
+  "never confirmed" are removed before they are applied. "confirms" alone
+  would have readmitted the overclaim through "confirming RCE" or "confirmed
+  execution" -- an assertion answering the same way for the right reason and
+  the broken one, which is the defect being guarded against. Each test was
+  checked by reintroducing the defect it exists for, and each carries a floor
+  on how much it inspected: a parser that quietly stopped matching would
+  otherwise pass exactly as a clean README does.
 
   Test-only: no version bump, and nothing about a run changes.
 
