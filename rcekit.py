@@ -2493,12 +2493,33 @@ class RCEKit:
                 # the run about to happen rather than one without the operator's
                 # declared profile. A cost line that ignores a filter is wrong
                 # precisely for the operator who narrowed the run on purpose.
-                probes, _ = meth.filter_probes(probes)
+                sendable, _ = meth.filter_probes(probes)
                 if getattr(meth, "aggregate", False):
-                    total += len(probes)
+                    # Follow the same branch the run takes when the profile
+                    # empties a wave: the method is not finished, so it is asked
+                    # for the next one. Without this the floor reads zero on
+                    # exactly the configuration the run now sends probes for --
+                    # a floor of zero on a run that fires is not a conservative
+                    # estimate, it is a wrong one, and this line is either an
+                    # audit or it is noise.
+                    #
+                    # It stays a floor. A wave the method chooses *after seeing
+                    # timings* cannot be predicted from here, which is why the
+                    # docstring says what it says; only the waves it will hand
+                    # over regardless are counted.
+                    for _round in range(self.MAX_PROBE_ROUNDS - 1):
+                        if sendable or not probes:
+                            break
+                        try:
+                            probes = meth.next_probes([])
+                        except Exception:  # an estimate must never break the run
+                            probes = []
+                        sendable, _ = meth.filter_probes(probes)
+                    total += len(sendable)
                     if max_payloads and total >= max_payloads:
                         return max_payloads
                     continue
+                probes = sendable
                 for probe in probes:
                     if probe.payload in seen:
                         continue
