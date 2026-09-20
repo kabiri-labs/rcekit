@@ -2543,11 +2543,16 @@ class RCEKit:
                     probes = meth.build_probes(record, rng)
                 except Exception:  # a cost estimate must never break the run
                     continue
-                # The same gate the run itself applies, so the figure describes
+                # *Both* gates the run itself applies, so the figure describes
                 # the run about to happen rather than one without the operator's
-                # declared profile. A cost line that ignores a filter is wrong
-                # precisely for the operator who narrowed the run on purpose.
+                # declared profile or risk tier. A cost line that ignores a
+                # filter is wrong precisely for the operator who narrowed the
+                # run on purpose -- and with per-probe rungs it was wrong by a
+                # factor of three for `lookup` at the default tier. The
+                # predicate is shared with the run and counts nothing, so an
+                # estimate never moves the numbers the report prints.
                 sendable, _ = meth.filter_probes(probes)
+                sendable = [p for p in sendable if self._safety_allows(meth, p)]
                 if getattr(meth, "aggregate", False):
                     # Follow the same branch the run takes when the profile
                     # empties a wave: the method is not finished, so it is asked
@@ -2583,6 +2588,31 @@ class RCEKit:
                         return max_payloads
         return total
 
+    @staticmethod
+    def _safety_ceiling(meth: "DetectionMethod") -> int:
+        """The highest rung this method may send at, in this run.
+
+        Three things decide it, and leaving any one out has been a bug:
+
+        * the run's tier, when one was declared;
+        * the method's own rung otherwise -- it was selected, so what it needs
+          to run at all is allowed, and this filter exists for shapes that
+          reach past that;
+        * the method's own rung *regardless*, when its configuration is its
+          gate. ``--methods file --webroot ... --web-base-url ...`` is accepted
+          by the pre-flight for exactly that reason, and a runtime filter
+          holding every probe afterwards would accept the command and then
+          report `nothing-tested` -- the quietest way this tool can fail.
+        """
+        declared = SAFETY_ORDER.get(meth.config.get("max_safety") or meth.safety, 0)
+        if meth.gated_by_config:
+            return max(declared, SAFETY_ORDER.get(meth.safety, 0))
+        return declared
+
+    def _safety_allows(self, meth: "DetectionMethod", probe: "Probe") -> bool:
+        """Whether this run may send this probe shape. Counts nothing."""
+        return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
+
     def _apply_safety_tier(self, meth: "DetectionMethod",
                            probes: "List[Probe]") -> "List[Probe]":
         """Hold back the probe shapes this run's risk tier does not allow.
@@ -2592,19 +2622,13 @@ class RCEKit:
         reached the sink; this means it could, and the operator chose not to
         send it. Reporting them together would state the first about the
         second."""
-        # The method carries the run's config; the generator does not. With no
-        # tier declared, the method's own rung is the ceiling: it was selected,
-        # so what it needs to run at all is allowed, and this filter is here for
-        # the shapes that reach past that.
-        allowed = SAFETY_ORDER.get(meth.config.get("max_safety") or meth.safety, 0)
         kept: "List[Probe]" = []
         for probe in probes:
-            rung = meth.probe_safety(probe)
-            if SAFETY_ORDER.get(rung, 1) <= allowed:
+            if self._safety_allows(meth, probe):
                 kept.append(probe)
                 continue
             reason = (f"{meth.name}/{probe.carrier or 'probe'} needs "
-                      f"--verify-active-risk {rung}")
+                      f"--verify-active-risk {meth.probe_safety(probe)}")
             self.safety_held_probes += 1
             self.safety_held_reasons[reason] = self.safety_held_reasons.get(reason, 0) + 1
         return kept

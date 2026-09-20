@@ -203,6 +203,28 @@ formats, or the template schema.
 - **`docs/reference.md` carries a `Rung` column**, held against the class by a
   test. The tier column already was; this is the same claim one column over.
 
+### Fixed
+
+- **A config-gated method is not re-gated by the rung at runtime.** The
+  pre-flight lets `--methods file --webroot ... --web-base-url ...` through
+  because the configuration is the gate, but the probe filter read the run's
+  default `safe` ceiling and held every probe inheriting the method's
+  `stateful` rung. The CLI accepted a documented invocation and then reported
+  `nothing-tested` -- the quietest way this tool can fail, and the thing the
+  rung work was supposed to remove rather than add.
+
+  Nothing caught it because every `file` test builds the method's config
+  directly, without `max_safety`, so the ceiling fell back to the method's own
+  rung and the probes went out. A run through the CLI with the channel
+  configured is the one thing that would have, and there is one now.
+
+- **The cost estimate applies the risk tier as well as the target profile.** It
+  counted every shape a method built, so once a rung could narrow a method the
+  pre-flight figure over-counted -- three times over for `lookup` at the
+  default tier, which is exactly the operator who narrowed the run on purpose.
+  Both paths share one predicate now, and it counts nothing, so an estimate
+  never moves the numbers the report prints.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added
