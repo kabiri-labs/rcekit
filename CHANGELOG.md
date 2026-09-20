@@ -41,6 +41,23 @@ formats, or the template schema.
 
   Test-only: no version bump, and nothing about a run changes.
 
+- **The same check, for the two tables under `docs/`.** They were left out when
+  the README's were pinned, and they carry the same claim:
+  `docs/reference.md` names the tier each method can reach, and
+  `docs/guide.md` tells an operator which method to reach for next.
+
+  `reference.md` states a ceiling, so its rule is a subset rather than an
+  equality -- a cell may also name a weaker tier the method really emits, as
+  `write` and `deser` both do -- and every registered method must have a row,
+  so a capability cannot land unlookupable. `guide.md` has no tier column and
+  so is held only to the negative: a row recommending a method that cannot
+  confirm may not describe confirmation.
+
+  Rows are read by column heading rather than by position. Reading the whole
+  row made the `guide.md` check skip the one row it was written for, because
+  that row's prose names `oob` -- which confirms -- while recommending
+  `lookup`, which does not.
+
 ### Changed
 
 - **A bench case may bring its target up once for both halves**, with
