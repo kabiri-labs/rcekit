@@ -476,8 +476,16 @@ class MethodTableTierTestCase(unittest.TestCase):
         checked = 0
         for row in rows:
             name = self.CODE_RE.search(row[self.METHOD_COL])
-            if not name or name.group(1) not in self.tiers:
-                continue
+            # A row naming something that is not a registered method is a row
+            # advertising a `--methods` value the CLI rejects. Skipping it made
+            # the completeness test one-way: a method *removed* from
+            # DETECTION_METHODS left its row behind, every remaining row still
+            # matched, the floor below was still met, and the page went on
+            # offering a flag that no longer exists.
+            self.assertTrue(
+                name and name.group(1) in self.tiers,
+                f"docs/reference.md documents `{row[self.METHOD_COL]}`, which is "
+                "not a registered method")
             name = name.group(1)
             checked += 1
             tier = self.tiers[name]
