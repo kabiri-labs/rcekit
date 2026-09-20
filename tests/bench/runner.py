@@ -124,6 +124,14 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
         raise CaseError(f"{source}: the negative control runs the identical invocation against "
                         "an identical target, so it measures nothing — vary the invocation "
                         "(a different method or injection point) or the target (a patched build)")
+    if "share_target" in case:
+        if not isinstance(case["share_target"], bool):
+            raise CaseError(f"{source}: 'share_target' must be true or false, "
+                            f"got {case['share_target']!r}")
+        if case["share_target"] and target_setup(control_setup) != target_setup(case):
+            raise CaseError(f"{source}: 'share_target' is set, but the control brings up a "
+                            "different target — the two halves cannot share a container they "
+                            "do not share, and leaving this set would read as though they did")
     control_expect = control.get("expect", "negative")
     if control_expect == "confirmed":
         raise CaseError(f"{source}: a negative control expecting 'confirmed' is a contradiction")
@@ -297,11 +305,50 @@ def compose_command(case: Dict[str, Any], action: str) -> Optional[List[str]]:
     return ["docker", "compose", "down", "-v"]
 
 
+def target_cwd(compose_case: Dict[str, Any],
+               vulhub_root: Optional[Path]) -> Tuple[Optional[Path], Optional[str]]:
+    """Where a case's compose commands run, or why they cannot."""
+    if "vulhub_path" not in compose_case:
+        return None, None
+    if not vulhub_root:
+        return None, "case needs --vulhub-root (it declares a vulhub_path)"
+    cwd = vulhub_root / compose_case["vulhub_path"]
+    if not cwd.is_dir():
+        return None, f"vulhub path not found: {cwd}"
+    return cwd, None
+
+
+def bring_up(compose_case: Dict[str, Any], cwd: Optional[Path],
+             verbose: bool = False) -> Tuple[bool, Optional[str]]:
+    """Run a case's compose ``up``. Returns ``(started, problem)``; a case that
+    manages no containers starts nothing and reports no problem."""
+    up = compose_command(compose_case, "up")
+    if not up:
+        return False, None
+    if verbose:
+        print(f"    $ {' '.join(up)}" + (f"  (in {cwd})" if cwd else ""))
+    started = subprocess.run(up, cwd=str(cwd) if cwd else None,
+                             capture_output=True, text=True).returncode == 0
+    return started, None if started else "compose up failed"
+
+
+def take_down(compose_case: Dict[str, Any], cwd: Optional[Path],
+              verbose: bool = False) -> None:
+    down = compose_command(compose_case, "down")
+    if not down:
+        return
+    if verbose:
+        print(f"    $ {' '.join(down)}")
+    subprocess.run(down, cwd=str(cwd) if cwd else None,
+                   capture_output=True, text=True)
+
+
 def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
             expect_method: Optional[str], wait_for: Optional[Dict[str, Any]],
             compose_case: Dict[str, Any], vulhub_root: Optional[Path],
             keep_up: bool = False, verbose: bool = False,
-            timeout: Optional[float] = None) -> Tuple[bool, str, Dict[str, Any]]:
+            timeout: Optional[float] = None,
+            manage_target: bool = True) -> Tuple[bool, str, Dict[str, Any]]:
     """Bring a target up, run RCEKit against it, tear it down, and judge.
 
     ``timeout`` is how long that one run may take. A case may raise it, because
@@ -309,24 +356,21 @@ def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
     timing regression, and every probe in it is a real sleep. Measured at 1174s
     against the live target, which the 900s default cut short — and a run killed
     part-way reports `error`, so the case failed as though the tool had broken
-    rather than as though the clock had run out."""
-    cwd = None
-    if "vulhub_path" in compose_case:
-        if not vulhub_root:
-            return False, "case needs --vulhub-root (it declares a vulhub_path)", {}
-        cwd = vulhub_root / compose_case["vulhub_path"]
-        if not cwd.is_dir():
-            return False, f"vulhub path not found: {cwd}", {}
-    up = compose_command(compose_case, "up")
+    rather than as though the clock had run out.
+
+    ``manage_target`` is False when the caller already has the target up and
+    will tear it down itself -- see ``run_case`` and a case's ``share_target``.
+    The readiness wait still runs: the half before this one may have left the
+    application broken, and "never became ready" is the right answer then."""
+    cwd, problem = target_cwd(compose_case, vulhub_root)
+    if problem:
+        return False, problem, {}
     started = False
     try:
-        if up:
-            if verbose:
-                print(f"    $ {' '.join(up)}" + (f"  (in {cwd})" if cwd else ""))
-            started = subprocess.run(up, cwd=str(cwd) if cwd else None,
-                                     capture_output=True, text=True).returncode == 0
-            if not started:
-                return False, "compose up failed", {}
+        if manage_target:
+            started, problem = bring_up(compose_case, cwd, verbose)
+            if problem:
+                return False, problem, {}
         if wait_for:
             ready = wait_for_target(wait_for["url"], wait_for.get("status", 200),
                                     wait_for.get("timeout", 120))
@@ -336,12 +380,8 @@ def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
         ok, detail = check_report(report, expect, expect_method)
         return ok, detail, report
     finally:
-        down = compose_command(compose_case, "down")
-        if started and down and not keep_up:
-            if verbose:
-                print(f"    $ {' '.join(down)}")
-            subprocess.run(down, cwd=str(cwd) if cwd else None,
-                           capture_output=True, text=True)
+        if manage_target and started and not keep_up:
+            take_down(compose_case, cwd, verbose)
 
 
 def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
@@ -354,30 +394,55 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
     apart."""
     outcome: Dict[str, Any] = {"name": case["name"], "rce_class": case["rce_class"],
                                "target": case["target"]}
-    ok, detail, report = run_one(
-        case, case["invocation"], case["expect"], case.get("expect_method"),
-        case.get("wait_for"), case, vulhub_root, keep_up, verbose,
-        timeout=case.get("timeout"))
-    outcome["vulnerable_ok"] = ok
-    outcome["vulnerable_detail"] = detail
-    outcome["verdict"] = report.get("verdict", "nothing-tested")
-    outcome["methods"] = sorted(set(method_signatures(report, outcome["verdict"])))
-
     control = case["negative_control"]
     control_invocation, control_case = control_plan(case)
-    control_ok, control_detail, control_report = run_one(
-        control_case, control_invocation,
-        control.get("expect", "negative"), control.get("expect_method"),
-        control.get("wait_for", case.get("wait_for")), control_case, vulhub_root,
-        keep_up, verbose,
-        # The control gets its own budget: it is often the slower half, because
-        # the method that must NOT be promoted is usually the expensive one.
-        timeout=control.get("timeout", case.get("timeout")))
-    outcome["control_ok"] = control_ok
-    outcome["control_detail"] = control_detail
-    outcome["control_verdict"] = control_report.get("verdict", "nothing-tested")
-    outcome["passed"] = bool(ok and control_ok)
-    return outcome
+
+    # Both halves usually hit the same container, and bringing it up twice is
+    # the largest fixed cost in a run. It is not free to skip, though: the
+    # teardown between them is `down -v`, so today's control meets a *fresh*
+    # target. A case where the vulnerable half writes a file, plants a shell or
+    # changes a setting would hand its control a target it had already altered,
+    # and a control measured against a contaminated target measures nothing.
+    # So the case declares it, and only a case whose halves really do resolve
+    # to the same target may -- which validation enforces.
+    shared = bool(case.get("share_target")) and target_setup(control_case) == target_setup(case)
+    cwd, problem = target_cwd(case, vulhub_root)
+    started = False
+    if shared and not problem:
+        started, problem = bring_up(case, cwd, verbose)
+        if problem:
+            # Let each half manage its own target and report the failure for
+            # itself, rather than both timing out on a readiness wait for
+            # something that was never going to come up.
+            shared = False
+    try:
+        ok, detail, report = run_one(
+            case, case["invocation"], case["expect"], case.get("expect_method"),
+            case.get("wait_for"), case, vulhub_root, keep_up, verbose,
+            timeout=case.get("timeout"), manage_target=not shared)
+        outcome["vulnerable_ok"] = ok
+        outcome["vulnerable_detail"] = detail
+        outcome["verdict"] = report.get("verdict", "nothing-tested")
+        outcome["methods"] = sorted(set(method_signatures(report, outcome["verdict"])))
+
+        control_ok, control_detail, control_report = run_one(
+            control_case, control_invocation,
+            control.get("expect", "negative"), control.get("expect_method"),
+            control.get("wait_for", case.get("wait_for")), control_case, vulhub_root,
+            keep_up, verbose,
+            # The control gets its own budget: it is often the slower half,
+            # because the method that must NOT be promoted is usually the
+            # expensive one.
+            timeout=control.get("timeout", case.get("timeout")),
+            manage_target=not shared)
+        outcome["control_ok"] = control_ok
+        outcome["control_detail"] = control_detail
+        outcome["control_verdict"] = control_report.get("verdict", "nothing-tested")
+        outcome["passed"] = bool(ok and control_ok)
+        return outcome
+    finally:
+        if shared and started and not keep_up:
+            take_down(case, cwd, verbose)
 
 
 def render_markdown(outcomes: List[Dict[str, Any]]) -> str:
