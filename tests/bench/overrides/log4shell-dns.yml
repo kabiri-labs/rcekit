@@ -1,0 +1,23 @@
+# Bench-only override for vulhub's log4j/CVE-2021-44228.
+#
+# `--methods lookup` proves its sink through DNS and has no second channel to
+# carry the token, so the callback only lands if RCEKit's listener owns UDP 53
+# on an address the target's resolver actually asks. On a developer machine
+# something already owns that port, and a delegated domain is not something a
+# benchmark can arrange.
+#
+# So the run happens where the port is free: RCEKit runs in a container on this
+# network, at the fixed address below, and Solr's resolver is pointed at it.
+# Nothing here is exposed to the host beyond what vulhub already publishes.
+services:
+  solr:
+    dns:
+      - 172.28.0.10
+    networks:
+      - benchnet
+
+networks:
+  benchnet:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24

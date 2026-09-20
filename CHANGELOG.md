@@ -65,6 +65,38 @@ formats, or the template schema.
   `struts2-s2-001` against vulhub on Docker: 33.8s to 22.9s, with both halves
   reaching the same verdicts either way.
 
+- **The benchmark reaches a callback method**, with a case for Log4Shell
+  (Apache Solr 8.11.0, Log4j 2.14.1). `python tests/bench/runner.py --all` is
+  3/3.
+
+  Every case until now was in-band, so the listener, the token correlation and
+  `confirm_each` had never run against real software -- the area that produced
+  three P1 findings while `lookup` was being written.
+
+  Two things had to give. A JNDI lookup resolves through the system resolver,
+  which asks UDP 53, and a developer machine rarely has that port free; a bare
+  `--oob-host` IP is no way around it, because a lookup has no second channel
+  to carry the token. So a case may now name `run_in`, and the run happens in a
+  container on the target's own network at a fixed address, with an override
+  pointing the service's `dns:` at it. The repository is mounted read-only and
+  the image is a stock Python.
+
+  The other was the harness's own vocabulary. `VALID_EXPECTATIONS` and
+  `CONTROL_EXPECTATIONS` were written out by hand and had drifted: neither
+  `lookup-sink` nor `deserialization-sink` was in either, so a case for `lookup`
+  or `deser` could not be *loaded*, let alone run. Both are read from
+  `DETECTION_METHODS` now.
+
+  The control is the case: `oob` against the same Solr comes back `negative`
+  **although it is exploitable**, because every probe it builds is a shell
+  command and a `${jndi:...}` sink runs none of them. That is the gap `lookup`
+  was added to close, and until this case ran it rested on a fixture.
+
+  `{bench}` / `{repo}` now expand in a case's compose argv as well as its
+  invocation, and resolve to the mount point when the run is containerised.
+
+  Test-only: no version bump, and nothing about a run changes.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added

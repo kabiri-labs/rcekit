@@ -45,12 +45,26 @@ CASES_DIR = BENCH_ROOT / "cases"
 REPO_ROOT = BENCH_ROOT.parent.parent
 RCEKIT = REPO_ROOT / "rcekit.py"
 
+# The harness still runs the tool as a subprocess -- the outcome has to come
+# from its own machine-readable channel, not from anything imported here. This
+# import is for the verdict vocabulary alone, so that a tier the engine can emit
+# is a tier a case can expect, without the two being written down twice.
+sys.path.insert(0, str(REPO_ROOT))
+import rcekit  # noqa: E402
+
 # A case must say what it expects, where to point the tool, and how to prove the
 # result is not just an over-eager scanner. The negative control is required by
 # design -- see the module docstring.
 REQUIRED_KEYS = ("name", "rce_class", "target", "invocation", "expect", "negative_control")
-VALID_EXPECTATIONS = ("confirmed", "needs-review", "negative", "inconclusive",
-                      "error", "nothing-tested")
+# Read from the engine rather than written out here. The hand-written list had
+# drifted: `deser` reports `deserialization-sink` and `lookup` reports
+# `lookup-sink`, and neither was in it -- so the harness could not express a
+# case for either method at all, and nobody found out until one was written.
+# A tier is a property of the class that emits it, so this follows it.
+_OUTCOMES_WITHOUT_A_METHOD = ("negative", "inconclusive", "error", "nothing-tested")
+VALID_EXPECTATIONS = tuple(sorted(
+    {method.tier for method in rcekit.DETECTION_METHODS.values()}
+    | set(_OUTCOMES_WITHOUT_A_METHOD)))
 # What a control may expect. Narrower than VALID_EXPECTATIONS on purpose:
 # `error` and `nothing-tested` both mean the run never exercised the target, so a
 # control expecting either proves nothing about false confirmation -- it would
@@ -59,7 +73,15 @@ VALID_EXPECTATIONS = ("confirmed", "needs-review", "negative", "inconclusive",
 #
 # The vulnerable half may still expect them: "an unreachable target reports
 # `error`, not `negative`" is a real property worth pinning.
-CONTROL_EXPECTATIONS = ("negative", "inconclusive", "needs-review")
+#
+# A proven-sink tier belongs here for the same reason `needs-review` does. It
+# says the target was exercised and the tool did *not* claim execution, which is
+# exactly what a tier-ceiling control measures -- "this endpoint deserializes
+# attacker data and RCEKit still would not call it RCE" is a control, not a
+# contradiction. Only `confirmed` is excluded.
+CONTROL_EXPECTATIONS = tuple(sorted(
+    ({method.tier for method in rcekit.DETECTION_METHODS.values()} - {"confirmed"})
+    | {"negative", "inconclusive"}))
 
 
 class CaseError(Exception):
@@ -124,6 +146,14 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
         raise CaseError(f"{source}: the negative control runs the identical invocation against "
                         "an identical target, so it measures nothing — vary the invocation "
                         "(a different method or injection point) or the target (a patched build)")
+    if "run_in" in case:
+        run_in = case["run_in"]
+        if not isinstance(run_in, dict):
+            raise CaseError(f"{source}: 'run_in' must be an object")
+        missing_keys = [key for key in ("image", "network") if key not in run_in]
+        if missing_keys:
+            raise CaseError(f"{source}: 'run_in' needs {', '.join(missing_keys)} — a run "
+                            "inside a container has to say which image and which network")
     if "share_target" in case:
         if not isinstance(case["share_target"], bool):
             raise CaseError(f"{source}: 'share_target' must be true or false, "
@@ -204,29 +234,75 @@ def wait_for_target(url: str, status: int = 200, timeout: float = 120.0,
     return False
 
 
-def expand_paths(invocation: List[str]) -> List[str]:
+def expand_paths(invocation: List[str], repo: Optional[str] = None) -> List[str]:
     """Resolve ``{bench}`` / ``{repo}`` in a case's arguments.
 
     A case that references a captured request file has to name it somehow, and
     both a bare relative path (which breaks the moment the runner is invoked
     from elsewhere) and an absolute one (which breaks on every other machine)
-    are wrong. The tokens make the anchor explicit."""
-    return [arg.replace("{bench}", str(BENCH_ROOT)).replace("{repo}", str(REPO_ROOT))
+    are wrong. The tokens make the anchor explicit.
+
+    ``repo`` is where the repository lives *from the point of view of the run*.
+    It is the host path by default and the mount point when the run happens
+    inside a container, which is the whole reason the tokens exist rather than
+    the paths."""
+    root = REPO_ROOT if repo is None else Path(repo)
+    bench = root / "tests" / "bench" if repo is not None else BENCH_ROOT
+    return [arg.replace("{bench}", str(bench)).replace("{repo}", str(root))
             for arg in invocation]
 
 
+CONTAINER_REPO = "/rcekit"
+CONTAINER_OUT = "/out"
+
+
+def container_command(run_in: Dict[str, Any], invocation: List[str],
+                      out_dir: str) -> List[str]:
+    """The ``docker run`` that puts RCEKit inside the target's own network.
+
+    A callback method needs the target's resolver to reach RCEKit's listener,
+    and a resolver asks UDP 53. On a developer machine something already owns
+    that port, so rather than demand it, the run happens where the port is
+    free: a container on the target's network, at an address the target's
+    ``dns:`` points at.
+
+    The repository is mounted read-only. Nothing is built, and the image only
+    has to be a Python that can run a dependency-free single module."""
+    argv = ["docker", "run", "--rm", "--network", run_in["network"]]
+    if run_in.get("ip"):
+        argv += ["--ip", run_in["ip"]]
+    argv += ["-v", f"{REPO_ROOT}:{CONTAINER_REPO}:ro",
+             "-v", f"{out_dir}:{CONTAINER_OUT}",
+             run_in["image"], "python", f"{CONTAINER_REPO}/rcekit.py",
+             "--acknowledge-consent",
+             *expand_paths(invocation, repo=CONTAINER_REPO),
+             "--detect-json", f"{CONTAINER_OUT}/results.json"]
+    return argv
+
+
 def run_rcekit(invocation: List[str], python: Optional[str] = None,
-               timeout: float = 900.0) -> Dict[str, Any]:
+               timeout: float = 900.0,
+               run_in: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run RCEKit once with the case's arguments and return its JSON results.
 
     ``--detect-json`` is appended by the harness rather than written into each
     case: the outcome must come from the tool's own machine-readable channel,
     not from scraping a report whose payload lines can contain literal
-    newlines."""
-    handle, results_path = tempfile.mkstemp(prefix="rcekit-bench-", suffix=".json")
-    os.close(handle)
-    command = [python or sys.executable, str(RCEKIT), "--acknowledge-consent",
-               *expand_paths(invocation), "--detect-json", results_path]
+    newlines.
+
+    ``run_in`` puts that run inside a container on the target's network -- see
+    :func:`container_command`. The results file is read back through a bind
+    mount, so the channel is the same one either way."""
+    out_dir = None
+    if run_in:
+        out_dir = tempfile.mkdtemp(prefix="rcekit-bench-out-")
+        results_path = os.path.join(out_dir, "results.json")
+        command = container_command(run_in, invocation, out_dir)
+    else:
+        handle, results_path = tempfile.mkstemp(prefix="rcekit-bench-", suffix=".json")
+        os.close(handle)
+        command = [python or sys.executable, str(RCEKIT), "--acknowledge-consent",
+                   *expand_paths(invocation), "--detect-json", results_path]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
                                    cwd=str(REPO_ROOT))
@@ -254,6 +330,11 @@ def run_rcekit(invocation: List[str], python: Optional[str] = None,
             os.unlink(results_path)
         except OSError:
             pass
+        if out_dir:
+            try:
+                os.rmdir(out_dir)
+            except OSError:
+                pass
 
 
 def method_signatures(report: Dict[str, Any], verdict: str) -> List[str]:
@@ -296,8 +377,8 @@ def compose_command(case: Dict[str, Any], action: str) -> Optional[List[str]]:
     on ``vulhub_path``, in which case the standard compose invocation is run in
     that directory under ``--vulhub-root``."""
     if "compose" in case:
-        argv = list(case["compose"])
-        return argv if action == "up" else list(case.get("compose_down", []))
+        argv = expand_paths(list(case["compose"]))
+        return argv if action == "up" else expand_paths(list(case.get("compose_down", [])))
     if "vulhub_path" not in case:
         return None
     if action == "up":
@@ -376,7 +457,8 @@ def run_one(case: Dict[str, Any], invocation: List[str], expect: str,
                                     wait_for.get("timeout", 120))
             if not ready:
                 return False, f"target never became ready at {wait_for['url']}", {}
-        report = run_rcekit(invocation, timeout=900.0 if timeout is None else timeout)
+        report = run_rcekit(invocation, timeout=900.0 if timeout is None else timeout,
+                            run_in=case.get("run_in"))
         ok, detail = check_report(report, expect, expect_method)
         return ok, detail, report
     finally:
