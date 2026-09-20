@@ -54,6 +54,28 @@ def slugify(heading):
     return text.strip().replace(" ", "-")
 
 
+# Markdown escapes a literal pipe inside a cell as `\|`, which
+# docs/reference.md already does in three of its tables. Splitting a row on
+# every pipe invents a cell, and zipping against the header then shifts every
+# column after it -- silently, so a claim in the last column simply stops being
+# examined and the tier tests pass without looking at the thing they exist for.
+ROW_SPLIT_RE = re.compile(r"(?<!\\)\|")
+
+# A denial is the opposite of the claim being looked for, so it comes out before
+# the claim is looked for. "never confirmed" and "without confirmation" disclaim
+# it, and so does "unconfirmed" -- which carries its negation inside the word,
+# where a rule about preceding words cannot see it.
+DENIAL_RE = re.compile(
+    r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+`?confirm\w*`?"
+    r"|\bunconfirm\w*",
+    re.IGNORECASE)
+
+
+def row_cells(row_body):
+    """The cells of one Markdown table row, keyed on nothing yet."""
+    return [cell.strip().replace("\\|", "|") for cell in ROW_SPLIT_RE.split(row_body)]
+
+
 def anchors_of(path):
     body = strip_code_fences(path.read_text(encoding="utf-8"))
     found = set()
@@ -283,9 +305,6 @@ class DemoTierTestCase(unittest.TestCase):
     HEADING_TIER_RE = re.compile(r"→\s*<code>([a-z][a-z-]*)</code>")
     METHOD_RE = re.compile(r"<code>([a-z][a-z-]*)</code>")
     ALT_RE = re.compile(r"!\[([^\]]*)\]\(")
-    # "never confirmed", "not confirmed on its own" -- a denial is the opposite
-    # of the claim being looked for, so it is removed before looking.
-    DENIAL_RE = re.compile(r"\b(?:never|not|no)\s+`?confirm\w*`?", re.IGNORECASE)
 
     def setUp(self):
         self.body = README.read_text(encoding="utf-8")
@@ -302,7 +321,7 @@ class DemoTierTestCase(unittest.TestCase):
             if not match:
                 in_table = False
                 continue
-            cells = [cell.strip() for cell in match.group(1).split("|")]
+            cells = row_cells(match.group(1))
             if len(cells) == 4 and cells[3] == "Verdict":
                 in_table = True
                 continue
@@ -393,12 +412,46 @@ class DemoTierTestCase(unittest.TestCase):
                 continue
             seen += 1
             with self.subTest(tier=heading_tier.group(1)):
-                claim = self.DENIAL_RE.sub("", alt.group(1))
+                claim = DENIAL_RE.sub("", alt.group(1))
                 self.assertNotIn(
                     "confirm", claim.lower(),
                     f"a {heading_tier.group(1)} recording is described as confirming: "
                     f"{alt.group(1)}")
         self.assertGreaterEqual(seen, 1, "no sub-confirmed recordings were checked")
+
+
+class TableClaimParsingTestCase(unittest.TestCase):
+    """The two helpers every tier check reads its claims through.
+
+    Both failure modes here are silent. A mis-split row shifts the columns and
+    the claim in the last one stops being examined; a denial read as a claim
+    fails a document that says the right thing. Neither shows up as a wrong
+    answer -- one is a test that stops looking, the other a test that objects
+    to honest prose.
+    """
+
+    def test_an_escaped_pipe_stays_inside_its_cell(self):
+        # `docs/reference.md` writes separators this way in three tables.
+        self.assertEqual(
+            row_cells(r" `--separators` | `; `, `\| `, `&& ` | confirms "),
+            ["`--separators`", "`; `, `| `, `&& `", "confirms"])
+
+    def test_a_row_with_no_escapes_is_unchanged(self):
+        self.assertEqual(row_cells(" `time` | a regression | `needs-review` only "),
+                         ["`time`", "a regression", "`needs-review` only"])
+
+    def test_a_disclaimer_is_not_read_as_a_claim(self):
+        for text in ("never confirmed", "not confirmed on its own",
+                     "no confirmation", "without confirmation", "unconfirmed",
+                     "cannot be confirmed by reflected/eval", "never `confirmed`"):
+            with self.subTest(text=text):
+                self.assertNotIn("confirm", DENIAL_RE.sub("", text).lower())
+
+    def test_a_claim_survives_in_every_form_it_is_made(self):
+        for text in ("confirms", "confirmed execution", "confirming RCE",
+                     "proves confirmation", "`confirmed`"):
+            with self.subTest(text=text):
+                self.assertIn("confirm", DENIAL_RE.sub("", text).lower())
 
 
 class MethodTableTierTestCase(unittest.TestCase):
@@ -423,9 +476,6 @@ class MethodTableTierTestCase(unittest.TestCase):
 
     ROW_RE = re.compile(r"^\|(.+)\|\s*$")
     CODE_RE = re.compile(r"`([^`]+)`")
-    # A denial is the opposite of the claim being looked for.
-    DENIAL_RE = re.compile(r"\b(?:never|not|no|cannot(?:\s+be)?)\s+`?confirm\w*`?",
-                           re.IGNORECASE)
 
     @classmethod
     def setUpClass(cls):
@@ -450,7 +500,7 @@ class MethodTableTierTestCase(unittest.TestCase):
             if not match:
                 header = None
                 continue
-            cells = [cell.strip() for cell in match.group(1).split("|")]
+            cells = row_cells(match.group(1))
             if cells[-1] == header_ends_with:
                 header = cells
                 continue
@@ -523,7 +573,7 @@ class MethodTableTierTestCase(unittest.TestCase):
             if not methods or any(self.tiers[m] == "confirmed" for m in methods):
                 continue
             checked += 1
-            claim = self.DENIAL_RE.sub("", " ".join(row.values()))
+            claim = DENIAL_RE.sub("", " ".join(row.values()))
             with self.subTest(methods=methods):
                 self.assertNotIn(
                     "confirm", claim.lower(),

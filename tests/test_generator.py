@@ -4278,10 +4278,14 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         "lookup-sink": ("lookup sink", "lookup-sink"),
         "deserialization-sink": ("deserialization sink", "deserialization-sink"),
     }
-    # "cannot be confirmed by reflected/eval" is the opposite of a claim to
-    # confirm, so a denial is removed before the stems are looked for.
-    _DENIAL_RE = re.compile(r"\b(?:never|not|no|cannot(?:\s+be)?)\s+confirm\w*",
-                            re.IGNORECASE)
+    # A denial is the opposite of a claim to confirm, so it comes out before the
+    # stems are looked for: "cannot be confirmed by reflected/eval" disclaims,
+    # and so does "unconfirmed", which carries its negation inside the word
+    # where a rule about preceding words cannot see it.
+    _DENIAL_RE = re.compile(
+        r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+`?confirm\w*`?"
+        r"|\bunconfirm\w*",
+        re.IGNORECASE)
 
     def test_every_line_states_the_tier_its_method_actually_reaches(self):
         """Advice is a command the operator will run, so the tier it promises
