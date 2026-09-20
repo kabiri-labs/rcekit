@@ -14,6 +14,7 @@ reported as a clean negative.
 """
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -278,6 +279,129 @@ class CaseTimeoutTestCase(unittest.TestCase):
         case = runner.load_case(BENCH_ROOT / "cases" / "webmin-cve-2019-15107.json")
         self.assertGreater(case["negative_control"]["timeout"], 1174,
                            "the control's budget must exceed its measured runtime")
+
+
+class ContainerisedRunTestCase(unittest.TestCase):
+    """`run_in` puts the run inside the target's own network.
+
+    A callback method needs the target's resolver to reach RCEKit's listener,
+    and a resolver asks UDP 53. Rather than demand that port on the host, the
+    run happens where it is free.
+    """
+
+    RUN_IN = {"image": "python:3.11-slim", "network": "bench_net", "ip": "172.28.0.10"}
+
+    def _command(self, invocation, run_in=None, observe=None):
+        """The argv run_rcekit would execute, without executing it."""
+        seen = {}
+
+        class _FakeSubprocess:
+            @staticmethod
+            def run(argv, capture_output=False, text=False, timeout=None, cwd=None):
+                seen["argv"] = list(argv)
+                if observe:
+                    observe(argv, seen)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        original = runner.subprocess
+        runner.subprocess = _FakeSubprocess
+        try:
+            runner.run_rcekit(invocation, run_in=run_in)
+        finally:
+            runner.subprocess = original
+        return seen["argv"]
+
+    def test_without_run_in_the_tool_runs_on_the_host_as_before(self):
+        argv = self._command(["--verify-url", "http://x/?a=FUZZ"])
+        self.assertNotIn("docker", argv)
+        self.assertIn(str(runner.RCEKIT), argv)
+
+    def test_the_container_joins_the_named_network_at_the_named_address(self):
+        argv = self._command(["--verify-url", "http://solr:8983/?a=FUZZ"], self.RUN_IN)
+        self.assertEqual(argv[:3], ["docker", "run", "--rm"])
+        self.assertIn("--network", argv)
+        self.assertEqual(argv[argv.index("--network") + 1], "bench_net")
+        self.assertEqual(argv[argv.index("--ip") + 1], "172.28.0.10")
+        self.assertIn(self.RUN_IN["image"], argv)
+
+    def test_the_repository_is_mounted_read_only(self):
+        # The container runs the tool; it has no business changing it.
+        argv = self._command(["--verify-url", "http://solr:8983/?a=FUZZ"], self.RUN_IN)
+        mounts = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-v"]
+        repo = [m for m in mounts if m.endswith(f"{runner.CONTAINER_REPO}:ro")]
+        self.assertTrue(repo, f"the repository is not mounted read-only: {mounts}")
+
+    def test_path_tokens_resolve_to_the_mount_point_not_the_host(self):
+        # A host path is meaningless inside the container. This is the whole
+        # reason cases name files with tokens rather than paths.
+        argv = self._command(["-r", "{bench}/requests/webmin.txt"], self.RUN_IN)
+        self.assertIn(f"{runner.CONTAINER_REPO}/tests/bench/requests/webmin.txt",
+                      [arg.replace("\\", "/") for arg in argv])
+        self.assertNotIn(str(runner.BENCH_ROOT), argv)
+
+    def test_the_results_file_exists_before_the_container_starts(self):
+        """The container writes the results, and it is not this process.
+
+        With Docker's user-namespace remapping, container root is a
+        subordinate host UID, so a 0700 directory owned by the runner is not
+        writable from inside. The file never appeared, `run_rcekit` found no
+        JSON, and the case reported `nothing-tested` -- detection found
+        nothing, rather than the channel having been shut. Naming the wrong
+        cause is the failure this harness exists to avoid.
+
+        Pre-creating the file is what makes it writable without granting the
+        directory away, so this pins the file being there when the container
+        is launched rather than the mode bits, which Windows does not keep.
+        """
+        landed = {}
+
+        def observe(argv, seen):
+            out = argv[argv.index("--detect-json") + 1]
+            # rsplit, not split: a Windows mount reads `C:\\path:/out`, and
+            # splitting on every colon eats the drive letter.
+            host_dir = [argv[i + 1].rsplit(":", 1)[0] for i, a in enumerate(argv)
+                        if a == "-v" and argv[i + 1].endswith(runner.CONTAINER_OUT)]
+            landed["container_path"] = out
+            landed["exists"] = os.path.isfile(
+                os.path.join(host_dir[0], os.path.basename(out)))
+
+        self._command(["--verify-url", "http://solr:8983/?a=FUZZ"], self.RUN_IN,
+                      observe=observe)
+        self.assertEqual(landed["container_path"],
+                         f"{runner.CONTAINER_OUT}/results.json")
+        self.assertTrue(landed["exists"],
+                        "the results file was not created before the container ran")
+
+    def test_run_in_needs_an_image_and_a_network(self):
+        for missing in ("image", "network"):
+            run_in = {key: value for key, value in self.RUN_IN.items() if key != missing}
+            with self.subTest(missing=missing):
+                with self.assertRaises(runner.CaseError) as raised:
+                    runner.validate_case(minimal_case(run_in=run_in))
+                self.assertIn(missing, str(raised.exception))
+
+    def test_run_in_must_be_an_object(self):
+        with self.assertRaises(runner.CaseError):
+            runner.validate_case(minimal_case(run_in="python:3.11-slim"))
+
+    def test_a_tier_the_engine_can_emit_is_a_tier_a_case_can_expect(self):
+        """The whitelists were written out by hand and had drifted.
+
+        Neither `lookup-sink` nor `deserialization-sink` was in either, so a
+        case for `lookup` or `deser` could not be loaded, let alone run -- and
+        nobody found out until one was written. Both read from
+        DETECTION_METHODS now, so this cannot drift again.
+        """
+        import rcekit
+        for name, method in rcekit.DETECTION_METHODS.items():
+            with self.subTest(method=name):
+                self.assertIn(method.tier, runner.VALID_EXPECTATIONS)
+                if method.tier != "confirmed":
+                    # A control may expect it: the target was exercised and the
+                    # tool did not claim execution, which is what a control
+                    # measures.
+                    self.assertIn(method.tier, runner.CONTROL_EXPECTATIONS)
+        self.assertNotIn("confirmed", runner.CONTROL_EXPECTATIONS)
 
 
 class SharedTargetTestCase(unittest.TestCase):

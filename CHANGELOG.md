@@ -95,6 +95,15 @@ formats, or the template schema.
   `{bench}` / `{repo}` now expand in a case's compose argv as well as its
   invocation, and resolve to the mount point when the run is containerised.
 
+  The results file is created before the container starts, and it rather than
+  its directory is made writable. Under Docker's user-namespace remapping,
+  container root is a subordinate host UID, so a `mkdtemp` owned by the runner
+  at 0700 is not writable from inside: the file would never appear and the case
+  would report `nothing-tested`, as though detection had found nothing rather
+  than as though the channel had been shut. Granting the one file and not the
+  directory keeps anyone else from creating, replacing or unlinking entries
+  there.
+
   Test-only: no version bump, and nothing about a run changes.
 
 ## [2.36.0] — 2026-09-19

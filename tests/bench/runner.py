@@ -297,6 +297,26 @@ def run_rcekit(invocation: List[str], python: Optional[str] = None,
     if run_in:
         out_dir = tempfile.mkdtemp(prefix="rcekit-bench-out-")
         results_path = os.path.join(out_dir, "results.json")
+        # The container writes the results here, and it is not this process.
+        # With Docker's user-namespace remapping, container root is a
+        # subordinate host UID, so a 0700 mkdtemp owned by the runner is not
+        # writable from inside -- the file never appears, and the case reports
+        # `nothing-tested` as though detection had found nothing rather than as
+        # though the channel had been shut. Naming the wrong cause is the
+        # failure this harness exists to avoid.
+        #
+        # The file is pre-created and made writable; the directory gets search
+        # permission but not write. Writing an existing file needs permission
+        # on the file, so that is all that is granted: nobody else can create,
+        # replace or unlink entries here.
+        open(results_path, "w").close()
+        try:
+            os.chmod(out_dir, 0o711)
+            os.chmod(results_path, 0o666)
+        except OSError:
+            # Windows keeps no meaningful mode bits here, and has no
+            # remapping to defeat either.
+            pass
         command = container_command(run_in, invocation, out_dir)
     else:
         handle, results_path = tempfile.mkstemp(prefix="rcekit-bench-", suffix=".json")
