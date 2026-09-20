@@ -58,6 +58,12 @@ formats, or the template schema.
   that row's prose names `oob` -- which confirms -- while recommending
   `lookup`, which does not.
 
+  A reference row naming something that is not a registered method fails rather
+  than being passed over. Skipping it left the completeness check one-way: a
+  method *removed* from `DETECTION_METHODS` would leave its row behind, every
+  remaining row would still match, and the page would go on offering a
+  `--methods` value the CLI rejects.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added
