@@ -91,6 +91,7 @@ success.
 | `vulhub_path` | Directory under `--vulhub-root`; the runner runs `docker compose up -d` there |
 | `compose` / `compose_down` | Explicit argv, when the standard compose commands are not enough |
 | `wait_for` | Poll until the target answers, so a slow boot is not read as a regression |
+| `run_in` | Optional. `{image, network, ip}` — run RCEKit **inside a container** on that network instead of on the host, for a method whose callback needs a port the host does not have free. The repository is mounted read-only |
 | `share_target` | Optional, default `false`. Bring the container up **once** for both halves instead of once each. The teardown between them is `down -v`, so by default the control meets a *fresh* target -- set this only when neither half changes the target's state, and never for a case whose vulnerable half writes a file or plants a shell. The runner rejects it on a case whose control brings up a different target |
 | `timeout` | Seconds one run may take (default 900). `negative_control` may set its own, and usually needs to: the method a tier-ceiling control exercises is the expensive one |
 | `invocation` | RCEKit arguments; `--acknowledge-consent` and `--detect-json` are added by the runner |
@@ -149,7 +150,7 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: 2/2.
+`python tests/bench/runner.py --all` is green: 3/3, in 34m20s.
 
 Both cases set `share_target`, because neither half writes anything: the
 vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
@@ -161,37 +162,41 @@ fast case is most of the run.
 
     | RCE class | Target | Method | Verdict | Control | Result |
     |---|---|---|---|---|---|
+    | Expression-lookup sink (Log4Shell/JNDI) | Apache Solr 8.11.0 -- CVE-2021-44228 | `lookup` | `lookup-sink` | `negative` | pass |
     | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
 
-That covers three of the four rows in the repository README's coverage table:
-the `reflected` and `eval` confirmations, and the `time` tier ceiling, which is
-the Webmin control here.
+That is every row in the repository README's coverage table: the `reflected`
+and `eval` confirmations, the `lookup` sink, and the `time` tier ceiling, which
+is the Webmin control here.
 
-### The fourth row still has no case
+### The fourth row now has one, and it needed the harness to grow
 
-Log4Shell. The engine can now confirm that class -- `--methods lookup` proves an
-expression-lookup sink out of band -- but a case for it needs something this
-harness cannot arrange on its own.
+Log4Shell. `--methods lookup` proves an expression-lookup sink out of band, and
+a case for it could not be written until two things were true.
 
-A JNDI lookup resolves `<token>.<oob-host>` before it does anything else, and a
-resolver asks **UDP port 53**. So the callback only reaches RCEKit's listener if
-that listener owns port 53 on an address the target's resolver uses. Two ways to
-get there, neither of them local:
+The first is the port. A JNDI lookup resolves `<token>.<oob-host>` before it
+does anything else, and a resolver asks **UDP 53**, so the callback only lands
+if RCEKit's listener owns that port on an address the target's resolver uses.
+Nothing local gets you there: a bare `--oob-host` IP cannot carry the token as a
+DNS label, and a delegated domain is not something a benchmark can arrange.
 
-- a real domain delegated to the host running the bench, which is what
-  `--oob-host` means on an engagement; or
-- a DNS listener inside the target's own Docker network, with the service's
-  `dns:` pointed at it, which needs a compose override this harness does not
-  currently ship.
+So the run happens where the port is free. `run_in` puts RCEKit in a container
+on the target's own network, at a fixed address, and an override points Solr's
+`dns:` at it ([`overrides/log4shell-dns.yml`](overrides/log4shell-dns.yml)). The
+repository is mounted read-only and the image is a stock Python; nothing is
+built.
 
-Pointing `--oob-host` at a bare IP does not work around it: a lookup has no
-second channel to carry the token the way an HTTP probe does, so `lookup` builds
-no probes at all rather than send ones that could never be attributed.
+The second was the harness's own vocabulary. `VALID_EXPECTATIONS` was written
+out by hand and had drifted: neither `lookup-sink` nor `deserialization-sink`
+was in it, so a case for either method could not be *loaded*, let alone run.
+Both lists are read from `DETECTION_METHODS` now, and a tier the engine can emit
+is a tier a case can expect.
 
-Until one of those exists, the row stays unreproduced -- and stays out of the
-repository README, which is the rule this file has always stated: a claim the
-bench cannot reproduce is worse than a missing feature. The method's own
-`/vuln` versus `/reflect` gate is covered by the unit suite
-(`LookupCallbackTestCase`), which is what that suite is for; what it cannot show
-is that RCEKit confirms *Solr*.
+**The control is the argument for the method.** `oob` applies to this target --
+Solr is Java, and a Java application can shell out -- but every probe it builds
+is a shell command, and a sink that interpolates `${jndi:...}` runs none of
+them. So `oob` must come back `negative` against a target that *is* exploitable.
+That claim is what `lookup` was added for, and until this case ran it rested on
+a fixture. It now rests on Solr 8.11.0.
+

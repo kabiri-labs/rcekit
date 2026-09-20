@@ -28,29 +28,28 @@ differenced against a payload-free control:
 |---|---|---|---|
 | OS command injection (results-based) | `reflected` | Webmin 1.910 — CVE-2019-15107 | **`confirmed`** |
 | Expression injection (OGNL) | `eval` | Apache Struts2 — S2-001 | **`confirmed`** |
-| Expression-lookup (Log4Shell/JNDI) | `lookup` | Log4Shell — CVE-2021-44228 | `lookup-sink` † |
+| Expression-lookup (Log4Shell/JNDI) | `lookup` | Apache Solr 8.11.0 (Log4j 2.14.1) — CVE-2021-44228 | `lookup-sink` |
 | Blind command injection (no output) | `time` | Webmin 1.910 — CVE-2019-15107 | `needs-review` |
 
-Every row but the marked one is reproduced by
-[`tests/bench/`](tests/bench/), which runs RCEKit against these builds under
-Docker and checks the verdict **and** its negative control. Last run green at
-**2.35.5** (2026-09-19): 2/2 cases, with the Struts2 control `negative` and the
-Webmin `time` control held at `needs-review`. That is a point-in-time claim, not
-a continuous one -- the benchmark is run on a cadence, not on every change.
+Every row is reproduced by [`tests/bench/`](tests/bench/), which runs RCEKit
+against these builds under Docker and checks the verdict **and** its negative
+control. Last run green at **2.36.0** (2026-09-20): 3/3 cases. That is a
+point-in-time claim, not a continuous one -- the benchmark is run on a cadence,
+not on every change.
 
-† Verified by hand against vulhub at **2.17.0**, and written up step by step in
-[`docs/verify-it-yourself.md`](docs/verify-it-yourself.md) -- but not carried by
-the automated benchmark, so it is not re-checked on the cadence the other rows
-are. A JNDI lookup resolves its callback host through UDP 53, so a case needs a
-delegated domain or a DNS listener inside the target's own container network;
-neither is arranged yet. [`tests/bench/README.md`](tests/bench/README.md)
-records what would close it.
+Each control is the row's real test. Struts2 probed with `reflected` comes back
+`negative`, because S2-001 re-evaluates OGNL and there is no shell behind it.
+Webmin's `time` signal is held at `needs-review` on a target where it happens to
+be right. And Solr probed with `oob` comes back `negative` **although it is
+exploitable** -- `oob` builds shell commands and a `${jndi:...}` sink runs none
+of them, which is the gap `lookup` exists to close, measured rather than
+asserted.
 
-The verdict on that row is `lookup-sink`, not `confirmed`, and always was in
-substance: what the callback proves is that the sink resolved a URI RCEKit
-chose. Reaching RCE needs a server that answers the lookup with a loadable
-class, which this listener never does. Only `jndi:dns://` goes out, so there
-is no connection past the name lookup for such a server to answer on.
+The Log4Shell row says `lookup-sink`, not `confirmed`: what the callback proves
+is that the sink resolved a URI RCEKit chose. Reaching RCE needs a server that
+answers the lookup with a loadable class, and at the default risk tier only
+`jndi:dns://` goes out -- a name lookup, with no connection past it for such a
+server to answer on.
 
 <details open>
 <summary><b><code>reflected</code> — OS command injection, Webmin CVE-2019-15107 → <code>confirmed</code></b></summary>

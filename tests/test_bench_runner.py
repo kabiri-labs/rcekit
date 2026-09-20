@@ -235,7 +235,7 @@ class CaseTimeoutTestCase(unittest.TestCase):
         """The timeout each half would be given, without running anything."""
         seen = []
 
-        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
             seen.append(timeout)
             return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
 
@@ -308,7 +308,7 @@ class SharedTargetTestCase(unittest.TestCase):
         """Which compose commands a case would run, without running anything."""
         fake = self._FakeSubprocess(returncode)
 
-        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
             return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
 
         original_sub, original_run = runner.subprocess, runner.run_rcekit
@@ -356,7 +356,7 @@ class SharedTargetTestCase(unittest.TestCase):
     def test_keep_up_still_leaves_a_shared_target_running(self):
         fake = self._FakeSubprocess()
 
-        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
             return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
 
         original_sub, original_run = runner.subprocess, runner.run_rcekit
