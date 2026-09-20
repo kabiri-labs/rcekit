@@ -401,6 +401,130 @@ class DemoTierTestCase(unittest.TestCase):
         self.assertGreaterEqual(seen, 1, "no sub-confirmed recordings were checked")
 
 
+class MethodTableTierTestCase(unittest.TestCase):
+    """The same check as `DemoTierTestCase`, for the two tables under `docs/`.
+
+    Those tables were left out when the README's were pinned, and they carry
+    the same claim: `docs/reference.md` names the tier each method can reach,
+    and `docs/guide.md` tells an operator which method to run next. A tier
+    that moves on the class has to move in both.
+
+    `reference.md` states a *ceiling*, so a cell may also name a weaker tier
+    the method really does emit -- `write` reports `needs-review` for a write
+    that is served but not interpreted, `deser` for a shape fingerprint. The
+    rule is therefore a subset rather than an equality, which is the honest
+    shape for that column and the reason the README's stricter rule does not
+    apply here.
+    """
+
+    REFERENCE = DOCS_DIR / "reference.md"
+    GUIDE = DOCS_DIR / "guide.md"
+    METHOD_COL = "`--methods` value"
+
+    ROW_RE = re.compile(r"^\|(.+)\|\s*$")
+    CODE_RE = re.compile(r"`([^`]+)`")
+    # A denial is the opposite of the claim being looked for.
+    DENIAL_RE = re.compile(r"\b(?:never|not|no|cannot(?:\s+be)?)\s+`?confirm\w*`?",
+                           re.IGNORECASE)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tiers = {name: method.tier
+                     for name, method in rcekit.DETECTION_METHODS.items()}
+        # Every tier any method can report, plus the one weaker tier several of
+        # them fall back to. A token outside this set is prose, not a claim.
+        cls.known = set(cls.tiers.values()) | {"needs-review"}
+
+    def _rows(self, path, header_ends_with):
+        """Rows of the one table whose header's last cell is
+        ``header_ends_with``, each as a dict keyed by its column heading.
+
+        Keyed rather than positional because the column a claim lives in is
+        the point: the guide's `lookup` row names `oob` in its prose, and
+        reading the whole row for method names made that row look like one
+        about `oob` and skipped it.
+        """
+        rows, header = [], None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = self.ROW_RE.match(line)
+            if not match:
+                header = None
+                continue
+            cells = [cell.strip() for cell in match.group(1).split("|")]
+            if cells[-1] == header_ends_with:
+                header = cells
+                continue
+            if header and not set(cells[0]) <= set("- :"):
+                rows.append(dict(zip(header, cells)))
+        return rows
+
+    def test_the_reference_table_documents_every_registered_method(self):
+        """A method that lands without a row here is a capability nobody can
+        look up, and the table is where an operator checks what a verdict will
+        be before spending a run on it."""
+        rows = self._rows(self.REFERENCE, "Tier it can reach")
+        self.assertTrue(rows, "the reference method table was not found")
+        documented = {match.group(1) for row in rows
+                      for match in [self.CODE_RE.search(row[self.METHOD_COL])] if match}
+        self.assertEqual(
+            sorted(set(self.tiers) - documented), [],
+            "registered methods with no row in docs/reference.md")
+
+    def test_every_reference_row_names_tiers_its_method_can_reach(self):
+        rows = self._rows(self.REFERENCE, "Tier it can reach")
+        self.assertTrue(rows, "the reference method table was not found")
+        checked = 0
+        for row in rows:
+            name = self.CODE_RE.search(row[self.METHOD_COL])
+            if not name or name.group(1) not in self.tiers:
+                continue
+            name = name.group(1)
+            checked += 1
+            tier = self.tiers[name]
+            claimed = {token for token in self.CODE_RE.findall(row["Tier it can reach"])
+                       if token in self.known}
+            with self.subTest(method=name):
+                self.assertIn(
+                    tier, claimed,
+                    f"the `{name}` row never names {tier}, the tier it reports")
+                # A ceiling column may name a weaker tier the method really
+                # emits; it may not name a different method's ceiling.
+                self.assertEqual(
+                    sorted(claimed - {tier, "needs-review"}), [],
+                    f"the `{name}` row names a tier it cannot reach (its tier "
+                    f"is {tier})")
+        self.assertGreaterEqual(checked, 6, "no reference rows were checked")
+
+    def test_no_guide_row_offers_a_sub_confirmed_method_as_confirming(self):
+        """The guide's table is what an operator reads to pick the next run.
+
+        It has no tier column, so there is nothing to require -- but a row that
+        promises confirmation for a method that cannot confirm is the same
+        overclaim `blind_sink_advice` carried, in the document that tells
+        people which method to reach for."""
+        rows = self._rows(self.GUIDE, "Cost")
+        self.assertTrue(rows, "the guide's method table was not found")
+        checked = 0
+        for row in rows:
+            # Only the `Use` column says what the row recommends. The rest is
+            # prose, and the `lookup` row's prose names `oob` -- reading the
+            # whole row made this skip the one row it was written for.
+            methods = [token.strip() for token in
+                       ",".join(self.CODE_RE.findall(row["Use"])).split(",")
+                       if token.strip() in self.tiers]
+            if not methods or any(self.tiers[m] == "confirmed" for m in methods):
+                continue
+            checked += 1
+            claim = self.DENIAL_RE.sub("", " ".join(row.values()))
+            with self.subTest(methods=methods):
+                self.assertNotIn(
+                    "confirm", claim.lower(),
+                    f"the row for {methods} describes confirmation, but "
+                    f"{', '.join(f'{m} reaches {self.tiers[m]}' for m in methods)}")
+        self.assertGreaterEqual(checked, 2, "the guide rows for sub-confirmed "
+                                            "methods were not reached")
+
+
 class CLIDocumentationTestCase(unittest.TestCase):
     """Guard against the CLI and its reference page drifting apart."""
 
