@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.36.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.37.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -390,6 +390,23 @@ what it sends, and how to read what comes back.
 
 ## Safety &amp; ethics
 
+**RCEKit exploits, and that is the point.** A vulnerability is confirmed by
+making the target do the thing, because that is the only evidence a signature
+cannot fake and a patched build cannot produce by accident. What bounds a run is
+not reluctance to exploit. It is two structural facts and one switch.
+
+**It takes no arbitrary payload from you.** Probes are built by the engine to
+serve an oracle — arithmetic on operands random to that probe, a name only this
+run could have chosen. There is no input that turns detection into something
+else, because there is no such input to give.
+
+**Anything reaching past computing a value declares the tier it needs**, so one
+flag decides how far a run goes: `--verify-active-risk safe | intrusive |
+stateful`. A method or a single probe *shape* above that tier is held back **by
+name**, with the flag that would send it — a ladder that shrinks quietly is
+indistinguishable from a target with nothing to find. Against a disposable
+instance, raise the tier and get everything the tool has.
+
 - **Consent gate** — exploitation generation and verification require
   `--acknowledge-consent`; `--detection-only` is benign and does not.
 - **Safe by default** — verification fires only low-impact proofs; reverse shells,
@@ -398,10 +415,14 @@ what it sends, and how to read what comes back.
   `--verify-active-risk`. Destructive payloads (persistence, backdoors) are never
   fired without `--verify-allow-destructive`. An **execution plan** prints exactly
   what will be sent before anything fires.
-- **Safety tiers** — `safe` / `intrusive` / `stateful`, filtered by `--max-safety`.
-  A method or bridge that leaves something behind is held to the same ordering as
-  every corpus payload, and the pre-flight names the tier each held-back item
-  actually needs.
+- **Safety tiers** — `safe` / `intrusive` / `stateful`. Corpus payloads are
+  filtered by `--max-safety`; detection methods and their probe shapes declare
+  the same rungs and are filtered by `--verify-active-risk`, so a method that
+  makes the target reach out or leaves something behind is held to the same
+  ordering as every corpus payload. The pre-flight names the tier each held-back
+  item actually needs. `file` and `write` are gated by their own configuration
+  instead: neither does anything until you name a directory to write into and a
+  URL to read it back from.
 - **Audit &amp; logging** — every exploitation/verification run is recorded in
   `exploit_audit.log`; `--watermark` embeds a traceable token; execution logs go to
   `rcekit.log`.

@@ -142,6 +142,67 @@ formats, or the template schema.
 
   Test-only: no version bump, and nothing about a run changes.
 
+## [2.37.0] — 2026-09-20
+
+### Added
+
+- **A detection method declares the risk rung it needs**, and the engine reads
+  it. `SAFETY_ORDER` has labelled corpus payloads `safe` / `intrusive` /
+  `stateful` from the start and the query-language bridges followed; detection
+  methods did not. Each risky one was gated by a hand-written branch in
+  `main()` naming it, so a new method meant remembering to add another -- and a
+  probe shape with nowhere to declare its rung was deleted rather than gated.
+
+  | method | rung | |
+  |---|---|---|
+  | `reflected`, `eval`, `time`, `deser` | `safe` | compute, delay, or parse |
+  | `oob`, `lookup` | `intrusive` | makes the target open outbound connections |
+  | `file`, `write` | `stateful` | writes to the target |
+
+  `file` and `write` are gated by their own configuration rather than by the
+  rung: neither does anything until a directory to write into and a URL to read
+  it back from are named, which says more than a tier would, and asking for the
+  flag as well would refuse a command that works today. Nothing that runs today
+  stops running.
+
+- **A probe shape may need a higher rung than its method**, so coverage that
+  only makes sense at the top tier has somewhere to live instead of being
+  deleted. **`--methods lookup` sends `ldap://` and `rmi://` again**, at
+  `stateful`.
+
+  They were removed in 2.36.0 on the argument that `dns://` resolves wherever
+  `ldap://` would. That claim was too strong -- a filter catching the string
+  `dns:` and not `ldap:`, or a trimmed runtime without the DNS provider,
+  defeats it -- and a sink that takes one scheme and not the other is exactly
+  the sink this method is for. The reason they were removed was real: they
+  continue *past* resolution and connect to whatever address the answer named,
+  which is not an address RCEKit chose. That is a rung, not a reason to drop
+  coverage.
+
+- **The run says what the rung held back**, counted apart from the target
+  profile's drops and with the flag that would send it. The two say different
+  things: a profile drop means the probe *could not have* reached the sink,
+  while this means it could and the operator chose not to send it. Reporting
+  them together would state the first about the second.
+
+- **A method declares the weaker tiers it really reports**, not only its
+  ceiling. `write` reports `needs-review` for a file that is served but not
+  interpreted and `deser` for a shape fingerprint, and three separate places
+  had to know that -- the documentation tests, the benchmark's expectation
+  whitelist, and the advice printed after a clean in-band run. Each kept its
+  own answer; the docs test exempted `needs-review` for *every* method, so
+  `lookup` could name a verdict it never emits and pass.
+
+### Changed
+
+- **`--methods file` and `--methods write` with nothing configured now say
+  so by name.** They were simply not applicable before, so the run built no
+  probes and reported `nothing-tested` -- which is the quietest way this tool
+  can fail and reads much like a clean target.
+
+- **`docs/reference.md` carries a `Rung` column**, held against the class by a
+  test. The tier column already was; this is the same claim one column over.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added
@@ -1372,6 +1433,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.37.0]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...v2.37.0
 [2.36.0]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...v2.36.0
 [2.35.5]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...v2.35.5
 [2.35.4]: https://github.com/kabiri-labs/rcekit/compare/v2.35.3...v2.35.4
