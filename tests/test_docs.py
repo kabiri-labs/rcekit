@@ -481,6 +481,10 @@ class MethodTableTierTestCase(unittest.TestCase):
     def setUpClass(cls):
         cls.tiers = {name: method.tier
                      for name, method in rcekit.DETECTION_METHODS.items()}
+        # What each method really reports, not just its ceiling. Exempting
+        # `needs-review` for everyone let `lookup` name a tier it never emits.
+        cls.reported = {name: {method.tier} | set(method.also_reports)
+                        for name, method in rcekit.DETECTION_METHODS.items()}
         # Every tier any method can report, plus the one weaker tier several of
         # them fall back to. A token outside this set is prose, not a claim.
         cls.known = set(cls.tiers.values()) | {"needs-review"}
@@ -546,12 +550,39 @@ class MethodTableTierTestCase(unittest.TestCase):
                     tier, claimed,
                     f"the `{name}` row never names {tier}, the tier it reports")
                 # A ceiling column may name a weaker tier the method really
-                # emits; it may not name a different method's ceiling.
+                # emits -- and only the ones it really does. Exempting
+                # `needs-review` for every method let `lookup` name a verdict
+                # it never emits and still pass.
                 self.assertEqual(
-                    sorted(claimed - {tier, "needs-review"}), [],
-                    f"the `{name}` row names a tier it cannot reach (its tier "
-                    f"is {tier})")
+                    sorted(claimed - self.reported[name]), [],
+                    f"the `{name}` row names a tier it does not report; it "
+                    f"reports {', '.join(sorted(self.reported[name]))}")
         self.assertGreaterEqual(checked, 6, "no reference rows were checked")
+
+    def test_every_reference_row_names_the_rung_its_method_declares(self):
+        """The rung is what an operator chooses a run on, so the page has to
+        agree with the class about it.
+
+        The same drift as the tier column, one column over: a rung written out
+        by hand goes stale the moment a method's changes, and the operator
+        acting on the page would be told to pass a flag the tool does not want
+        or to skip one it does."""
+        rows = self._rows(self.REFERENCE, "Tier it can reach")
+        checked = 0
+        for row in rows:
+            name = self.CODE_RE.search(row[self.METHOD_COL])
+            if not name or name.group(1) not in self.tiers:
+                continue
+            name = name.group(1)
+            checked += 1
+            declared = rcekit.DETECTION_METHODS[name].safety
+            documented = self.CODE_RE.findall(row["Rung"])
+            with self.subTest(method=name):
+                self.assertEqual(
+                    documented, [declared],
+                    f"docs/reference.md puts `{name}` at {documented}, but the class "
+                    f"declares {declared}")
+        self.assertGreaterEqual(checked, 6, "no reference rungs were checked")
 
     def test_no_guide_row_offers_a_sub_confirmed_method_as_confirming(self):
         """The guide's table is what an operator reads to pick the next run.

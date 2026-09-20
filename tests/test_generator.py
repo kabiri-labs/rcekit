@@ -3810,22 +3810,61 @@ class LookupCallbackTestCase(unittest.TestCase):
                 for shellish in ("nslookup", "curl", "wget", "certutil", "iwr", ";", "|", "&&"):
                     self.assertNotIn(shellish, probe.payload)
 
-    def test_every_probe_is_a_name_lookup_and_reaches_nothing_else(self):
-        """The one shape that cannot do anything but resolve a name.
+    def test_the_default_rung_sends_only_the_shape_that_resolves_a_name(self):
+        """`jndi:dns://` can do nothing but resolve a name.
 
         `ldap://` and `rmi://` continue *past* resolution and connect to
         whatever address the answer named -- by default 127.0.0.1, the target's
         own loopback. Whatever replies on :389 or :1099 is not RCEKit, so a
-        reference could come back and a class be instantiated: the promise that
-        no object is served would be the tool's to break, not the target's."""
-        self.assertEqual(rcekit.LookupCallback._SCHEMES, ("dns",))
-        _, probes = self._probes({"oob_host": "x.example"})
-        self.assertTrue(probes)
-        for probe in probes:
+        reference could come back and a class be instantiated. That is a real
+        difference in what a probe can cause, so it is a rung rather than a
+        reason to delete the shapes: they were deleted once, and deleting
+        coverage to describe it honestly is the wrong trade."""
+        # Through the filter rather than around it: build_probes builds every
+        # shape, and the rung is what decides which of them a run sends.
+        import random as _random
+        gen = RCEKit()
+        method = rcekit.LookupCallback(gen, {"oob_host": "x.example"})
+        sent = gen._apply_target_profile(
+            method, method.build_probes(self.rec, _random.Random(1)))
+        self.assertTrue(sent)
+        for probe in sent:
             with self.subTest(payload=probe.payload):
                 self.assertIn("jndi:dns://", probe.payload)
                 for reaches_a_service in ("ldap", "rmi", "iiop", "corbaname", "nis"):
                     self.assertNotIn(reaches_a_service, probe.payload)
+
+    def test_the_top_rung_sends_the_shapes_that_reach_a_service(self):
+        # The coverage the rung exists to make available: a sink that filters
+        # `dns:` and not `ldap:` is exactly the sink this method is for.
+        _, probes = self._probes({"oob_host": "x.example", "max_safety": "stateful"})
+        schemes = {probe.carrier for probe in probes}
+        self.assertEqual(schemes, {"dns", "ldap", "rmi"})
+        for probe in probes:
+            with self.subTest(payload=probe.payload):
+                if probe.carrier == "dns":
+                    self.assertIsNone(probe.safety, "a name lookup needs no extra rung")
+                else:
+                    self.assertEqual(probe.safety, "stateful", probe.payload)
+
+    def test_a_shape_that_reaches_a_service_is_held_back_by_default(self):
+        """The rung has to be enforced, not merely written on the probe.
+
+        A `safety` field nothing reads is a label, and a label that does not
+        hold anything back is the kind of claim this project exists to refuse.
+        """
+        import random as _random
+        gen = RCEKit()
+        method = rcekit.LookupCallback(gen, {"oob_host": "x.example"})
+        built = method.build_probes(self.rec, _random.Random(1))
+        self.assertEqual({p.carrier for p in built}, {"dns", "ldap", "rmi"})
+        kept = gen._apply_target_profile(method, built)
+        self.assertEqual({p.carrier for p in kept}, {"dns"})
+        self.assertEqual(gen.safety_held_probes, len(built) - len(kept))
+        # And it says which flag would send them, because a ladder that shrinks
+        # quietly is indistinguishable from a target with nothing to find.
+        self.assertTrue(any("--verify-active-risk stateful" in reason
+                            for reason in gen.safety_held_reasons))
 
     def test_each_probe_carries_its_own_token(self):
         # Sharing one token would mark every form confirmed as soon as any one
@@ -4209,6 +4248,117 @@ class SpaceFilterTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
         self.assertTrue(results)
         self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+
+
+class MethodSafetyRungTestCase(unittest.TestCase):
+    """Every method declares the rung it needs, and the engine reads it.
+
+    The corpus has labelled its payloads `safe`/`intrusive`/`stateful` from the
+    start, and the query-language bridges followed. Detection methods did not:
+    each risky one was gated by a hand-written branch in `main()` naming it, so
+    a new method meant remembering to add another -- and a probe shape with
+    nowhere to declare its rung was deleted rather than gated, which is how
+    `lookup` lost `ldap://` and `rmi://`.
+    """
+
+    def test_every_registered_method_declares_a_rung_that_exists(self):
+        for name, method in rcekit.DETECTION_METHODS.items():
+            with self.subTest(method=name):
+                self.assertIn(method.safety, rcekit.SAFETY_ORDER,
+                              f"{name} declares a rung that is not one of "
+                              f"{sorted(rcekit.SAFETY_ORDER)}")
+
+    def test_a_method_that_makes_the_target_call_out_is_not_safe(self):
+        # The rung is what an operator chooses on; a callback method sitting at
+        # `safe` would make the target open outbound connections on a run that
+        # asked for none.
+        for name, method in rcekit.DETECTION_METHODS.items():
+            if not method.needs_oob_host:
+                continue
+            with self.subTest(method=name):
+                self.assertGreater(rcekit.SAFETY_ORDER[method.safety],
+                                   rcekit.SAFETY_ORDER["safe"],
+                                   f"{name} needs a callback host but claims to be safe")
+
+    def test_every_secondary_tier_is_a_verdict_and_not_the_ceiling(self):
+        for name, method in rcekit.DETECTION_METHODS.items():
+            for tier in method.also_reports:
+                with self.subTest(method=name, tier=tier):
+                    self.assertNotEqual(tier, method.tier,
+                                        "also_reports repeats the method's own tier")
+                    self.assertNotEqual(tier, "confirmed",
+                                        f"{name} lists `confirmed` as a weaker tier")
+
+    def test_the_methods_that_report_needs_review_are_the_ones_that_say_so(self):
+        # Pinned against the code that emits it, so the declaration cannot
+        # quietly stop being true. `write` reports it for a file that is served
+        # but not interpreted, `deser` for a shape fingerprint.
+        declared = {name for name, method in rcekit.DETECTION_METHODS.items()
+                    if "needs-review" in method.also_reports}
+        self.assertEqual(declared, {"write", "deser"})
+
+    def test_a_probe_inherits_its_method_rung_unless_it_names_its_own(self):
+        method = rcekit.LookupCallback(RCEKit(), {"oob_host": "x.example"})
+        self.assertEqual(method.probe_safety(rcekit.Probe(payload="x", expected="y")),
+                         method.safety)
+        self.assertEqual(
+            method.probe_safety(rcekit.Probe(payload="x", expected="y", safety="stateful")),
+            "stateful")
+
+    def test_a_held_probe_is_counted_apart_from_a_profile_drop(self):
+        """Two filters, two tallies, because they say different things.
+
+        A profile drop means the probe *could not have* reached the sink. A
+        safety hold means it could, and the operator chose not to send it.
+        Reporting them as one number would state the first about the second.
+        """
+        import random as _random
+        gen = RCEKit()
+        method = rcekit.LookupCallback(gen, {"oob_host": "x.example"})
+        gen._apply_target_profile(method, method.build_probes(
+            make_record(environment="java", context="raw"), _random.Random(1)))
+        self.assertGreater(gen.safety_held_probes, 0)
+        self.assertEqual(gen.profile_dropped_probes, 0)
+
+    def test_the_two_stateful_methods_are_gated_by_their_own_configuration(self):
+        # `file` and `write` change the target and say so, but naming a
+        # directory to write into and a URL to read it back from is a narrower
+        # statement than a rung -- and asking for the flag as well would refuse
+        # a command that works today.
+        gated = {name for name, method in rcekit.DETECTION_METHODS.items()
+                 if method.gated_by_config}
+        self.assertEqual(gated, {"file", "write"})
+        for name in gated:
+            with self.subTest(method=name):
+                self.assertEqual(rcekit.DETECTION_METHODS[name].safety, "stateful")
+
+
+class SafetyRungCLITestCase(unittest.TestCase):
+    """The rung has to be enforced where the operator meets it."""
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--verify-url", "http://127.0.0.1:9/x?q=FUZZ",
+             "--acknowledge-consent", *extra],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120)
+
+    def test_an_intrusive_method_is_refused_at_the_default_tier(self):
+        result = self._run("--methods", "lookup", "--oob-host", "x.example")
+        self.assertIn("--verify-active-risk intrusive", result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_the_refusal_names_the_method_and_its_rung(self):
+        result = self._run("--methods", "lookup", "--oob-host", "x.example")
+        self.assertIn("lookup", result.stdout)
+        self.assertIn("intrusive technique", result.stdout)
+
+    def test_a_config_gated_method_is_told_what_it_needs_not_which_tier(self):
+        # `--methods file` with nothing configured used to say `--webroot`, and
+        # still must: telling an operator to raise the risk tier when what is
+        # missing is a directory would send them the wrong way.
+        result = self._run("--methods", "file")
+        self.assertIn("--webroot", result.stdout)
+        self.assertNotIn("--verify-active-risk stateful", result.stdout)
 
 
 class BlindSinkAdviceTestCase(unittest.TestCase):

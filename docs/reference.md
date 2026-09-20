@@ -75,16 +75,29 @@ starting point — this page is for looking things up once you know what you wan
 | `--max-points` | (enumeration) Stop after N candidates; the run reports how many it dropped | `40` |
 | `--include-path-segments` | (enumeration) Also inject into URL path segments | off |
 
-| `--methods` value | Confirms | Tier it can reach |
-|---|---|---|
-| `reflected` | OS command injection, via computed arithmetic | `confirmed` |
-| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `confirmed` |
-| `file` | Execution + a write primitive, via write-and-fetch | `confirmed` |
-| `write` | A write primitive proven to be RCE, by executing the written file | `confirmed`, or `needs-review` for a write that is served but not interpreted |
-| `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `confirmed` |
-| `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:dns://…}` URI rather than running a command, and calls back carrying a per-probe token. Needs a **name** for `--oob-host`; an address literal carries no token, so it builds nothing | `lookup-sink` |
-| `time` | Blind execution, via a `0/N/2N` regression | `needs-review` only |
-| `deser` | That the endpoint **deserializes** attacker data — never RCE | `deserialization-sink`, or `needs-review` for the shape fingerprint |
+| `--methods` value | Confirms | Rung | Tier it can reach |
+|---|---|---|---|
+| `reflected` | OS command injection, via computed arithmetic | `safe` | `confirmed` |
+| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `safe` | `confirmed` |
+| `file` | Execution + a write primitive, via write-and-fetch | `stateful` † | `confirmed` |
+| `write` | A write primitive proven to be RCE, by executing the written file | `stateful` † | `confirmed`, or `needs-review` for a write that is served but not interpreted |
+| `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `intrusive` | `confirmed` |
+| `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:…}` URI rather than running a command, and calls back carrying a per-probe token. Sends `dns://` at `intrusive`, and `ldap://` / `rmi://` as well at `stateful`. Needs a **name** for `--oob-host`; an address literal carries no token, so it builds nothing | `intrusive` | `lookup-sink` |
+| `time` | Blind execution, via a `0/N/2N` regression | `safe` | `needs-review` only |
+| `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
+
+**Rung** is the `--verify-active-risk` tier a method needs. A method above the
+run's tier is refused **by name** rather than skipped, because a run that
+quietly tested nothing reads exactly like a clean target. Within a method, a
+probe *shape* may need a higher rung than the method does -- `lookup` resolves a
+name at `intrusive` and can also fetch from an address it did not choose at
+`stateful` -- and the run reports how many shapes it held back and which flag
+would send them.
+
+† `file` and `write` change the target, and their own configuration is what
+gates them: neither does anything until a directory to write into and a URL to
+read it back from are named, which says more than a tier would. Running them
+does not need the flag.
 
 ### Probe depth
 

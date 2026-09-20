@@ -62,9 +62,19 @@ REQUIRED_KEYS = ("name", "rce_class", "target", "invocation", "expect", "negativ
 # case for either method at all, and nobody found out until one was written.
 # A tier is a property of the class that emits it, so this follows it.
 _OUTCOMES_WITHOUT_A_METHOD = ("negative", "inconclusive", "error", "nothing-tested")
-VALID_EXPECTATIONS = tuple(sorted(
-    {method.tier for method in rcekit.DETECTION_METHODS.values()}
-    | set(_OUTCOMES_WITHOUT_A_METHOD)))
+def _reported_tiers() -> set:
+    """Every verdict a detection method can emit: its ceiling and the weaker
+    ones it really reports. `tier` alone was not enough -- `write` reports
+    `needs-review` for a write that is served but not interpreted, and `deser`
+    for a shape fingerprint, so a case pinning either was guessing."""
+    tiers = set()
+    for method in rcekit.DETECTION_METHODS.values():
+        tiers.add(method.tier)
+        tiers.update(method.also_reports)
+    return tiers
+
+
+VALID_EXPECTATIONS = tuple(sorted(_reported_tiers() | set(_OUTCOMES_WITHOUT_A_METHOD)))
 # What a control may expect. Narrower than VALID_EXPECTATIONS on purpose:
 # `error` and `nothing-tested` both mean the run never exercised the target, so a
 # control expecting either proves nothing about false confirmation -- it would
@@ -80,8 +90,7 @@ VALID_EXPECTATIONS = tuple(sorted(
 # attacker data and RCEKit still would not call it RCE" is a control, not a
 # contradiction. Only `confirmed` is excluded.
 CONTROL_EXPECTATIONS = tuple(sorted(
-    ({method.tier for method in rcekit.DETECTION_METHODS.values()} - {"confirmed"})
-    | {"negative", "inconclusive"}))
+    (_reported_tiers() - {"confirmed"}) | {"negative", "inconclusive"}))
 
 
 class CaseError(Exception):

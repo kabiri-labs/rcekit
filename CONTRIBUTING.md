@@ -90,16 +90,36 @@ To add one:
    against the payload-free control (reuse `self._search`, which is
    encoding-aware). A verdict is `confirmed` only when the computed value is
    present and absent from the control.
-3. Register the class in `DETECTION_METHODS`.
-4. Add a `/vuln` (executes) vs `/reflect` (echoes) test to
+3. **Declare what the method costs and what it says.** `safety` is the
+   `--verify-active-risk` rung it needs: `safe` when it only makes the target
+   compute or wait, `intrusive` when it makes the target reach out, `stateful`
+   when it leaves something behind. `needs_oob_host` if it needs a listener.
+   `also_reports` for any weaker verdict it really emits, because `tier` is a
+   ceiling and three separate places have to know the rest. A probe *shape*
+   that reaches further than the method does carries its own `safety` — that
+   is where coverage which only makes sense at the top tier lives, rather than
+   being deleted for want of somewhere to declare it.
+
+   Do not gate a method by hand in `main()`. Every hand-written list naming
+   methods in this repository has gone stale; the classes are the list.
+
+   **Reach wins when the two pull against each other.** A shape whose effect is
+   bounded -- a name resolved, a value computed, a delay waited out -- goes out
+   and the run *says* it went out, rather than being held back. Keep the rung
+   for an effect a warning cannot undo: a file written, a class fetched from an
+   address RCEKit did not choose. Detection the tool could have done and did
+   not is a false negative wearing a safety label, and it costs more than the
+   noise it saves.
+4. Register the class in `DETECTION_METHODS`.
+5. Add a `/vuln` (executes) vs `/reflect` (echoes) test to
    `DetectionMethodTestCase`: the method must `confirm` on `/vuln` and stay
    unconfirmed on `/reflect`. No third-party deps; keep the suite green on 3.8+.
-5. Add a **bench case** (see below) where one can be arranged. A unit test
+6. Add a **bench case** (see below) where one can be arranged. A unit test
    proves the method reaches the right verdict from a given response; only a
    bench case proves it reaches that verdict against the real software. It is
    not a per-PR gate, and a method whose case cannot run yet still ships --
    with the reason written down in `tests/bench/README.md`, not left implicit.
-6. Do not add a row to the README's **CVE table** without a bench run behind it.
+7. Do not add a row to the README's **CVE table** without a bench run behind it.
    That table is the reproduced claim, and it carries the version it was last
    verified at. The **methods table** describes capability, and the unit suite
    is what backs that.

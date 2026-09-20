@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.36.0"
+__version__ = "2.37.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -424,6 +424,11 @@ class RCEKit:
         # the removal is reported, never assumed.
         self.profile_dropped_probes = 0
         self.profile_drop_reasons: Dict[str, int] = {}
+        # Counted apart from the profile drops: a probe held back here could
+        # have reached the sink, and saying otherwise would be a false
+        # statement about the run.
+        self.safety_held_probes = 0
+        self.safety_held_reasons: Dict[str, int] = {}
         self.setup_components()
 
     def setup_components(self):
@@ -2578,6 +2583,32 @@ class RCEKit:
                         return max_payloads
         return total
 
+    def _apply_safety_tier(self, meth: "DetectionMethod",
+                           probes: "List[Probe]") -> "List[Probe]":
+        """Hold back the probe shapes this run's risk tier does not allow.
+
+        Kept apart from the profile filter and counted apart, because the two
+        say different things. A profile drop means the probe *could not have*
+        reached the sink; this means it could, and the operator chose not to
+        send it. Reporting them together would state the first about the
+        second."""
+        # The method carries the run's config; the generator does not. With no
+        # tier declared, the method's own rung is the ceiling: it was selected,
+        # so what it needs to run at all is allowed, and this filter is here for
+        # the shapes that reach past that.
+        allowed = SAFETY_ORDER.get(meth.config.get("max_safety") or meth.safety, 0)
+        kept: "List[Probe]" = []
+        for probe in probes:
+            rung = meth.probe_safety(probe)
+            if SAFETY_ORDER.get(rung, 1) <= allowed:
+                kept.append(probe)
+                continue
+            reason = (f"{meth.name}/{probe.carrier or 'probe'} needs "
+                      f"--verify-active-risk {rung}")
+            self.safety_held_probes += 1
+            self.safety_held_reasons[reason] = self.safety_held_reasons.get(reason, 0) + 1
+        return kept
+
     def _apply_target_profile(self, meth: "DetectionMethod",
                               probes: "List[Probe]") -> "List[Probe]":
         """Drop the probes the declared target profile rules out, and record it.
@@ -2590,7 +2621,7 @@ class RCEKit:
         for reason in reasons:
             self.profile_dropped_probes += 1
             self.profile_drop_reasons[reason] = self.profile_drop_reasons.get(reason, 0) + 1
-        return kept
+        return self._apply_safety_tier(meth, kept)
 
     def run_detection(self, records: Iterator[PayloadRecord], url: str,
                       methods: List[str], method: str = "GET",
@@ -3368,6 +3399,11 @@ class Probe:
     # the evidence so a finding says which engine's quirk it had to work around
     # rather than leaving the tester to rediscover it.
     carrier: Optional[str] = None
+    # The --verify-active-risk rung this shape needs, when it is higher than
+    # its method's. A method whose cheapest probes are inert can still have a
+    # shape that reaches further, and that shape should be available rather
+    # than deleted for want of somewhere to declare it.
+    safety: Optional[str] = None
 
 
 @dataclass
@@ -3419,10 +3455,42 @@ class DetectionMethod:
     # regression across several controlled delays) and decide once via
     # confirm_series, instead of one Verdict per probe.
     aggregate = False
+    # Tiers this method really emits *below* ``tier``, which is a ceiling rather
+    # than its only answer: ``write`` reports ``needs-review`` for a file that
+    # is served but not interpreted, and ``deser`` for a shape fingerprint.
+    # Declared because three separate places had to know it and each kept its
+    # own list -- the documentation tests, the benchmark's expectation
+    # whitelist, and the advice printed after a clean in-band run.
+    also_reports: Tuple[str, ...] = ()
+    # The ``--verify-active-risk`` rung this method needs. The payload corpus
+    # has labelled its records this way from the start and the query-language
+    # bridges followed; detection methods did not, so each risky one was gated
+    # by hand in ``main()``. A new method meant remembering to add a branch
+    # there, and a probe shape with no rung to sit at was simply deleted.
+    safety = "safe"
+    # Whether the method needs somewhere for the target to call back to. Another
+    # list that was written out by hand at the one place that checked it.
+    needs_oob_host = False
+    # Whether the operator's own configuration is this method's gate, in place
+    # of the rung. `file` and `write` change the target and say so in `safety`,
+    # but they do nothing at all until a directory to write into and a URL to
+    # read it back from are named -- which is a narrower statement of intent
+    # than a risk tier. Demanding the flag as well would refuse a command that
+    # works today, and when the configuration is missing the run has something
+    # more useful to say than which tier to raise.
+    gated_by_config = False
 
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
         self.gen = gen
         self.config = config or {}
+
+    def probe_safety(self, probe: "Probe") -> str:
+        """The rung one probe needs: its own, or the method's.
+
+        A method is not always one rung. ``lookup`` resolves a name at
+        ``intrusive`` and can fetch from an address it did not choose at
+        ``stateful``, and the difference is per shape rather than per method."""
+        return probe.safety or self.safety
 
     def applicable(self, record: "PayloadRecord") -> bool:
         raise NotImplementedError
@@ -4065,6 +4133,10 @@ class FileBased(DetectionMethod):
     cleanup command."""
     name = "file"
     tier = "confirmed"
+    # It writes a file to the target, and its own configuration is what gates
+    # that: naming the directory and the read-back URL says more than the rung.
+    safety = "stateful"
+    gated_by_config = True
 
     def _channel(self) -> Optional[Tuple[str, str]]:
         """``(write_path, read_url_template)``, or ``None`` when not configured.
@@ -4201,6 +4273,11 @@ class WriteThenExecute(DetectionMethod):
     than one per probe is also the right trade for a state-changing method."""
     name = "write"
     tier = "confirmed"
+    # A write that is served but not interpreted is a real finding about a
+    # different property, and it is this method that reports it.
+    also_reports = ("needs-review",)
+    safety = "stateful"
+    gated_by_config = True
 
     # One entry per file type whose interpreter is reachable by writing a file.
     # `exts` drives `--write-lang auto`; `template` takes {t1}/{t2} (boundary
@@ -4709,6 +4786,9 @@ class OobCallback(DetectionMethod):
     connections, so it never runs unless the operator names that host."""
     name = "oob"
     tier = "confirmed"
+    # It makes the target open outbound connections.
+    safety = "intrusive"
+    needs_oob_host = True
     # The callbacks are asynchronous -- one can land well after the response
     # that triggered it -- so no probe can be judged until the whole batch has
     # been fired and the listener has been given time to collect.
@@ -4951,17 +5031,22 @@ class LookupCallback(DetectionMethod):
     listener is the entire apparatus; no LDAP or RMI server is needed, and none
     is started.
 
-    **Only ``jndi:dns://`` is sent, and that is the security property rather
-    than a shortcut.** A name lookup can be nothing else. ``ldap://`` and
-    ``rmi://`` continue *past* resolution and open a connection to whatever
-    address the answer named -- by default ``127.0.0.1``, which is the target's
-    own loopback. Whatever replies on :389 or :1099 is not RCEKit, so a
-    reference could come back and a class be instantiated -- the tool crossing,
-    on its own initiative, the line this method exists to stop short of.
-    Dropping the two schemes also costs no coverage.
-    ``DnsContextFactory`` ships in the JDK, so ``dns://`` resolves wherever
-    ``ldap://`` would -- and on 2.15.0, which restricted the LDAP path and left
-    ``dns:`` working, on a build where ``ldap://`` no longer would.
+    **``jndi:dns://`` is what the default rung sends, and that is a security
+    property rather than a shortcut.** A name lookup can be nothing else.
+    ``ldap://`` and ``rmi://`` continue *past* resolution and open a connection
+    to whatever address the answer named -- by default ``127.0.0.1``, which is
+    the target's own loopback. Whatever replies on :389 or :1099 is not RCEKit,
+    so a reference could come back and a class be instantiated. That is a real
+    difference in what the probe can cause, so it is a rung: those two ride at
+    ``stateful`` and the operator chooses.
+
+    They were briefly deleted instead, on the argument that ``dns://`` resolves
+    wherever ``ldap://`` would. That claim was too strong. ``DnsContextFactory``
+    does ship in the JDK, and 2.15.0 restricted the LDAP path while leaving
+    ``dns:`` working -- but a filter that catches the string ``dns:`` and not
+    ``ldap:``, or a trimmed runtime without the DNS provider, defeats it. A
+    sink that takes one scheme and not the other is exactly the sink this
+    method exists for.
 
     The proof is the callback, and the finding is "this sink resolved a URI I
     chose", which is what a lookup sink *is*. That is the same line ``deser``
@@ -4970,6 +5055,10 @@ class LookupCallback(DetectionMethod):
     Requires ``--oob-host``. Without it there are no probes, which is
     ``nothing-tested`` -- never ``negative``."""
     name = "lookup"
+    # Resolving a name is intrusive; fetching from an address RCEKit did not
+    # choose is not, and rides at `stateful` on the probes that do it.
+    safety = "intrusive"
+    needs_oob_host = True
     # NOT `confirmed`. A callback proves the sink resolved a URI RCEKit chose --
     # that it evaluated the expression it was handed. It does not prove the
     # target ran attacker code: Log4Shell becomes RCE when the LDAP server
@@ -4982,10 +5071,15 @@ class LookupCallback(DetectionMethod):
     # triggered it, so no probe can be judged until the batch has been fired.
     aggregate = True
 
-    # The one lookup scheme that cannot do anything but resolve a name. `ldap`
-    # and `rmi` are deliberately absent -- see the class docstring: they
-    # continue past resolution into a connection RCEKit does not control.
+    # The one lookup scheme that cannot do anything but resolve a name, and so
+    # the only one sent at `intrusive`.
     _SCHEMES = ("dns",)
+    # These continue *past* resolution and open a connection to whatever address
+    # the answer named, which is not an address RCEKit chose. That is a real
+    # rung, not a reason to delete them: a sink that filters `dns:` but not
+    # `ldap:` is exactly the sink this method exists for, and an operator
+    # testing a disposable instance should be able to reach it.
+    _STATEFUL_SCHEMES = ("ldap", "rmi")
     # The interpolation syntaxes a lookup sink may use. `${...}` is Log4j's and
     # JSP EL's; `#{...}` and `%{...}` are here because an expression evaluator
     # that refuses arithmetic may still resolve a URI, which is the case this
@@ -5024,12 +5118,14 @@ class LookupCallback(DetectionMethod):
             return []
         listener = self.config.get("oob_listener")
         probes: List[Probe] = []
-        for scheme in self._SCHEMES:
+        for scheme in self._SCHEMES + self._STATEFUL_SCHEMES:
+            rung = "stateful" if scheme in self._STATEFUL_SCHEMES else None
             for form in self._FORMS:
                 token = self._token(rng)
                 expr = "jndi:%s://%s.%s/a" % (scheme, token, host)
                 payload = self._wrap_context(record, form.format(expr=expr))
-                probes.append(Probe(payload=payload, expected=token, carrier=scheme))
+                probes.append(Probe(payload=payload, expected=token, carrier=scheme,
+                                    safety=rung))
                 self._scheme[token] = scheme
                 if listener is not None:
                     # Register with the listener, which correlates an incoming
@@ -5125,6 +5221,16 @@ class DeserSink(DetectionMethod):
     """
     name = "deser"
     tier = "deserialization-sink"
+    # The shape oracle needs no listener and changes nothing, so the method
+    # itself sits at `safe`.
+    #
+    # Its DNS gadget does make the target resolve a name, which is the very
+    # thing `oob` and `lookup` are refused for at this rung -- and its only
+    # gate is `--oob-host`. That inconsistency is recorded rather than closed
+    # here: closing it would send fewer probes at the default rung, which is a
+    # decision about detection reach and not one to take in passing.
+    safety = "safe"
+    also_reports = ("needs-review",)
     aggregate = True
 
     SHAPE_FORMS = ("wellformed", "truncated", "noise")
@@ -5464,6 +5570,31 @@ def oob_channel_warnings(args: Any, dns_up: bool) -> List[str]:
     return []
 
 
+def method_claim(name: str) -> str:
+    """What a method will and will not say, in the words its verdicts use.
+
+    Read from the class, because written out by hand it drifted: the advice
+    offered `--methods lookup` as one that "confirms" while the method reported
+    `lookup-sink`, in the same list where `oob` and `file` do mean confirmed
+    execution and `time` is marked needs-review only. A tier that moves has to
+    move in the sentence an operator acts on, and the only way to be sure of
+    that is to not write the sentence twice."""
+    cls = DETECTION_METHODS[name]
+    if cls.tier == "confirmed":
+        return "confirms"
+    if cls.tier == "needs-review":
+        return "needs-review only"
+    return "proves a %s, NOT execution" % cls.tier.replace("-", " ")
+
+
+def method_rung_flag(name: str) -> str:
+    """The ``--verify-active-risk`` a method needs, or nothing when it is inert."""
+    cls = DETECTION_METHODS[name]
+    if SAFETY_ORDER.get(cls.safety, 0) <= 0:
+        return ""
+    return "--verify-active-risk %s" % cls.safety
+
+
 def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
     """What to run next when every in-band probe came back negative.
 
@@ -5484,19 +5615,23 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
              "blind sink:"]
     # Spell the risk flag out. Advice that names a command the tool then refuses
     # to run is its own small version of the problem this function exists for.
-    lines.append("[detect]   --methods oob --oob-host HOST --verify-active-risk intrusive   "
-                 "(needs egress from the target; confirms)")
-    lines.append("[detect]   --methods lookup --oob-host HOST --verify-active-risk intrusive   "
+    lines.append(f"[detect]   --methods oob --oob-host HOST {method_rung_flag('oob')}   "
+                 f"(needs egress from the target; {method_claim('oob')})")
+    lines.append(f"[detect]   --methods lookup --oob-host HOST {method_rung_flag('lookup')}   "
                  "(same listener, for a sink that interpolates ${...} rather than shelling "
-                 "out; proves a lookup sink, NOT execution)")
+                 f"out; {method_claim('lookup')})")
     if not ((getattr(args, "webroot", None) and getattr(args, "web_base_url", None))
             or (getattr(args, "file_write_path", None)
                 and getattr(args, "file_read_url", None))):
+        # No rung flag here, although `file` is a `stateful` method: naming the
+        # directory and the read-back URL *is* its opt-in, and advice that
+        # printed a flag the tool does not then require would be its own small
+        # version of the problem this function exists for.
         lines.append("[detect]   --methods file --file-write-path DIR --file-read-url URL   "
                      "(needs somewhere writable the target can also read back -- a web root, an "
-                     "LFI endpoint, a download handler; confirms)")
+                     f"LFI endpoint, a download handler; {method_claim('file')})")
     lines.append("[detect]   --methods time                     "
-                 "(no egress and no read-back needed; needs-review only)")
+                 f"(no egress and no read-back needed; {method_claim('time')})")
     return lines
 
 
@@ -6818,30 +6953,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "contexts_explicit": bool(selected_contexts),
                                 "oob_host": args.oob_host,
                                 "oob_http_port": args.listen_http_port}
-            callback_methods = [m for m in (OobCallback.name, LookupCallback.name)
-                                if m in method_names]
+            # Read from the classes, not from a list kept here. Both of these
+            # were hand-written tuples naming `oob` and `lookup`, so a new
+            # method meant remembering to come back and add it -- and a probe
+            # shape with nowhere to declare its rung was deleted instead.
+            selected_methods = [DETECTION_METHODS[m] for m in method_names]
+            callback_methods = [m.name for m in selected_methods if m.needs_oob_host]
+            if callback_methods and not args.oob_host:
+                print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
+                      "listener, so it needs "
+                      "--oob-host: an address the target can reach that arrives here (an IP on "
+                      "a routable interface, or a domain delegated to this host).")
+                return 1
+            # Same gate the corpus payloads have always had. Detection methods
+            # build their own probes and so bypass every corpus-level safety
+            # filter, which was fine while every method was inert. The plan
+            # printed 'low-impact (safe) payloads only ... pass
+            # --verify-active-risk intrusive' and then fired OOB anyway: the run
+            # contradicted itself, and the tier the operator chose did not mean
+            # what it said.
+            #
+            # `gated_by_config` is the exception, and a narrow one: `file` and
+            # `write` do nothing until the operator names a directory to write
+            # into and a URL to read it back from, which says more than a rung
+            # would -- and when that is missing, the run has something more
+            # useful to say than which tier to raise.
+            allowed_rung = SAFETY_ORDER.get(verify_max_safety, 0)
+            for cls in selected_methods:
+                if cls.gated_by_config:
+                    continue
+                if SAFETY_ORDER.get(cls.safety, 1) <= allowed_rung:
+                    continue
+                print(f"[!] --methods {cls.name} is a {cls.safety} technique, held back at the "
+                      f"{verify_max_safety} tier — the same tier that holds back the corpus "
+                      f"payloads of that kind. Pass --verify-active-risk {cls.safety} to allow "
+                      "it.")
+                return 1
             if callback_methods:
-                if not args.oob_host:
-                    print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
-                          "listener, so it needs "
-                          "--oob-host: an address the target can reach that arrives here (an IP on "
-                          "a routable interface, or a domain delegated to this host).")
-                    return 1
-                # Same gate the corpus OOB payloads have always had. Detection
-                # methods build their own probes and so bypass every corpus-level
-                # safety filter, which was fine while every method was inert --
-                # but this one makes the target open outbound connections. The
-                # plan printed 'low-impact (safe) payloads only ... pass
-                # --verify-active-risk intrusive to also fire ... OOB' and then
-                # fired OOB anyway: the run contradicted itself, and the tier the
-                # operator chose did not mean what it said.
-                if verify_max_safety == "safe":
-                    print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET open outbound "
-                          "connections, which is an "
-                          "active technique held back at the default safety tier — the same tier that "
-                          "holds back the corpus OOB payloads. Pass --verify-active-risk intrusive to "
-                          "allow it.")
-                    return 1
                 listener = OOBListener(answer_ip=args.listen_answer_ip, log_path=args.listen_log)
                 # HTTP is `oob`'s channel, not `lookup`'s. A JNDI lookup reaches
                 # this listener through DNS and nothing else, so a bound port
@@ -7108,6 +7256,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"{generator.profile_dropped_probes} probe(s) before sending — they "
                       "could not have reached the sink:")
                 for reason, count in sorted(generator.profile_drop_reasons.items(),
+                                            key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {count} x {reason}")
+            if generator.safety_held_probes:
+                # Unlike a profile drop, these could have reached the sink. The
+                # run says what it chose not to send and the flag that sends
+                # it, because a ladder that shrinks quietly is indistinguishable
+                # from a target that had nothing to find.
+                print(f"[detect] the risk tier held back "
+                      f"{generator.safety_held_probes} probe shape(s) that could have "
+                      "reached the sink:")
+                for reason, count in sorted(generator.safety_held_reasons.items(),
                                             key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {reason}")
             if not results:
