@@ -21,6 +21,7 @@
     "status": 200,
     "timeout": 240
   },
+  "share_target": true,
   "invocation": [
     "--verify-url",
     "http://127.0.0.1:8080/login.action",

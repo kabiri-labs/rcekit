@@ -91,6 +91,7 @@ success.
 | `vulhub_path` | Directory under `--vulhub-root`; the runner runs `docker compose up -d` there |
 | `compose` / `compose_down` | Explicit argv, when the standard compose commands are not enough |
 | `wait_for` | Poll until the target answers, so a slow boot is not read as a regression |
+| `share_target` | Optional, default `false`. Bring the container up **once** for both halves instead of once each. The teardown between them is `down -v`, so by default the control meets a *fresh* target -- set this only when neither half changes the target's state, and never for a case whose vulnerable half writes a file or plants a shell. The runner rejects it on a case whose control brings up a different target |
 | `timeout` | Seconds one run may take (default 900). `negative_control` may set its own, and usually needs to: the method a tier-ceiling control exercises is the expensive one |
 | `invocation` | RCEKit arguments; `--acknowledge-consent` and `--detect-json` are added by the runner |
 | `expect` | `confirmed`, `needs-review`, `negative`, `inconclusive`, `error`, `nothing-tested` |
@@ -149,6 +150,14 @@ until `--insecure` was made to lower the security level as well as the
 certificate check.
 
 `python tests/bench/runner.py --all` is green: 2/2.
+
+Both cases set `share_target`, because neither half writes anything: the
+vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
+the controls probe for a class that is not there or hold a timing signal at
+`needs-review`. Measured on `struts2-s2-001` against vulhub on Docker: **33.8s**
+bringing the container up for each half, **22.9s** sharing it, with both halves
+reaching the same verdicts either way. That is the container start, which on a
+fast case is most of the run.
 
     | RCE class | Target | Method | Verdict | Control | Result |
     |---|---|---|---|---|---|

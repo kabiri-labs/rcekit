@@ -41,6 +41,30 @@ formats, or the template schema.
 
   Test-only: no version bump, and nothing about a run changes.
 
+### Changed
+
+- **A bench case may bring its target up once for both halves**, with
+  `"share_target": true`. Bringing the container up twice is the largest fixed
+  cost in a case and both halves usually hit the same one, so on a fast case it
+  is most of the wall clock.
+
+  It is opt-in, and the default is unchanged, because the teardown between the
+  halves is `down -v`: today's control meets a **fresh** target. A case whose
+  vulnerable half writes a file, plants a shell or changes a setting would hand
+  its control a target it had already altered, and a control measured against a
+  contaminated target measures nothing -- which is the one failure a benchmark
+  may not have. Validation rejects the key on a case whose control brings up a
+  different target, since there is then nothing to share and leaving it set
+  would read as though there were.
+
+  A shared `up` that fails falls back to per-half management rather than
+  carrying on, so the run reports `compose up failed` instead of two readiness
+  timeouts naming the wrong cause.
+
+  Both shipped cases set it, because neither half writes anything. Measured on
+  `struts2-s2-001` against vulhub on Docker: 33.8s to 22.9s, with both halves
+  reaching the same verdicts either way.
+
 ## [2.36.0] — 2026-09-19
 
 ### Added

@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 TESTS_DIR = Path(__file__).resolve().parent
 # Repo root for `rcekit`, this directory for `test_generator`'s local_target
@@ -277,6 +278,112 @@ class CaseTimeoutTestCase(unittest.TestCase):
         case = runner.load_case(BENCH_ROOT / "cases" / "webmin-cve-2019-15107.json")
         self.assertGreater(case["negative_control"]["timeout"], 1174,
                            "the control's budget must exceed its measured runtime")
+
+
+class SharedTargetTestCase(unittest.TestCase):
+    """Bringing the container up twice is the largest fixed cost in a case, and
+    both halves usually hit the same one.
+
+    It is not free to skip. The teardown between the halves is `down -v`, so
+    the control has always met a *fresh* target; a case whose vulnerable half
+    writes a file or plants a shell would otherwise hand its control a target
+    it had already altered, and a control measured against a contaminated
+    target measures nothing. So the saving is opt-in, the default is the old
+    behaviour, and a case may only opt in when its halves really do resolve to
+    the same target.
+    """
+
+    class _FakeSubprocess:
+        """Stands in for the runner's `subprocess`, recording compose argv."""
+
+        def __init__(self, returncode=0):
+            self.calls = []
+            self.returncode = returncode
+
+        def run(self, argv, cwd=None, capture_output=False, text=False):
+            self.calls.append(list(argv))
+            return SimpleNamespace(returncode=self.returncode, stdout="", stderr="")
+
+    def _compose_calls(self, case, returncode=0):
+        """Which compose commands a case would run, without running anything."""
+        fake = self._FakeSubprocess(returncode)
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original_sub, original_run = runner.subprocess, runner.run_rcekit
+        runner.subprocess, runner.run_rcekit = fake, fake_run_rcekit
+        try:
+            outcome = runner.run_case(case)
+        finally:
+            runner.subprocess, runner.run_rcekit = original_sub, original_run
+        return [call[-1] for call in fake.calls], outcome
+
+    @staticmethod
+    def _composed(**overrides):
+        """A case that manages containers, so compose commands are observable."""
+        return minimal_case(compose=["docker", "compose", "up", "-d"],
+                            compose_down=["docker", "compose", "down", "-v"],
+                            **overrides)
+
+    def test_by_default_each_half_gets_a_fresh_target(self):
+        # The property the default protects: the control never inherits
+        # whatever the vulnerable half did to the target.
+        calls, _ = self._compose_calls(self._composed())
+        self.assertEqual(calls, ["-d", "-v", "-d", "-v"])
+
+    def test_a_case_may_share_one_target_across_both_halves(self):
+        calls, outcome = self._compose_calls(self._composed(share_target=True))
+        self.assertEqual(calls, ["-d", "-v"])
+        # Both halves still ran and were judged -- the saving is the container,
+        # not a skipped control.
+        self.assertIn("vulnerable_ok", outcome)
+        self.assertIn("control_ok", outcome)
+        self.assertIn("control_verdict", outcome)
+
+    def test_a_failed_shared_up_does_not_swallow_the_reason(self):
+        # Proceeding with a target that never came up would leave both halves
+        # waiting out a readiness timeout and reporting that instead, which
+        # names the wrong failure. Each half manages its own and says so.
+        calls, outcome = self._compose_calls(self._composed(share_target=True),
+                                             returncode=1)
+        self.assertEqual(outcome["vulnerable_detail"], "compose up failed")
+        self.assertEqual(outcome["control_detail"], "compose up failed")
+        self.assertFalse(outcome["passed"])
+        # Nothing was torn down, because nothing came up.
+        self.assertNotIn("-v", calls)
+
+    def test_keep_up_still_leaves_a_shared_target_running(self):
+        fake = self._FakeSubprocess()
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0):
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original_sub, original_run = runner.subprocess, runner.run_rcekit
+        runner.subprocess, runner.run_rcekit = fake, fake_run_rcekit
+        try:
+            runner.run_case(self._composed(share_target=True), keep_up=True)
+        finally:
+            runner.subprocess, runner.run_rcekit = original_sub, original_run
+        self.assertEqual([call[-1] for call in fake.calls], ["-d"])
+
+    def test_sharing_a_target_the_halves_do_not_share_is_rejected(self):
+        # A patched-build control brings up its own container, so there is
+        # nothing to share. Left set, the key would read as though the two
+        # halves met the same target when they never could.
+        case = self._composed(share_target=True)
+        case["negative_control"]["vulhub_path"] = "struts2/s2-001"
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("share_target", str(raised.exception))
+
+    def test_share_target_must_be_a_boolean(self):
+        with self.assertRaises(runner.CaseError):
+            runner.validate_case(self._composed(share_target="yes"))
+
+    def test_a_case_that_does_not_share_still_validates(self):
+        runner.validate_case(self._composed(share_target=False))
+        runner.validate_case(self._composed())
 
 
 class HarnessEndToEndTestCase(unittest.TestCase):
