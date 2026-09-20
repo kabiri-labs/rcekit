@@ -64,6 +64,19 @@ formats, or the template schema.
   remaining row would still match, and the page would go on offering a
   `--methods` value the CLI rejects.
 
+  Rows split on *unescaped* pipes. Markdown writes a literal pipe in a cell as
+  `\|`, which `docs/reference.md` already does in three tables, and splitting
+  on every pipe invents a cell: zipping against the header then drops the last
+  column outright, so a claim there stops being examined and every one of these
+  checks passes without looking at it.
+
+  A disclaimer is not read as a claim. "never confirmed" was already removed
+  before the `confirm` stem was looked for; "without confirmation" and
+  "unconfirmed" were not, and the second carries its negation inside the word
+  where a rule about preceding words cannot see it. Documentation saying the
+  honest thing would have failed the suite. One parser and one denial rule now,
+  where there were two of each here and a third in the generator tests.
+
 ### Changed
 
 - **A bench case may bring its target up once for both halves**, with
