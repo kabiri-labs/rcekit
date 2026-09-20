@@ -4333,6 +4333,101 @@ class MethodSafetyRungTestCase(unittest.TestCase):
                 self.assertEqual(rcekit.DETECTION_METHODS[name].safety, "stateful")
 
 
+class ConfigGatedRungTestCase(unittest.TestCase):
+    """A method gated by its configuration must not be re-gated by the rung.
+
+    `file` and `write` declare `stateful`, and the pre-flight lets them through
+    when their channel is configured. The runtime filter did not know that, so
+    it read the run's default `safe` ceiling and held every probe inheriting
+    the method's rung: the CLI accepted a documented invocation and then
+    reported `nothing-tested`, which is the quietest way this tool can fail and
+    reads exactly like a clean target.
+
+    Nothing caught it because every test built the method's config directly,
+    without `max_safety` -- so the ceiling fell back to the method's own rung
+    and the probes went out. The one thing that would have caught it is a run
+    through the CLI with the channel configured, which is what
+    `test_file_confirms_through_the_cli_at_the_default_tier` is.
+    """
+
+    REC = None
+
+    def setUp(self):
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _sent(self, method_cls, config):
+        import random as _random
+        gen = RCEKit()
+        method = method_cls(gen, config)
+        built = method.build_probes(self.rec, _random.Random(1))
+        return built, gen._apply_target_profile(method, built), gen
+
+    def test_a_config_gated_method_sends_at_the_default_tier(self):
+        config = {"webroot": "/var/www/html", "web_base_url": "http://t/",
+                  "max_safety": "safe"}
+        built, sent, gen = self._sent(rcekit.FileBased, config)
+        self.assertTrue(built)
+        self.assertEqual(len(sent), len(built),
+                         "a configured `file` run held its own probes back")
+        self.assertEqual(gen.safety_held_probes, 0)
+
+    def test_a_method_not_gated_by_config_still_obeys_the_tier(self):
+        # The exception is narrow: it does not leak to `oob` or `lookup`.
+        built, sent, gen = self._sent(
+            rcekit.LookupCallback, {"oob_host": "x.example", "max_safety": "safe"})
+        self.assertTrue(built)
+        self.assertEqual(sent, [])
+        self.assertEqual(gen.safety_held_probes, len(built))
+
+    def test_the_exception_does_not_lift_a_shape_above_the_method_rung(self):
+        # `gated_by_config` admits the method's own rung, not everything above
+        # it. No shipped method has a shape above `stateful`, so this pins the
+        # rule rather than a current case.
+        gen = RCEKit()
+        method = rcekit.FileBased(gen, {"webroot": "/var/www/html",
+                                        "web_base_url": "http://t/",
+                                        "max_safety": "safe"})
+        self.assertTrue(gen._safety_allows(
+            method, rcekit.Probe(payload="p", expected="e")))
+        self.assertEqual(gen._safety_ceiling(method),
+                         rcekit.SAFETY_ORDER["stateful"])
+
+
+class CostEstimateSafetyTestCase(unittest.TestCase):
+    """The cost line has to describe the run it precedes.
+
+    It applied the target profile and not the risk tier, so once a rung could
+    narrow a method the estimate over-counted -- by a factor of three for
+    `lookup` at the default tier, which is exactly the operator who narrowed
+    the run on purpose. An audit line that is wrong for the person auditing is
+    worse than no line.
+    """
+
+    def _estimate(self, methods, config):
+        gen = RCEKit()
+        records = [make_record(environment="java", context="raw")]
+        return gen.estimate_detection_probes(iter(records), methods, config), gen
+
+    def test_the_estimate_shrinks_with_the_tier_the_run_will_use(self):
+        intrusive, _ = self._estimate(
+            ["lookup"], {"oob_host": "x.example", "max_safety": "intrusive"})
+        stateful, _ = self._estimate(
+            ["lookup"], {"oob_host": "x.example", "max_safety": "stateful"})
+        self.assertGreater(stateful, intrusive,
+                           "the estimate ignores the rung that narrows the run")
+        self.assertEqual(stateful, intrusive * 3,
+                         "three schemes at the top rung, one below it")
+
+    def test_estimating_moves_none_of_the_numbers_the_report_prints(self):
+        # The estimate runs before the report and shares the run's predicate.
+        # If it tallied, the operator would be told probes were held back on a
+        # run that had not started.
+        _, gen = self._estimate(
+            ["lookup"], {"oob_host": "x.example", "max_safety": "intrusive"})
+        self.assertEqual(gen.safety_held_probes, 0)
+        self.assertEqual(gen.profile_dropped_probes, 0)
+
+
 class SafetyRungCLITestCase(unittest.TestCase):
     """The rung has to be enforced where the operator meets it."""
 
@@ -4351,6 +4446,43 @@ class SafetyRungCLITestCase(unittest.TestCase):
         result = self._run("--methods", "lookup", "--oob-host", "x.example")
         self.assertIn("lookup", result.stdout)
         self.assertIn("intrusive technique", result.stdout)
+
+    def test_file_sends_probes_through_the_cli_at_the_default_tier(self):
+        """The gap that let the runtime filter break a documented invocation.
+
+        Every other `file` test builds the method's config directly, so the
+        ceiling fell back to the method's own rung and the probes went out.
+        Only a run through the CLI carries `max_safety`, and only there did the
+        method accept its flags and then test nothing.
+        """
+        import os
+
+        writedir = shell_writable_dir()
+
+        def route(method, path, params, headers, body):
+            if path.startswith("/files/"):
+                served = os.path.join(writedir, os.path.basename(path))
+                if os.path.exists(served):
+                    with open(served) as handle:
+                        return 200, handle.read()
+                return 404, "not found"
+            pipe = sh_popen("echo LOOKUP " + params.get("host", "") + " 2>&1")
+            out = pipe.read()
+            pipe.close()
+            return 200, out
+
+        with local_target(route) as base:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--verify-url", f"{base}/?host=FUZZ",
+                 "--methods", "file", "--acknowledge-consent",
+                 "--webroot", writedir, "--web-base-url", f"{base}/files",
+                 "--max-payloads", "3", "--verify-timeout", "10"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+        self.assertNotIn("NOTHING WAS TESTED", result.stdout,
+                         "a configured `file` run tested nothing at the default tier")
+        self.assertNotIn("--verify-active-risk stateful", result.stdout,
+                         "a configured `file` run was sent to raise the risk tier")
+        self.assertRegex(result.stdout, r"\[detect\] sent [1-9]")
 
     def test_a_config_gated_method_is_told_what_it_needs_not_which_tier(self):
         # `--methods file` with nothing configured used to say `--webroot`, and
