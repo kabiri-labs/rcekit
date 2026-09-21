@@ -4393,6 +4393,85 @@ class ConfigGatedRungTestCase(unittest.TestCase):
                          rcekit.SAFETY_ORDER["stateful"])
 
 
+class ReachPastTheTierTestCase(unittest.TestCase):
+    """A shape whose effect a notice undoes goes out, and the run says so.
+
+    Reach wins where reach and restriction pull against each other. Detection
+    the tool could have done and did not is a false negative wearing a safety
+    label, and it costs more than the noise it saves. `safety` stays for the
+    other case -- an effect a notice cannot take back, like a file written or
+    a class fetched from an address RCEKit did not choose.
+
+    `deser`'s DNS gadget is the first of these. It makes the target resolve a
+    name, which is the very thing `oob` and `lookup` are refused for at `safe`,
+    and its only gate was `--oob-host`. Holding it back would have sent fewer
+    probes at the default tier.
+    """
+
+    def setUp(self):
+        self.rec = make_record(environment="java", context="raw")
+
+    def _run(self, config):
+        import random as _random
+        gen = RCEKit()
+        method = rcekit.DeserSink(gen, config)
+        built = method.build_probes(self.rec, _random.Random(1))
+        return built, gen._apply_target_profile(method, built), gen
+
+    def test_the_dns_gadget_goes_out_at_the_default_tier(self):
+        built, sent, gen = self._run({"oob_host": "x.example", "max_safety": "safe",
+                                      "deser_formats": ["java"]})
+        self.assertTrue(any(p.phase == "dns" for p in built))
+        self.assertEqual(len(sent), len(built), "a reaching shape was held back")
+        self.assertEqual(gen.safety_held_probes, 0)
+
+    def test_and_the_run_says_it_went(self):
+        _, _, gen = self._run({"oob_host": "x.example", "max_safety": "safe",
+                               "deser_formats": ["java"]})
+        self.assertEqual(gen.reach_noted_probes, 1)
+        self.assertTrue(any("reaches intrusive" in note for note in gen.reach_notes),
+                        f"the run did not say how far it reached: {gen.reach_notes}")
+
+    def test_nothing_is_noted_once_the_tier_covers_it(self):
+        # The notice is for reach the operator did not ask for. At `intrusive`
+        # they did, so there is nothing to disclose.
+        _, _, gen = self._run({"oob_host": "x.example", "max_safety": "intrusive",
+                               "deser_formats": ["java"]})
+        self.assertEqual(gen.reach_noted_probes, 0)
+
+    def test_reaching_and_being_held_are_counted_apart(self):
+        """Three tallies, because they say three different things.
+
+        A profile drop means the probe could not have reached the sink. A
+        safety hold means it could and was not sent. A reach note means it was
+        sent, further than the tier asked for. One number would state the
+        wrong one about all three.
+        """
+        import random as _random
+        gen = RCEKit()
+        held = rcekit.LookupCallback(gen, {"oob_host": "x.example", "max_safety": "intrusive"})
+        gen._apply_target_profile(held, held.build_probes(self.rec, _random.Random(1)))
+        noted = rcekit.DeserSink(gen, {"oob_host": "x.example", "max_safety": "safe",
+                                       "deser_formats": ["java"]})
+        gen._apply_target_profile(noted, noted.build_probes(self.rec, _random.Random(1)))
+        self.assertGreater(gen.safety_held_probes, 0)
+        self.assertGreater(gen.reach_noted_probes, 0)
+        self.assertEqual(gen.profile_dropped_probes, 0)
+
+    def test_a_shape_that_cannot_be_undone_is_still_held(self):
+        # The rule has an edge, and this is it: `lookup`'s ldap/rmi shapes can
+        # make the target fetch a class, which a notice does not take back.
+        import random as _random
+        gen = RCEKit()
+        method = rcekit.LookupCallback(gen, {"oob_host": "x.example",
+                                             "max_safety": "intrusive"})
+        built = method.build_probes(self.rec, _random.Random(1))
+        sent = gen._apply_target_profile(method, built)
+        self.assertEqual({p.carrier for p in sent}, {"dns"})
+        self.assertEqual(gen.reach_noted_probes, 0,
+                         "a shape that cannot be undone was disclosed instead of held")
+
+
 class CostEstimateSafetyTestCase(unittest.TestCase):
     """The cost line has to describe the run it precedes.
 

@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.37.0"
+__version__ = "2.38.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -429,6 +429,11 @@ class RCEKit:
         # statement about the run.
         self.safety_held_probes = 0
         self.safety_held_reasons: Dict[str, int] = {}
+        # And apart again from the shapes that went *past* the tier because
+        # their effect is one a notice undoes. Those are not held back; they
+        # are disclosed.
+        self.reach_noted_probes = 0
+        self.reach_notes: Dict[str, int] = {}
         self.setup_components()
 
     def setup_components(self):
@@ -2613,18 +2618,29 @@ class RCEKit:
         """Whether this run may send this probe shape. Counts nothing."""
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
+    def _note_reach(self, meth: "DetectionMethod", probe: "Probe") -> None:
+        """Record a probe that reaches past the run's tier and goes anyway."""
+        rung = probe.reaches_past
+        if not rung or SAFETY_ORDER.get(rung, 0) <= self._safety_ceiling(meth):
+            return
+        note = f"{meth.name}/{probe.carrier or 'probe'} reaches {rung}"
+        self.reach_noted_probes += 1
+        self.reach_notes[note] = self.reach_notes.get(note, 0) + 1
+
     def _apply_safety_tier(self, meth: "DetectionMethod",
                            probes: "List[Probe]") -> "List[Probe]":
-        """Hold back the probe shapes this run's risk tier does not allow.
+        """Hold back the probe shapes this run's risk tier does not allow, and
+        note the ones that reach past it and are sent anyway.
 
-        Kept apart from the profile filter and counted apart, because the two
-        say different things. A profile drop means the probe *could not have*
-        reached the sink; this means it could, and the operator chose not to
-        send it. Reporting them together would state the first about the
-        second."""
+        Three tallies, because they say three different things and one number
+        would state the wrong one about all of them. A profile drop means the
+        probe *could not have* reached the sink. A safety hold means it could,
+        and the operator chose not to send it. A reach note means it did --
+        further than the tier asked for, with an effect the notice undoes."""
         kept: "List[Probe]" = []
         for probe in probes:
             if self._safety_allows(meth, probe):
+                self._note_reach(meth, probe)
                 kept.append(probe)
                 continue
             reason = (f"{meth.name}/{probe.carrier or 'probe'} needs "
@@ -3426,8 +3442,19 @@ class Probe:
     # The --verify-active-risk rung this shape needs, when it is higher than
     # its method's. A method whose cheapest probes are inert can still have a
     # shape that reaches further, and that shape should be available rather
-    # than deleted for want of somewhere to declare it.
+    # than deleted for want of somewhere to declare it. Held back above the
+    # run's tier.
     safety: Optional[str] = None
+    # A rung this shape reaches past, whose effect the run can undo by saying
+    # it happened: a name resolved, a value computed, a delay waited out. The
+    # probe goes out and the run reports it.
+    #
+    # Reach wins where the two pull against each other. Detection the tool
+    # could have done and did not is a false negative wearing a safety label,
+    # and it costs more than the noise it saves. `safety` is for the other
+    # case -- an effect a notice cannot take back, like a file written or a
+    # class fetched from an address RCEKit did not choose.
+    reaches_past: Optional[str] = None
 
 
 @dataclass
@@ -5249,10 +5276,11 @@ class DeserSink(DetectionMethod):
     # itself sits at `safe`.
     #
     # Its DNS gadget does make the target resolve a name, which is the very
-    # thing `oob` and `lookup` are refused for at this rung -- and its only
-    # gate is `--oob-host`. That inconsistency is recorded rather than closed
-    # here: closing it would send fewer probes at the default rung, which is a
-    # decision about detection reach and not one to take in passing.
+    # thing `oob` and `lookup` are refused for at this rung. It is not held
+    # back for it -- that would send fewer probes at the default tier, and
+    # reach wins where the two pull against each other. It declares
+    # `reaches_past="intrusive"` instead, so the probe goes and the run says
+    # it went. A resolution is a request the target makes and nothing more.
     safety = "safe"
     also_reports = ("needs-review",)
     aggregate = True
@@ -5386,8 +5414,14 @@ class DeserSink(DetectionMethod):
                 body = base64.b64encode(self.java_urldns(callback)).decode()
             else:
                 body = str(gadget).replace("{host}", callback)
+            # This one makes the target resolve a name -- the very thing `oob`
+            # and `lookup` are refused for at `safe`, and its only gate was
+            # `--oob-host`. Holding it back would send fewer probes at the
+            # default tier, so it goes and the run says it went: a resolution
+            # is a request the target makes and nothing more, which is an
+            # effect a notice undoes.
             probes.append(Probe(payload=self._wrap_context(record, body), expected=token,
-                                carrier=name, phase="dns"))
+                                carrier=name, phase="dns", reaches_past="intrusive"))
             if listener is not None:
                 listener.tokens[token] = {"payload": body, "category": "detection",
                                           "context": record.context}
@@ -7293,6 +7327,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for reason, count in sorted(generator.safety_held_reasons.items(),
                                             key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {reason}")
+            if generator.reach_noted_probes:
+                # Not held back -- disclosed. The operator asked for a tier and
+                # got reach past it, so the run says which shapes and how far,
+                # rather than either refusing them or staying quiet.
+                print(f"[detect] {generator.reach_noted_probes} probe shape(s) reached "
+                      "past the risk tier and were sent; their effect is a request the "
+                      "target makes and nothing more:")
+                for note, count in sorted(generator.reach_notes.items(),
+                                          key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {count} x {note}")
             if not results:
                 # Nothing was tested. Saying so is the whole point: a run that
                 # built no probes used to end here in silence and exit 0, which
