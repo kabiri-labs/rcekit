@@ -142,6 +142,50 @@ formats, or the template schema.
 
   Test-only: no version bump, and nothing about a run changes.
 
+## [Unreleased]
+
+## [2.38.0] — 2026-09-21
+
+### Added
+
+- **A probe shape may reach past the run's tier and be sent anyway**, when its
+  effect is one the run undoes by saying it happened. `reaches_past` is that
+  declaration, beside `safety`, which stays for an effect a notice cannot take
+  back.
+
+  Reach wins where the two pull against each other. Detection the tool could
+  have done and did not is a false negative wearing a safety label, and it
+  costs more than the noise it saves.
+
+  `deser`'s DNS gadget is the first of these, and closes an inconsistency
+  recorded a version ago: it makes the target resolve a name -- the very thing
+  `oob` and `lookup` are refused for at `safe` -- while its only gate was
+  `--oob-host`. Holding it back would have sent fewer probes at the default
+  tier. It goes, and the run reports how far it reached.
+
+  Three tallies now, because they say three different things and one number
+  would state the wrong one about all of them: the profile dropped it (it could
+  not have reached the sink), the tier held it (it could, and was not sent), or
+  it reached past the tier (it was sent, further than asked).
+
+  `lookup`'s `ldap://` and `rmi://` are the edge the rule has, and stay at
+  `stateful`: a class fetched from an address RCEKit did not choose is not
+  something a notice takes back.
+
+- **Two worked examples in the README's Quick start**, because the fullest run
+  RCEKit can make was not shown anywhere near the front.
+
+  The first is a captured request: most sinks worth testing sit behind a POST
+  with a session cookie, a content type and a body, and `--verify-url` carries
+  none of that. The second is everything the tool has -- injection-point
+  enumeration across every value in that request, every method, callbacks, the
+  top rung -- with a table of what each flag opens up and the cost line that
+  prints before it fires.
+
+  Both were run before being written down. The point the Quick start never
+  made: `--auto-params` needs `-r`, so the fullest run is not reachable from a
+  URL at all, which is worth knowing before concluding a target is clean.
+
 ## [2.37.0] — 2026-09-20
 
 ### Added
@@ -1455,6 +1499,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.38.0]: https://github.com/kabiri-labs/rcekit/compare/v2.37.0...v2.38.0
 [2.37.0]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...v2.37.0
 [2.36.0]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...v2.36.0
 [2.35.5]: https://github.com/kabiri-labs/rcekit/compare/v2.35.4...v2.35.5

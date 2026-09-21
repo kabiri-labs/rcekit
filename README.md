@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.37.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.38.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -136,6 +136,73 @@ rcekit --acknowledge-consent \
   [reflected/unix/raw] ; echo RKYZRIP$((540141+314681))RKFWVFS$(echo RKBWOOC)RKYZRIP
       (target computed 'RKYZRIP854822RKFWVFSRKBWOOCRKYZRIP' — random operands, absent from control)
 ```
+
+### From a captured request — the shape most real targets have
+
+A `--verify-url` carries a URL and nothing else. Most sinks worth testing sit
+behind a POST with a session cookie, a content type and a body, and RCEKit takes
+that request whole: save it from your proxy or your browser's devtools and name
+the field to inject into.
+
+```bash
+rcekit --acknowledge-consent \
+  -r search.req -p q \
+  --methods reflected,eval
+```
+
+```
+[detect] sent 4 probes: confirmed=3, negative=1
+
+[detect] CONFIRMED execution (3):
+  [reflected/unix/raw] ; echo RKHWNHK$((114157+752773))RKXGFIH$(echo RKHSEIF)RKHWNHK
+      (target computed 'RKHWNHK866930RKXGFIHRKHSEIFRKHWNHK' — random operands, absent from control)
+```
+
+The method, path, headers, body and cookies are reused as captured, and each
+value is encoded for the context it lands in — a JSON leaf, a form field and a
+cookie are not escaped the same way. Drop `-p` and mark the spot with `FUZZ` or
+`*` instead, if you prefer.
+
+### Everything the tool has
+
+Two things are only reachable from a captured request: **injection-point
+enumeration** (`--auto-params`), and any sink that needs a session. So the
+fullest run RCEKit can make starts from `-r`, not from a URL — which is worth
+knowing before concluding a target is clean.
+
+```bash
+rcekit --acknowledge-consent \
+  -r search.req --auto-params all --point-order thorough \
+  --methods reflected,eval,time,lookup,deser \
+  --oob-host oob.yourdomain.example --listen-dns-port 53 \
+  --verify-active-risk stateful --probe-depth full \
+  --detect-json findings.json
+```
+
+```
+[verify] loaded request from search.req: enumerating 4 injection point(s)
+[detect] enumerating 4 injection point(s) x 3 method(s)
+[detect] cost: 4 points x ~1739 probes = at least 6964 requests
+[detect]   body param 'q': confirmed (1544 probes)  <-- CONFIRMED
+[detect] sent 6371 probes: confirmed=446, negative=5925
+```
+
+What each flag opens up:
+
+| | |
+|---|---|
+| `--auto-params all` | every query value, JSON leaf, form field, cookie and header, instead of one named field |
+| `--point-order thorough` | every non-hop-by-hop header, not just the high-yield ones |
+| `--methods ...,lookup,deser` | expression-lookup and deserialization sinks, which the shell-shaped methods cannot reach |
+| `--oob-host` | a callback host for the blind methods. Needs a domain delegated to you; port 53 needs root |
+| `--verify-active-risk stateful` | the top rung — adds the probe shapes that make the target fetch from an address RCEKit did not choose |
+| `--probe-depth full` | every break-out shape per sink, not the cheap ones only |
+| `--detect-json` | the same verdicts as machine-readable JSON |
+
+**This is a lot of requests.** The cost line prints before anything fires, and
+`--max-points` / `--max-payloads` bound it. Run it against an instance you are
+allowed to break: `--verify-active-risk stateful` is the tier for a disposable
+target, not for production.
 
 No external infrastructure, no config file.
 
