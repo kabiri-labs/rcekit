@@ -524,9 +524,11 @@ records what it was verified against.
 
 **The last two take the operands apart.** Liquid multiplies with a filter and
 Django with a tag, so neither can be written as one expression. A carrier
-template may therefore use `__A__` and `__B__` as well as `__EXPR__`, and a
-template using none of the three is skipped rather than sent — its operands
-would not be random to the run, so its product would prove nothing.
+template may therefore use `__A__` and `__B__` as well as `__EXPR__`. A
+template that is not parameterised by **both** operands is skipped rather than
+sent: with no token it renders the same constant every probe, and with only one
+operand the target is never handed the other, so nothing it can compute is the
+product RCEKit is looking for.
 
 **What was measured and did not produce a carrier** is recorded too, in
 `eval_carrier_survey`, so the survey is not repeated: nunjucks 3.2.4, tornado

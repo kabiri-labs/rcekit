@@ -5318,6 +5318,20 @@ class EvalCarrierOperandTestCase(unittest.TestCase):
         probes = self._probes({"bad": {"engines": ["bad"], "template": "no tokens here"}})
         self.assertEqual(self._by_carrier(probes), {})
 
+    def test_a_carrier_with_only_one_operand_is_not_sent_either(self):
+        """One operand is no better than none.
+
+        The target is never handed the other, so nothing it can compute is the
+        product RCEKit is looking for. The corpus test catches this for the
+        shipped carriers; this is the runtime guard, which is what a
+        `--template-file` a user wrote goes through."""
+        for template in ("{{ __A__ }}", "{{ times: __B__ }}"):
+            with self.subTest(template=template):
+                probes = self._probes({"half": {"engines": ["half"],
+                                                "template": template}})
+                self.assertEqual(self._by_carrier(probes), {},
+                                 f"{template} cannot produce a product and was sent")
+
     def test_the_shipped_carriers_render_their_measured_form(self):
         probes = self._probes()          # the real corpus
         rendered = {name: p.payload for name, p in self._by_carrier(probes).items()}
@@ -6036,15 +6050,17 @@ class EvalCarrierTestCase(unittest.TestCase):
         self.assertTrue(self.gen.eval_carriers)
         for name, carrier in self.gen.eval_carriers.items():
             self.assertIn("template", carrier, name)
-            # Any of the tokens: an engine that multiplies through a filter or
-            # a tag needs the operands apart and cannot use the joined one. What
-            # the rule protects is unchanged -- a template with none of them
-            # renders the same constant every run, so its product would not be
-            # evidence the target computed anything.
+            # The joined expression, or *both* operands. An engine that
+            # multiplies through a filter or a tag needs them apart and cannot
+            # use the joined one; one operand on its own is no better than none,
+            # because the target is never handed the other and nothing it can
+            # compute is the product RCEKit is looking for.
+            left, right = EvalExpr.CARRIER_OPERAND_TOKENS
+            template = carrier["template"]
             self.assertTrue(
-                any(token in carrier["template"]
-                    for token in (EvalExpr.CARRIER_TOKEN,) + EvalExpr.CARRIER_OPERAND_TOKENS),
-                f"{name} is parameterised by nothing and renders a constant")
+                EvalExpr.CARRIER_TOKEN in template
+                or (left in template and right in template),
+                f"{name} is not parameterised by both operands, so it cannot confirm")
             self.assertTrue(carrier.get("notes"), f"{name} must say why it exists")
             self.assertTrue(carrier.get("verified"),
                             f"{name} must record what it was measured against")

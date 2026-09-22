@@ -171,10 +171,19 @@ formats, or the template schema.
 
 ### Changed
 
-- **A carrier template with no substitution token is skipped, not sent.** Its
-  operands would be the same on every run, so its product would not be evidence
-  the target computed anything — and a probe that cannot confirm still counts
-  toward the coverage a run reports.
+- **A carrier template not parameterised by both operands is skipped, not
+  sent.** With no token at all it renders the same constant every probe; with
+  only one operand the target is never handed the other, so nothing it can
+  compute is the product RCEKit is looking for. Either way the product would
+  not be evidence the target computed anything — and a probe that cannot
+  confirm still counts toward the coverage a run reports, which is the part
+  that matters more than the wasted request.
+
+- **`--eval-engines` names every carrier the corpus ships.** Its help listed
+  three engines by hand and two were added. An operator narrowing that flag
+  reads the list and nothing else, so a stale one says an engine needs no
+  carrier when it does, and they cut the only probe that could have confirmed
+  it. A test now holds the help text to the corpus.
 
 - **What the survey measured and did not ship is recorded too.**
   `eval_carrier_survey` in the corpus now names the engines that need no
