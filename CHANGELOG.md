@@ -144,6 +144,72 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.39.0] — 2026-09-22
+
+### Added
+
+- **Every part of a multipart body is an injection point.** None of them were
+  before. The form branch matched on `=` appearing anywhere in the body, so a
+  `multipart/form-data` capture was split on `&` and yielded exactly one
+  candidate, named after a `Content-Disposition` line:
+
+  ```
+  form | '--X\r\nContent-Disposition: form-data; name' | body param '...'
+  ```
+
+  Every probe for that point rewrote a *part header*, so it could confirm
+  nothing, while `user`, `avatar` and `note` — the fields the form actually
+  posts — were never reached. The run still printed a point and a probe count,
+  which is the part that matters: coverage reported and not delivered reads
+  exactly like a clean target.
+
+  `multipart` is now its own kind, recognised from `Content-Type` and decided
+  before the form branch can see the body. A file part is a candidate too — its
+  content is the value under test, while its `filename` and `Content-Type` stay
+  as captured. Verified end to end against a target that parses with the
+  standard library's MIME parser: `multipart field 'note': confirmed`, with the
+  non-vulnerable `user` field `negative` beside it.
+
+### Changed
+
+- **A GraphQL request is ordered by what can actually confirm.** Its variables
+  were already enumerated — they are JSON leaves — but they were tried in
+  document order alongside `query` and `operationName`, and those two cannot
+  confirm anything. A payload in `query` *replaces* the operation document, so
+  the server answers with a parse error before a resolver runs, and
+  `operationName` then names an operation that is no longer there. On the
+  capture this was measured against they were two points of five, each one a
+  full probe ladder.
+
+  They are moved behind the variables, **not dropped**. A server that logs the
+  query document before parsing it is reachable through exactly that field,
+  which is the route Log4Shell took through access logs, so a full run still
+  tests both and `--max-points` now cuts the least likely to pay first. A plain
+  `{"query": ...}` body with no `variables` is left in document order: it is as
+  likely to be a search API, and there the query field is the one worth testing.
+
+### Fixed
+
+- **The verdict table was missing a verdict.** The README said "seven verdicts
+  that are never collapsed into each other" and listed seven, while the tool
+  reports eight: `lookup-sink` was absent from the one table whose whole job is
+  to enumerate them — in a README that uses the word two tables higher, in the
+  Log4Shell CVE row, and again in the methods table. The sentence counted the
+  rows the table had rather than the verdicts there are, so the omission never
+  contradicted itself and nothing failed.
+
+  Found by reading the README end to end for this change. A test now reads the
+  table against `DETECTION_METHODS`, so a verdict a method declares and the
+  table does not carry is a failure rather than a silence.
+
+- **A multipart body now goes out with the line endings it needs.** `-r`
+  normalises the whole request to LF, so the CRLF delimiters RFC 2046 requires
+  were gone by the time anything was sent. Bodies rendered for a multipart point
+  are re-serialised canonically — probe and payload-free control alike, so the
+  two differ in the field under test and in nothing else. Part content is left
+  character for character, so a lone newline inside an uploaded text file
+  survives.
+
 ## [2.38.0] — 2026-09-21
 
 ### Added
@@ -1499,6 +1565,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.39.0]: https://github.com/kabiri-labs/rcekit/compare/v2.38.0...v2.39.0
 [2.38.0]: https://github.com/kabiri-labs/rcekit/compare/v2.37.0...v2.38.0
 [2.37.0]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...v2.37.0
 [2.36.0]: https://github.com/kabiri-labs/rcekit/compare/v2.35.5...v2.36.0

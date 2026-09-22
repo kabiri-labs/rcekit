@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.38.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.39.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -191,7 +191,7 @@ What each flag opens up:
 
 | | |
 |---|---|
-| `--auto-params all` | every query value, JSON leaf, form field, cookie and header, instead of one named field |
+| `--auto-params all` | every query value, JSON leaf, form field, multipart part, cookie and header, instead of one named field |
 | `--point-order thorough` | every non-hop-by-hop header, not just the high-yield ones |
 | `--methods ...,lookup,deser` | expression-lookup and deserialization sinks, which the shell-shaped methods cannot reach |
 | `--oob-host` | a callback host for the blind methods. Needs a domain delegated to you; port 53 needs root |
@@ -222,12 +222,13 @@ retest is the hard part, and it fails in two directions: a "possibly vulnerable"
 that turns out to be reflection, and a "not vulnerable" from a run that never
 actually tested anything.
 
-RCEKit answers with **seven verdicts that are never collapsed into each other**:
+RCEKit answers with **eight verdicts that are never collapsed into each other**:
 
 | Verdict | What it asserts |
 |---|---|
 | **`confirmed`** | The target executed the input. It returned a value it could not produce otherwise — computed from operands random to that probe — and that value is absent from a payload-free control. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
+| **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
 | **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint. Worth your time, never worth the word "confirmed". |
 | **`inconclusive`** | The evidence appeared, but could not be attributed to execution — the payload-free control carried it too. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
@@ -293,8 +294,10 @@ them will call `confirmed`:
   `xp_cmdshell`, `expect://`. A bridge is a carrier, not an oracle: it wraps the
   command the methods already build, so the same tiers apply through it.
 - **Injection-point enumeration** (`-p all`) — query, JSON leaves, form fields,
-  cookies, headers and path segments, each encoded for where it lands, with the
-  probe cost printed before anything fires.
+  multipart parts, cookies, headers and path segments, each encoded for where it
+  lands, with the probe cost printed before anything fires. A GraphQL body is
+  ordered by what can actually confirm: the `variables` a resolver reads before
+  the operation document itself.
 
 Mix methods freely: `--methods reflected,eval,time` runs all three and reports each
 tier separately.

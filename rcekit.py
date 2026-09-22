@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.38.0"
+__version__ = "2.39.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -5851,7 +5851,139 @@ NON_INJECTABLE_HEADERS = {
 }
 
 # The candidate kinds, in the order they are tried.
-INJECTION_POINT_KINDS = ("query", "json", "form", "cookie", "header", "path")
+INJECTION_POINT_KINDS = ("query", "json", "form", "multipart", "cookie", "header", "path")
+
+# A part's name in its Content-Disposition line. Quoted form only: RFC 7578
+# requires the quotes, and every library that writes a multipart body emits
+# them.
+_MULTIPART_NAME_RE = re.compile(r'name\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+# The fields a GraphQL request uses to carry the operation itself rather than
+# the arguments it is called with.
+GRAPHQL_STRUCTURAL_FIELDS = ("query", "operationName")
+
+
+def _is_multipart_body(headers: List[List[str]]) -> bool:
+    """Whether the request declares a ``multipart/form-data`` body."""
+    for name, value in headers:
+        if name.lower() == "content-type":
+            return "multipart/form-data" in value.lower()
+    return False
+
+
+def _multipart_boundary(headers: List[List[str]], body: str = "") -> Optional[str]:
+    """The delimiter separating the parts, from Content-Type or from the body.
+
+    The header is authoritative. The body's first line is the same string and
+    settles the case where a capture reached RCEKit without the parameter."""
+    for name, value in headers:
+        if name.lower() != "content-type":
+            continue
+        for chunk in value.split(";")[1:]:
+            key, sep, raw = chunk.strip().partition("=")
+            if sep and key.strip().lower() == "boundary":
+                found = raw.strip().strip('"')
+                if found:
+                    return found
+    first = (body or "").split("\n", 1)[0].rstrip("\r")
+    return first[2:] if first.startswith("--") and len(first) > 2 else None
+
+
+def _split_multipart(body: str, boundary: str) -> Optional[List[List[str]]]:
+    """``[part_headers, content]`` for each part, in order. None if it does not
+    parse against this boundary.
+
+    The preamble and epilogue are dropped. They are advisory text for clients
+    that cannot read MIME, and no part of what the application receives."""
+    delim = "--" + boundary
+    segments = (body or "").split(delim)
+    if len(segments) < 2:
+        return None
+    parts: List[List[str]] = []
+    closed = False
+    for segment in segments[1:]:
+        if segment.startswith("--"):
+            closed = True
+            break
+        if segment.startswith("\r\n"):
+            segment = segment[2:]
+        elif segment.startswith("\n"):
+            segment = segment[1:]
+        else:
+            return None
+        head, sep, content = segment.partition("\r\n\r\n")
+        if not sep:
+            head, sep, content = segment.partition("\n\n")
+        if not sep:
+            return None
+        if content.endswith("\r\n"):
+            content = content[:-2]
+        elif content.endswith("\n"):
+            content = content[:-1]
+        parts.append([head, content])
+    return parts if closed and parts else None
+
+
+def _multipart_field_name(head: str) -> Optional[str]:
+    """The form field a part carries, from its Content-Disposition line."""
+    for line in head.replace("\r\n", "\n").split("\n"):
+        name, sep, value = line.partition(":")
+        if sep and name.strip().lower() == "content-disposition":
+            match = _MULTIPART_NAME_RE.search(value)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _render_multipart(parts: List[List[str]], boundary: str) -> str:
+    """Re-serialise parsed parts with CRLF delimiters and CRLF part headers.
+
+    That is what RFC 2046 requires and what a capture no longer has:
+    ``parse_raw_request`` normalises the whole request to LF, so a multipart
+    body read back from a file has lost the line endings it was sent with.
+    Part *content* is left character for character, so a lone newline inside an
+    uploaded text file survives.
+
+    Every request for a multipart point is rendered here -- the payload-free
+    control as much as the probe -- so the two differ in the field under test
+    and in nothing else, which is what the control has to hold constant."""
+    delim = "--" + boundary
+    out: List[str] = []
+    for head, content in parts:
+        canonical = "\r\n".join(head.replace("\r\n", "\n").split("\n"))
+        out.append(f"{delim}\r\n{canonical}\r\n\r\n{content}\r\n")
+    out.append(f"{delim}--\r\n")
+    return "".join(out)
+
+
+def _order_graphql_leaves(parsed: Any,
+                          leaves: List[Tuple[Any, ...]]) -> List[Tuple[Any, ...]]:
+    """Move a GraphQL request's structural fields behind the arguments.
+
+    A GraphQL POST carries ``variables`` -- the values the operation is called
+    with, which reach resolvers and so reach sinks -- alongside ``query``, the
+    operation document itself. A payload in ``query`` *replaces* that document,
+    so the server answers with a parse error before any resolver runs, and
+    ``operationName`` has to name an operation in the document it no longer
+    matches. Each is a full probe ladder spent where nothing can be confirmed,
+    and on the capture this was measured against they were two points of five.
+
+    They are moved, not dropped. A server that logs the query document before
+    parsing it is reachable through exactly that field, which is how Log4Shell
+    travelled through access logs, so a full run still tests them -- and
+    ``--max-points`` now cuts the least likely to pay first rather than
+    whichever came last in the document."""
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("query"), str):
+        return leaves
+    if "variables" not in parsed and "operationName" not in parsed:
+        # A lone `{"query": ...}` is as likely to be a search API as a GraphQL
+        # endpoint, and there the query field is the one worth testing.
+        return leaves
+    structural = [t for t in leaves
+                  if len(t) == 1 and t[0] in GRAPHQL_STRUCTURAL_FIELDS]
+    if not structural:
+        return leaves
+    return [t for t in leaves if t not in structural] + structural
 
 
 def _render_json_path(tokens: Tuple[Any, ...]) -> str:
@@ -5963,7 +6095,21 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
                 points.append(InjectionPoint("query", key, f"query param '{key}'"))
 
     stripped = (body or "").strip()
-    if stripped[:1] in "{[" and "json" in selected:
+    if _is_multipart_body(headers):
+        # Decided from Content-Type, and decided before the form branch, which
+        # used to split a multipart body on `&` and yield a single point named
+        # after a Content-Disposition line. That point could not confirm
+        # anything -- every probe rewrote a part header -- while the fields the
+        # form actually posts were never tested. A run that reports coverage it
+        # does not have is worse than one that reports none.
+        boundary = _multipart_boundary(headers, body or "")
+        parts = _split_multipart(body or "", boundary) if boundary else None
+        for head, _content in (parts or []) if "multipart" in selected else []:
+            field = _multipart_field_name(head)
+            if field:
+                points.append(InjectionPoint("multipart", field,
+                                             f"multipart field '{field}'"))
+    elif stripped[:1] in "{[" and "json" in selected:
         try:
             parsed = json.loads(body)
         except (ValueError, TypeError, RecursionError):
@@ -5973,7 +6119,7 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
             # traceback instead of an enumeration.
             parsed = None
         if parsed is not None:
-            for tokens in _json_leaf_tokens(parsed):
+            for tokens in _order_graphql_leaves(parsed, _json_leaf_tokens(parsed)):
                 rendered = _render_json_path(tokens)
                 points.append(InjectionPoint("json", rendered,
                                              f"JSON field '{rendered}'", tokens))
@@ -6044,6 +6190,20 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
     if point.kind == "form":
         marked = _mark_urlencoded_param(body, point.name, mark)
         return (target, headers, marked) if marked is not None else None
+    if point.kind == "multipart":
+        boundary = _multipart_boundary(headers, body or "")
+        parts = _split_multipart(body or "", boundary or "") if boundary else None
+        if not parts:
+            return None
+        rebuilt: List[List[str]] = []
+        found = False
+        for head, content in parts:
+            if not found and _multipart_field_name(head) == point.name:
+                content, found = mark, True
+            rebuilt.append([head, content])
+        if not found:
+            return None
+        return target, headers, _render_multipart(rebuilt, boundary or "")
     if point.kind == "cookie":
         for index, (name, value) in enumerate(headers):
             if name.lower() != "cookie":
