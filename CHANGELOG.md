@@ -163,6 +163,13 @@ formats, or the template schema.
   which is the part that matters: coverage reported and not delivered reads
   exactly like a clean target.
 
+  Several parts may post under one name — a multi-file input and a checkbox
+  array both do — so a part is addressed by its **index**, as a JSON leaf is
+  addressed by its token path. Addressing by name alone rewrote the first part
+  for every candidate, which is the same failure one level further in: three
+  files, three points, the first file probed three times and the other two
+  never touched.
+
   `multipart` is now its own kind, recognised from `Content-Type` and decided
   before the form branch can see the body. A file part is a candidate too — its
   content is the value under test, while its `filename` and `Content-Type` stay
@@ -187,6 +194,9 @@ formats, or the template schema.
   tests both and `--max-points` now cuts the least likely to pay first. A plain
   `{"query": ...}` body with no `variables` is left in document order: it is as
   likely to be a search API, and there the query field is the one worth testing.
+  Carrying both keys is not enough either — the `query` string has to open like
+  a GraphQL document, so `{"query": "red shoes", "variables": {...}}` keeps its
+  real injection point where a bounded `--max-points` run will still reach it.
 
 ### Fixed
 
