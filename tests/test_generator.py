@@ -5437,6 +5437,96 @@ class MultipartInjectionPointTestCase(unittest.TestCase):
                           if p.kind in {"multipart", "form"}])
 
 
+RAW_MULTIPART_REPEATED = (
+    "POST /upload HTTP/1.1\r\n"
+    "Host: target.example\r\n"
+    "Content-Type: multipart/form-data; boundary=----Bnd\r\n"
+    "\r\n"
+    "------Bnd\r\n"
+    'Content-Disposition: form-data; name="files[]"; filename="a.txt"\r\n'
+    "\r\n"
+    "AAA\r\n"
+    "------Bnd\r\n"
+    'Content-Disposition: form-data; name="files[]"; filename="b.txt"\r\n'
+    "\r\n"
+    "BBB\r\n"
+    "------Bnd\r\n"
+    'Content-Disposition: form-data; name="files[]"; filename="c.txt"\r\n'
+    "\r\n"
+    "CCC\r\n"
+    "------Bnd\r\n"
+    'Content-Disposition: form-data; name="note"\r\n'
+    "\r\n"
+    "hello\r\n"
+    "------Bnd--\r\n"
+)
+
+
+class RepeatedMultipartFieldTestCase(unittest.TestCase):
+    """Several parts may post under one name, and each is its own value.
+
+    A multi-file input and a checkbox array both do it. Addressing a part by
+    name alone rewrote the *first* one for every candidate, so a form posting
+    three files produced three points, probed the first file three times, and
+    never touched the other two -- while the run reported three points of
+    coverage. That is the same failure this whole change was written to remove,
+    one level further in: a probe count that does not mean what it says.
+
+    So the part index is the authority, as `tokens` already is for a JSON leaf.
+    """
+
+    def setUp(self):
+        self.req = parse_raw_request(RAW_MULTIPART_REPEATED)
+        self.points = [p for p in rcekit.enumerate_injection_points(self.req)
+                       if p.kind == "multipart"]
+
+    def _values(self, body):
+        """The part contents of a rendered body, read back positionally."""
+        return [seg.split("\r\n\r\n", 1)[1].rstrip("\r\n")
+                for seg in body.split("------Bnd")[1:-1]]
+
+    def test_each_repeated_part_is_its_own_point(self):
+        self.assertEqual([p.name for p in self.points],
+                         ["files[]", "files[]", "files[]", "note"])
+        self.assertEqual([p.tokens for p in self.points],
+                         [(0,), (1,), (2,), (3,)])
+
+    def test_each_point_rewrites_its_own_part(self):
+        """The counterexample. Before the index, every one of these was `AAA`."""
+        placed = []
+        for index, point in enumerate(self.points):
+            _t, _h, body = rcekit.place_injection_point(
+                self.req["target"], self.req["headers"], self.req["body"],
+                point, f"MARK{index}")
+            placed.append(self._values(body))
+        self.assertEqual(placed, [
+            ["MARK0", "BBB", "CCC", "hello"],
+            ["AAA", "MARK1", "CCC", "hello"],
+            ["AAA", "BBB", "MARK2", "hello"],
+            ["AAA", "BBB", "CCC", "MARK3"],
+        ])
+
+    def test_a_repeated_name_says_which_part_a_finding_came_from(self):
+        labels = [p.label for p in self.points]
+        self.assertEqual(labels[:3], ["multipart field 'files[]' (part 1)",
+                                      "multipart field 'files[]' (part 2)",
+                                      "multipart field 'files[]' (part 3)"])
+        self.assertEqual(len(set(labels)), len(labels), "two points read alike")
+
+    def test_a_name_posted_once_keeps_the_plain_label(self):
+        # The index is not noise in the common case.
+        self.assertEqual(self.points[3].label, "multipart field 'note'")
+
+    def test_a_point_that_no_longer_describes_the_body_places_nothing(self):
+        # An index without the name it was enumerated under means the body
+        # moved underneath the point; rewriting whatever sits there now would
+        # attribute a finding to the wrong field.
+        point = rcekit.InjectionPoint("multipart", "files[]", "x", (3,))
+        self.assertIsNone(rcekit.place_injection_point(
+            self.req["target"], self.req["headers"], self.req["body"],
+            point, "FUZZ"))
+
+
 class GraphQLPointOrderTestCase(unittest.TestCase):
     """A GraphQL POST spends most of its budget where nothing can be confirmed.
 
@@ -5479,6 +5569,33 @@ class GraphQLPointOrderTestCase(unittest.TestCase):
         names = self._names(self.PAYLOAD)
         self.assertEqual(names[:3],
                          ["variables.term", "variables.limit", "variables.filter.lang"])
+
+    def test_a_search_api_carrying_both_keys_is_not_treated_as_graphql(self):
+        """The keys alone do not make it GraphQL.
+
+        A search API posting `{"query": "red shoes", "variables": {...}}` has a
+        real injection point in `query`. Demoting it behind every variable is
+        one that a bounded `--max-points` run drops outright -- reach traded
+        away on a guess about the endpoint."""
+        names = self._names({"query": "red shoes",
+                             "variables": {"size": 42, "colour": "red"}})
+        self.assertEqual(names[0], "query",
+                         f"a search body was reordered as GraphQL: {names}")
+
+    def test_a_query_that_is_a_keyword_without_a_selection_set_is_not_a_document(self):
+        names = self._names({"query": "mutation", "variables": {"a": 1}})
+        self.assertEqual(names[0], "query")
+
+    def test_the_shorthand_form_is_still_recognised(self):
+        # `{ me { id } }` carries no operation keyword and is a GraphQL
+        # document all the same.
+        names = self._names({"query": "{ me { id } }", "variables": {"a": 1, "b": 2}})
+        self.assertEqual(names[-1], "query")
+
+    def test_a_leading_comment_does_not_hide_the_document(self):
+        names = self._names({"query": "# saved by the IDE\nquery S { me { id } }",
+                             "variables": {"a": 1}})
+        self.assertEqual(names[-1], "query")
 
     def test_a_plain_json_body_with_a_query_field_is_not_reordered(self):
         # `{"query": ...}` alone is as likely to be a search API, and there the

@@ -5818,13 +5818,19 @@ class InjectionPoint:
     like ``user.profile.name``, a header name, a path-segment index — and
     ``label`` is what a finding calls it.
 
-    For a JSON point, ``tokens`` is the authority and ``name`` is only for
-    reading. A dotted string cannot round-trip a key that itself contains a dot:
+    For a JSON point and a multipart point alike, ``tokens`` is the authority
+    and ``name`` is only for reading. A dotted string cannot round-trip a key that itself contains a dot:
     ``{"user.name": ..., "user": {"name": ...}}`` renders both leaves as
     ``user.name``, so the literal key is never probed and any finding is
     attributed to the nested one. Addressing by tokens removes the ambiguity;
     ``name`` renders a dotted key as ``["user.name"]`` so the two stay
-    distinguishable on screen too."""
+    distinguishable on screen too.
+
+    A multipart point carries its part index for the same reason. Repeated
+    field names are ordinary -- a multi-file input and a checkbox array both
+    post several parts under one name -- and addressing by name alone rewrites
+    the first of them every time, so the later parts are counted as covered
+    and never tested."""
     kind: str
     name: str
     label: str
@@ -5861,6 +5867,20 @@ _MULTIPART_NAME_RE = re.compile(r'name\s*=\s*"((?:[^"\\]|\\.)*)"')
 # The fields a GraphQL request uses to carry the operation itself rather than
 # the arguments it is called with.
 GRAPHQL_STRUCTURAL_FIELDS = ("query", "operationName")
+
+# What a GraphQL document opens with: the shorthand ``{ ... }``, or an
+# operation or fragment keyword, after any leading comments. Carrying both keys
+# is not enough on its own -- a search API posting
+# ``{"query": "red shoes", "variables": {...}}`` has a real injection point in
+# `query`, and demoting it there is a point a bounded run can drop entirely.
+_GRAPHQL_DOC_RE = re.compile(
+    r"^(?:\s*#[^\n]*\n)*\s*(?:\{|(?:query|mutation|subscription|fragment)\b)")
+
+
+def _looks_like_graphql(document: str) -> bool:
+    """Whether a ``query`` string is a GraphQL document rather than a search
+    term. A selection set is required, so a bare keyword does not qualify."""
+    return bool(_GRAPHQL_DOC_RE.match(document)) and "{" in document
 
 
 def _is_multipart_body(headers: List[List[str]]) -> bool:
@@ -5978,6 +5998,11 @@ def _order_graphql_leaves(parsed: Any,
     if "variables" not in parsed and "operationName" not in parsed:
         # A lone `{"query": ...}` is as likely to be a search API as a GraphQL
         # endpoint, and there the query field is the one worth testing.
+        return leaves
+    if not _looks_like_graphql(parsed["query"]):
+        # The keys alone do not make it GraphQL. A search API can carry both,
+        # and demoting a real injection point there is one a bounded
+        # `--max-points` run drops outright.
         return leaves
     structural = [t for t in leaves
                   if len(t) == 1 and t[0] in GRAPHQL_STRUCTURAL_FIELDS]
@@ -6104,11 +6129,17 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
         # does not have is worse than one that reports none.
         boundary = _multipart_boundary(headers, body or "")
         parts = _split_multipart(body or "", boundary) if boundary else None
-        for head, _content in (parts or []) if "multipart" in selected else []:
-            field = _multipart_field_name(head)
-            if field:
-                points.append(InjectionPoint("multipart", field,
-                                             f"multipart field '{field}'"))
+        fields = [_multipart_field_name(head) for head, _c in parts or []]
+        # A name posted by more than one part is addressed by index and labelled
+        # by it, so a finding says which part carried it.
+        repeated = {name for name in fields if name and fields.count(name) > 1}
+        for index, field in enumerate(fields if "multipart" in selected else []):
+            if not field:
+                continue
+            label = f"multipart field '{field}'"
+            if field in repeated:
+                label += f" (part {index + 1})"
+            points.append(InjectionPoint("multipart", field, label, (index,)))
     elif stripped[:1] in "{[" and "json" in selected:
         try:
             parsed = json.loads(body)
@@ -6195,10 +6226,20 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
         parts = _split_multipart(body or "", boundary or "") if boundary else None
         if not parts:
             return None
+        # The index is the authority, as ``tokens`` is for a JSON leaf. Several
+        # parts may share a name -- a multi-file input posts every file under
+        # one -- and matching on the name alone rewrote the first of them for
+        # every candidate, so each later part was probed nowhere and reported
+        # as covered. The name is still checked, so a point that no longer
+        # describes the body places nothing rather than the wrong part.
+        wanted = point.tokens[0] if point.tokens else None
         rebuilt: List[List[str]] = []
         found = False
-        for head, content in parts:
-            if not found and _multipart_field_name(head) == point.name:
+        for index, (head, content) in enumerate(parts):
+            here = _multipart_field_name(head)
+            hit = (index == wanted and here == point.name) if wanted is not None \
+                else (not found and here == point.name)
+            if hit:
                 content, found = mark, True
             rebuilt.append([head, content])
         if not found:
