@@ -2468,11 +2468,22 @@ class EvalExprTestCase(unittest.TestCase):
         joined = " ".join(p.payload for p in probes)
         for delim in ("${", "{{", "#{", "%{", "<%=", "@("):
             self.assertIn(delim, joined)
+        expr = next(p.forbidden for p in probes if not p.carrier)
+        left, right = expr.split("*")
         for probe in probes:
-            # expected is the product; forbidden is the literal expression, which
-            # is present in the payload but must be absent from a confirmed body.
+            # expected is the product, and no payload ever hands the target its
+            # own answer -- that is the whole oracle.
             self.assertNotIn(probe.expected, probe.payload)
-            self.assertIn(probe.forbidden, probe.payload)
+            # Every payload is parameterised by this run's operands. `forbidden
+            # in payload` used to stand in for that, but it only held while
+            # every payload spelled the joined `a*b` out; a carrier for an
+            # engine that multiplies through a filter writes
+            # `{{ a | times: b }}` and never does.
+            self.assertIn(left, probe.payload, probe.carrier or "bare")
+            self.assertIn(right, probe.payload, probe.carrier or "bare")
+        for probe in probes:
+            if not probe.carrier:
+                self.assertIn(probe.forbidden, probe.payload)
 
     def test_confirm_evaluation_vs_reflection_vs_boundary(self):
         import random as _random
@@ -5246,6 +5257,129 @@ class FileReadBackTestCase(unittest.TestCase):
         self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
 
 
+class EvalCarrierOperandTestCase(unittest.TestCase):
+    """A carrier may need the operands, not the joined expression.
+
+    Every carrier until now substituted `__EXPR__` -- the whole `a*b` -- which
+    silently assumed the engine has an arithmetic operator. Two that do not,
+    and that are measured false negatives today, compute through a filter and
+    a tag instead:
+
+        liquid    {{ 45013 | times: 45989 }}      -> 2070102857
+        django    {% widthratio 45013 1 45989 %}  -> 2070102857
+
+    Neither can be written with the joined expression at all, so an
+    application that really does evaluate the template was reported negative.
+    That is the same shape as `oob` on a `${jndi:...}` sink: probes that reach
+    the target and cannot speak its language.
+    """
+
+    def setUp(self):
+        self.rec = make_record(environment="unix", context="raw")
+        self.gen = RCEKit()
+
+    def _probes(self, carriers=None, config=None):
+        import random
+        gen = self.gen
+        if carriers is not None:
+            gen.eval_carriers = carriers
+        method = rcekit.EvalExpr(gen, config or {})
+        return method.build_probes(self.rec, random.Random(7))
+
+    def _by_carrier(self, probes):
+        return {p.carrier: p for p in probes if p.carrier}
+
+    def test_the_operands_are_substituted_apart(self):
+        probes = self._probes({"t": {"engines": ["t"],
+                                     "template": "A=__A__ B=__B__"}})
+        probe = self._by_carrier(probes)["t"]
+        a, b = probe.payload.replace("A=", "").split(" B=")
+        self.assertEqual(int(a) * int(b), int(probe.expected),
+                         f"the operands do not multiply to the expected value: {probe.payload}")
+
+    def test_the_joined_expression_still_works(self):
+        # Backward compatibility: the three shipped carriers use it.
+        probe = self._by_carrier(self._probes({
+            "t": {"engines": ["t"], "template": "<<__EXPR__>>"}}))["t"]
+        self.assertRegex(probe.payload, r"^<<\d+\*\d+>>$")
+
+    def test_a_carrier_may_use_both(self):
+        probe = self._by_carrier(self._probes({
+            "t": {"engines": ["t"], "template": "__EXPR__|__A__|__B__"}}))["t"]
+        expr, a, b = probe.payload.split("|")
+        self.assertEqual(expr, f"{a}*{b}")
+
+    def test_a_carrier_with_no_token_is_not_sent(self):
+        """A constant payload cannot confirm, so sending it only costs a request.
+
+        Its operands would not be random to the run, so the product would not be
+        evidence the target computed anything -- and a probe that cannot confirm
+        still counts toward the coverage a run reports."""
+        probes = self._probes({"bad": {"engines": ["bad"], "template": "no tokens here"}})
+        self.assertEqual(self._by_carrier(probes), {})
+
+    def test_the_shipped_carriers_render_their_measured_form(self):
+        probes = self._probes()          # the real corpus
+        rendered = {name: p.payload for name, p in self._by_carrier(probes).items()}
+        self.assertIn("liquid", rendered)
+        self.assertIn("django", rendered)
+        self.assertRegex(rendered["liquid"], r"^\{\{ \d+ \| times: \d+ \}\}$")
+        self.assertRegex(rendered["django"], r"^\{% widthratio \d+ 1 \d+ %\}$")
+
+    def test_a_filter_carrier_never_carries_the_product_itself(self):
+        """The payload must not contain the answer.
+
+        If it did, a target that merely echoed the payload would return the
+        expected value and read as `confirmed` -- reflection forging execution,
+        which is the one thing this oracle exists to prevent."""
+        for name, probe in self._by_carrier(self._probes()).items():
+            self.assertNotIn(probe.expected, probe.payload,
+                             f"the {name} carrier hands the target its own answer")
+
+    def test_eval_engines_still_narrows_to_a_new_carrier(self):
+        probes = self._probes(config={"eval_engines": ("liquid",)})
+        self.assertEqual(set(self._by_carrier(probes)), {"liquid"})
+
+
+class EvalCarrierCorpusTestCase(unittest.TestCase):
+    """A carrier is a measured false negative, never a precaution.
+
+    The rule is written in `build_probes`: carriers exist "for the engines that
+    do NOT return a bare product from a bare expression". A carrier shipped on
+    a guess costs a request per context on every run for an engine the bare
+    forms already cover, and nothing would ever say so.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.carriers = RCEKit().eval_carriers
+
+    def test_every_carrier_records_the_measurement_behind_it(self):
+        for name, carrier in self.carriers.items():
+            self.assertTrue(str(carrier.get("verified") or "").strip(),
+                            f"the {name} carrier ships without a `verified` note")
+
+    def test_a_verified_note_names_a_version(self):
+        # "it worked once" is not a measurement; the engine build is the claim.
+        for name, carrier in self.carriers.items():
+            self.assertRegex(carrier["verified"], r"\d+\.\d+",
+                             f"the {name} carrier's `verified` note names no version")
+
+    def test_every_carrier_declares_the_engines_it_is_for(self):
+        for name, carrier in self.carriers.items():
+            self.assertTrue(carrier.get("engines"),
+                            f"the {name} carrier names no engine")
+
+    def test_the_survey_records_what_did_not_need_a_carrier(self):
+        """The measurements that produced nothing are worth as much as the ones
+        that did -- without them the next person re-runs the same survey."""
+        data = json.loads((REPO_ROOT / "templates" / "payloads.json").read_text(
+            encoding="utf-8"))
+        self.assertIn("eval_carrier_survey", data)
+        self.assertTrue(data["eval_carrier_survey"].get("bare_form_sufficient"))
+        self.assertTrue(data["eval_carrier_survey"].get("out_of_reach"))
+
+
 class InjectionPointEnumerationTestCase(unittest.TestCase):
     """Expanding one captured request into every candidate injection point.
 
@@ -5877,13 +6011,16 @@ class DetectionCostEstimateTestCase(unittest.TestCase):
 class EvalCarrierTestCase(unittest.TestCase):
     """Engine carriers for the `eval` probe.
 
-    A carrier exists for exactly one reason: an engine that evaluates the
-    expression perfectly but does not put the bare product in the response, so
-    RCEKit's oracle cannot see it and a vulnerable target reads as `negative`.
-    Three engines were measured to do that. Every other engine tested —
-    including OGNL with member access denied outright, SpEL's restricted
-    context, and Jinja2's SandboxedEnvironment — returns the bare product from
-    the bare probe, so a sandbox is not what carriers are for."""
+    A carrier exists for exactly one reason: the engine is vulnerable and the
+    bare probe cannot see it, so a target that really does evaluate the
+    template reads as `negative`. Five engines were measured to be in that
+    position, two ways. Freemarker, Velocity and Thymeleaf evaluate the
+    expression and do not put the bare product in the response; Liquid and
+    Django have no arithmetic operator at all and multiply through a filter and
+    a tag instead. Every other engine tested — including OGNL with member
+    access denied outright, SpEL's restricted context, and Jinja2's
+    SandboxedEnvironment — returns the bare product from the bare probe, so a
+    sandbox is not what carriers are for."""
 
     def setUp(self):
         self.gen = RCEKit()
@@ -5899,7 +6036,15 @@ class EvalCarrierTestCase(unittest.TestCase):
         self.assertTrue(self.gen.eval_carriers)
         for name, carrier in self.gen.eval_carriers.items():
             self.assertIn("template", carrier, name)
-            self.assertIn(EvalExpr.CARRIER_TOKEN, carrier["template"], name)
+            # Any of the tokens: an engine that multiplies through a filter or
+            # a tag needs the operands apart and cannot use the joined one. What
+            # the rule protects is unchanged -- a template with none of them
+            # renders the same constant every run, so its product would not be
+            # evidence the target computed anything.
+            self.assertTrue(
+                any(token in carrier["template"]
+                    for token in (EvalExpr.CARRIER_TOKEN,) + EvalExpr.CARRIER_OPERAND_TOKENS),
+                f"{name} is parameterised by nothing and renders a constant")
             self.assertTrue(carrier.get("notes"), f"{name} must say why it exists")
             self.assertTrue(carrier.get("verified"),
                             f"{name} must record what it was measured against")
@@ -5918,7 +6063,17 @@ class EvalCarrierTestCase(unittest.TestCase):
         # still a product of random operands that the payload never spells out.
         for probe in self._probes():
             self.assertNotIn(probe.expected, probe.payload)
-            self.assertIn(probe.forbidden, probe.payload)
+        # And every payload is parameterised by *this run's* operands. Asserting
+        # `forbidden in payload` used to stand in for that, but a filter carrier
+        # writes `{{ a | times: b }}` and never spells the joined `a*b` out at
+        # all -- and setting `forbidden` to the rendered body to make it fit
+        # would have made the assertion equal `payload in payload`, true for
+        # every carrier however broken.
+        expr = next(p.forbidden for p in self._probes() if not p.carrier)
+        left, right = expr.split("*")
+        for probe in self._probes():
+            self.assertIn(left, probe.payload, probe.carrier or "bare")
+            self.assertIn(right, probe.payload, probe.carrier or "bare")
 
     def test_every_probe_shares_one_expected_value(self):
         self.assertEqual(len({p.expected for p in self._probes()}), 1)
@@ -5929,10 +6084,17 @@ class EvalCarrierTestCase(unittest.TestCase):
         # does not; changing one silently would undo that without any test
         # noticing.
         rendered = {p.carrier: p.payload for p in self._probes() if p.carrier}
-        expr = next(p.forbidden for p in self._probes() if p.carrier)
+        # Taken from a *bare* probe: a carrier's `forbidden` is the joined
+        # arithmetic, but reading it from a carrier made this test compare the
+        # freemarker payload against itself once the carriers stopped all
+        # containing it.
+        expr = next(p.forbidden for p in self._probes() if not p.carrier)
+        a, b = expr.split("*")
         self.assertEqual(rendered["freemarker"], f"${{({expr})?c}}")
         self.assertEqual(rendered["velocity"], f"#set($rk={expr})$rk")
         self.assertEqual(rendered["thymeleaf"], f"[[${{{expr}}}]]")
+        self.assertEqual(rendered["liquid"], f"{{{{ {a} | times: {b} }}}}")
+        self.assertEqual(rendered["django"], f"{{% widthratio {a} 1 {b} %}}")
 
     def test_eval_engines_narrows_the_carriers(self):
         probes = self._probes({"eval_engines": ("velocity",)})

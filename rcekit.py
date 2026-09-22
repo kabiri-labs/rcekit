@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.39.0"
+__version__ = "2.40.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4756,9 +4756,25 @@ class EvalExpr(DetectionMethod):
     # and escaping them for str.format is a bug waiting to happen in a file
     # contributors are meant to edit by hand.
     CARRIER_TOKEN = "__EXPR__"
+    # And the operands apart, for an engine whose arithmetic is a filter or a
+    # tag rather than an expression. Liquid multiplies with
+    # ``{{ a | times: b }}`` and Django with ``{% widthratio a 1 b %}``;
+    # neither can be written with the joined expression at all, so without
+    # these two an engine that evaluates the template is reported negative.
+    CARRIER_OPERAND_TOKENS = ("__A__", "__B__")
 
     def applicable(self, record: "PayloadRecord") -> bool:
         return True
+
+    def _carrier_tokens(self) -> Tuple[str, ...]:
+        return (self.CARRIER_TOKEN,) + tuple(self.CARRIER_OPERAND_TOKENS)
+
+    def _render_carrier(self, template: str, a: int, b: int) -> str:
+        """Substitute a carrier's tokens: the joined arithmetic, and the two
+        operands for an engine that multiplies them itself."""
+        left, right = self.CARRIER_OPERAND_TOKENS
+        return (template.replace(self.CARRIER_TOKEN, f"{a}*{b}")
+                .replace(left, str(a)).replace(right, str(b)))
 
     def _selected_carriers(self) -> List[Tuple[str, Dict[str, Any]]]:
         """The corpus carriers to try, honouring ``--eval-engines``.
@@ -4771,6 +4787,13 @@ class EvalExpr(DetectionMethod):
         selected = []
         for name, carrier in carriers.items():
             if not isinstance(carrier, dict) or not carrier.get("template"):
+                continue
+            # A template carrying no token renders the same constant for every
+            # probe, so it can never confirm: the operands would not be random
+            # to the run and the product would not be the target's work. Sending
+            # it would spend a request per context to learn nothing.
+            if not any(token in str(carrier["template"])
+                       for token in self._carrier_tokens()):
                 continue
             if wanted:
                 engines = set(carrier.get("engines") or []) | {name}
@@ -4799,7 +4822,14 @@ class EvalExpr(DetectionMethod):
         # from a bare expression. Each is a measured false negative, not a
         # precaution -- see the `verified` note on each corpus entry.
         for name, carrier in self._selected_carriers():
-            body = str(carrier["template"]).replace(self.CARRIER_TOKEN, expr)
+            body = self._render_carrier(str(carrier["template"]), a, b)
+            # `forbidden` stays the pre-execution arithmetic, which is what it
+            # means everywhere else. A filter or tag carrier does not spell
+            # `a*b` out, so the "target also reflects the payload verbatim"
+            # note simply does not fire for one -- it is a note on the evidence
+            # line and never a verdict. Setting it to the rendered body instead
+            # would make it equal the payload, and `forbidden in payload` would
+            # hold for every carrier no matter what the carrier did.
             probes.append(Probe(payload=self._wrap_context(record, body),
                                 expected=expected, forbidden=expr, carrier=name))
         return probes
@@ -8406,6 +8436,24 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "template": "[[${__EXPR__}]]",
       "notes": "Thymeleaf only evaluates an expression inside its inlining brackets; a bare ${a*b} in template text is emitted verbatim.",
       "verified": "thymeleaf 3.1.2: ${a*b} -> literal '${a*b}'; [[${a*b}]] -> '2070761401'. The __${...}__ preprocessing form was also tried and did NOT evaluate standalone, so it is deliberately not shipped."
+    },
+    "liquid": {
+      "engines": [
+        "liquid",
+        "shopify",
+        "jekyll"
+      ],
+      "template": "{{ __A__ | times: __B__ }}",
+      "notes": "Liquid has no arithmetic operators, so every bare form RCEKit sends passes through untouched and an evaluating target reads as negative -- {{a*b}} is not even parsed, it raises 'expected \"|\" before filter'. Multiplication is a filter, which needs the operands apart rather than the joined expression.",
+      "verified": "liquid 5.14.0 on ruby 3.3.12 (the reference implementation, which is what Shopify and Jekyll run): every bare form missing, {{ 45013 | times: 45989 }} -> '2070102857'. liquidjs 10.29.0 agrees: every bare form missing (raw/${}/{{}}/#{}/%{}/<%= %>/@()), filter form -> '2070102857'; the {% assign %} form also works and the filter form is shipped as it is one output tag."
+    },
+    "django": {
+      "engines": [
+        "django"
+      ],
+      "template": "{% widthratio __A__ 1 __B__ %}",
+      "notes": "Django's template language deliberately has no arithmetic: {{a*b}} is a TemplateSyntaxError, not an evaluation, and every other bare form passes through as text. widthratio computes this/max*width, so with a max of 1 it multiplies -- the operands are three separate tag arguments and cannot be written as one expression.",
+      "verified": "Django 6.1.1: every bare form missing ({{a*b}} raised TemplateSyntaxError \"Could not parse the remainder\"); {% widthratio 45013 1 45989 %} -> '2070102857' (found)"
     }
   },
   "bridges": {
@@ -8497,6 +8545,21 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "dns": "{\"rk\":{\"@type\":\"java.net.Inet4Address\",\"val\":\"{host}\"}}",
       "notes": "Polymorphic deserialization by type name. java.net.Inet4Address resolves its val on construction, which is a DNS side effect and not code execution -- the same honest signal URLDNS gives for the binary format, expressible as plain text because JSON is not length-prefixed.",
       "verified": "documented fastjson autotype behaviour; not exercised against a live fastjson endpoint in this environment"
+    }
+  },
+  "eval_carrier_survey": {
+    "purpose": "Engines measured against RCEKit's bare eval forms. A carrier exists only for a measured false negative; these are the results that did not produce one, recorded so the survey is not repeated.",
+    "bare_form_sufficient": {
+      "nunjucks 3.2.4": "{{a*b}} -> '2070102857'",
+      "tornado 6.5.10": "{{a*b}} -> '2070102857'",
+      "mako 1.4.1": "${a*b} -> '2070102857'",
+      "chameleon 4.6.0": "${a*b} -> '2070102857'",
+      "smarty 5.8.4": "${a*b} -> '$2070102857' and {{a*b}} -> '2070102857' (Smarty evaluates arithmetic inside its own braces, so the bare forms already carry the product)",
+      "erb (ruby 3.3.12)": "<%= a*b %> -> '2070102857'"
+    },
+    "out_of_reach": {
+      "handlebars 4.7.9": "Every bare form missing ({{a*b}} is a parse error), and handlebars is logic-less with no built-in arithmetic helper, so there is no template text that computes a product without a helper the application itself registered. No carrier can be written; an evaluating handlebars target is not reachable by this oracle.",
+      "go text/template 1.23.12": "Every bare form missing ({{a*b}} is 'unexpected \"*\" in operand'). Go's template language has no arithmetic operator and no multiplying builtin -- mul comes from sprig, which the application itself must register. The only forms that produced the product were {{printf \"%d\" <product>}} and {{<product>}}, and both hand the target the answer, so an echoing target would read as confirmed. A carrier that carries its own result is not a carrier; an evaluating Go target is not reachable by this oracle."
     }
   }
 }

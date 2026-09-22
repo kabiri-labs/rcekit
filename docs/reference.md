@@ -500,21 +500,55 @@ and still run every method.
 
 The `eval` method injects a product of two random operands in each common
 template syntax and confirms that the **product** comes back. Most engines need
-nothing more than that. Three do, and `--eval-engines` controls the extra probes
+nothing more than that. Five do, and `--eval-engines` controls the extra probes
 for them.
 
-A carrier exists for exactly one reason: **the engine evaluates the expression
-perfectly but does not put the bare product in the response**, so the oracle
-cannot see it and a vulnerable target reads as `negative`.
+A carrier exists for exactly one reason: **the engine is vulnerable and the
+bare probe cannot see it**, so a target that really does evaluate the template
+reads as `negative`. That happens two ways — the engine computes the product
+but does not print it bare, or it has no arithmetic operator at all and
+multiplies some other way.
 
-| Engine | Bare `${a*b}` returns | Carrier | Carrier returns |
+| Engine | Every bare form returns | Carrier | Carrier returns |
 |---|---|---|---|
 | Freemarker | `2,070,761,401` — grouped by locale | `${(a*b)?c}` | `2070761401` |
 | Velocity | `${a*b}` verbatim — it is a *reference*, not an expression | `#set($rk=a*b)$rk` | `2070761401` |
 | Thymeleaf | `${a*b}` verbatim — needs its inlining brackets | `[[${a*b}]]` | `2070761401` |
+| Liquid | nothing — there is no `*` operator, and `{{a*b}}` will not even parse | `{{ a \| times: b }}` | `2070102857` |
+| Django | nothing — `{{a*b}}` is a `TemplateSyntaxError`, by design | `{% widthratio a 1 b %}` | `2070102857` |
 
-Measured against freemarker 2.3.32, velocity-engine-core 2.3 and thymeleaf
-3.1.2; each corpus entry records what it was verified against.
+Measured against freemarker 2.3.32, velocity-engine-core 2.3, thymeleaf 3.1.2,
+Django 6.1.1, and Liquid on both implementations — liquid 5.14.0 on ruby 3.3.12,
+which is what Shopify and Jekyll run, and liquidjs 10.29.0. Each corpus entry
+records what it was verified against.
+
+**The last two take the operands apart.** Liquid multiplies with a filter and
+Django with a tag, so neither can be written as one expression. A carrier
+template may therefore use `__A__` and `__B__` as well as `__EXPR__`, and a
+template using none of the three is skipped rather than sent — its operands
+would not be random to the run, so its product would prove nothing.
+
+**What was measured and did not produce a carrier** is recorded too, in
+`eval_carrier_survey`, so the survey is not repeated: nunjucks 3.2.4, tornado
+6.5.10, mako 1.4.1, chameleon 4.6.0, smarty 5.8.4 and Ruby's ERB are all
+covered by a bare form already.
+
+Two engines are the other outcome — every bare form fails and **no carrier can
+be written**:
+
+- **Handlebars 4.7.9** is logic-less and has no built-in arithmetic helper, so
+  no template text computes a product without a helper the application itself
+  registered.
+- **Go `text/template` 1.23** has no arithmetic operator and no multiplying
+  builtin (`mul` comes from sprig, which the application must register). The
+  only forms that do return the product — `{{printf "%d" <product>}}` and
+  `{{<product>}}` — **hand the target the answer**, so a target that merely
+  echoed them would read as `confirmed`.
+
+That last one is the rule a carrier lives under: **a carrier may not carry its
+own result.** A test holds every shipped carrier to it. An evaluating target on
+either engine is out of reach of this oracle, and recording that is worth more
+than a carrier that cannot work.
 
 **A sandbox is not what carriers are for.** A member-access sandbox restricts
 method and field access; arithmetic and string concatenation need neither, so
@@ -528,7 +562,7 @@ the bare probe survives one. Measured:
 | Groovy, ERB, JS `eval`, Python `eval` | evaluates | — |
 
 So the bare probes already cover the sandboxed engines, and narrowing
-`--eval-engines` saves little — there are only three carriers, and they are the
+`--eval-engines` saves little — there are only five carriers, and they are the
 cheap part of the run.
 
 Carriers live in `eval_carriers` in `templates/payloads.json`, so a new one is a
