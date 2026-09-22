@@ -144,6 +144,56 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.40.0] — 2026-09-22
+
+### Added
+
+- **A carrier may take the operands apart, and two engines need it.** Every
+  expression carrier until now substituted `__EXPR__` — the joined `a*b` —
+  which quietly assumed the engine has an arithmetic operator. Two widely
+  deployed ones do not, and both were measured as false negatives:
+
+  ```
+  liquid    every bare form missing; {{ 45013 | times: 45989 }}     -> 2070102857
+  django    every bare form missing; {% widthratio 45013 1 45989 %} -> 2070102857
+  ```
+
+  Liquid multiplies with a filter and Django with a tag, so neither form can be
+  written as a single expression — an application that really does evaluate the
+  template was reported `negative`, which is the same shape as `oob` against a
+  `${jndi:...}` sink: probes that reach the target and cannot speak its
+  language. A carrier template may now use `__A__` and `__B__` as well as
+  `__EXPR__`.
+
+  Neither payload contains the product, so a target that merely echoes the
+  payload still cannot read as `confirmed`. A test pins that for every shipped
+  carrier.
+
+### Changed
+
+- **A carrier template with no substitution token is skipped, not sent.** Its
+  operands would be the same on every run, so its product would not be evidence
+  the target computed anything — and a probe that cannot confirm still counts
+  toward the coverage a run reports.
+
+- **What the survey measured and did not ship is recorded too.**
+  `eval_carrier_survey` in the corpus now names the engines that need no
+  carrier — nunjucks 3.2.4, tornado 6.5.10, mako 1.4.1, chameleon 4.6.0,
+  smarty 5.8.4 and Ruby's ERB all return the product from a bare form — and
+  those that are
+  out of reach. Handlebars 4.7.9 fails every bare form and, being logic-less
+  with no built-in arithmetic helper, has no template text that computes a
+  product at all. Go `text/template` 1.23 fails every bare form too, and the
+  only forms that do return the product — `{{printf "%d" <product>}}` and
+  `{{<product>}}` — hand the target the answer, so a target that merely echoed
+  them would read as `confirmed`. That is the rule a carrier lives under: **a
+  carrier may not carry its own result.**
+
+  Saying so is worth more than a carrier that cannot work, and it stops the
+  next person re-running the same survey — or shipping the Go form, which the
+  survey itself produced and which looks like a carrier until you ask what an
+  echoing target would return.
+
 ## [2.39.0] — 2026-09-22
 
 ### Added
@@ -1575,6 +1625,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.40.0]: https://github.com/kabiri-labs/rcekit/compare/v2.39.0...v2.40.0
 [2.39.0]: https://github.com/kabiri-labs/rcekit/compare/v2.38.0...v2.39.0
 [2.38.0]: https://github.com/kabiri-labs/rcekit/compare/v2.37.0...v2.38.0
 [2.37.0]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...v2.37.0
