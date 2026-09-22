@@ -454,6 +454,65 @@ class TableClaimParsingTestCase(unittest.TestCase):
                 self.assertIn("confirm", DENIAL_RE.sub("", text).lower())
 
 
+class VerdictTableTestCase(unittest.TestCase):
+    """The README's verdict table has to list every verdict a method reports.
+
+    It said "seven verdicts that are never collapsed into each other" and named
+    seven rows, while the tool had eight: `lookup-sink` was missing -- from the
+    one table whose whole job is to enumerate them, in a README that used the
+    word two tables higher in the Log4Shell CVE row and again in the methods
+    table. The sentence counted the rows the table had rather than the verdicts
+    there are, so the omission never contradicted itself and nothing failed.
+
+    The same shape as every other drift this file was written for: a list
+    maintained by hand beside a set the code already knows. So the check asks
+    the classes, and the counterexample it has to fail on is a verdict a method
+    declares and the table does not carry.
+    """
+
+    NUMBER_WORDS = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+    COUNT_RE = re.compile(r"\*\*([a-z]+) verdicts that are never collapsed")
+    VERDICT_RE = re.compile(r"^\|\s*\*\*`([a-z-]+)`\*\*\s*\|")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.rows = [m.group(1) for m in
+                    (cls.VERDICT_RE.match(line)
+                     for line in README.read_text(encoding="utf-8").splitlines())
+                    if m]
+        cls.reported = set()
+        for method in rcekit.DETECTION_METHODS.values():
+            cls.reported |= {method.tier} | set(method.also_reports)
+
+    def test_the_table_has_rows_at_all(self):
+        # Without this the two checks below pass vacuously on a parser that
+        # stopped matching -- which is how a table check dies quietly.
+        self.assertGreaterEqual(len(self.rows), 7, self.rows)
+
+    def test_every_verdict_a_method_reports_is_a_row(self):
+        missing = sorted(self.reported - set(self.rows))
+        self.assertFalse(
+            missing,
+            f"the verdict table does not carry {missing}, which "
+            f"DETECTION_METHODS reports; rows are {self.rows}")
+
+    def test_the_count_in_the_prose_is_the_number_of_rows(self):
+        text = README.read_text(encoding="utf-8")
+        match = self.COUNT_RE.search(text)
+        self.assertIsNotNone(match, "the sentence introducing the table moved")
+        word = match.group(1)
+        self.assertIn(word, self.NUMBER_WORDS, f"unreadable count: {word!r}")
+        self.assertEqual(self.NUMBER_WORDS[word], len(self.rows),
+                         f"the prose says {word}, the table has {len(self.rows)}")
+
+    def test_the_rows_are_spelled_the_way_a_verdict_is_spelled(self):
+        # A row named `lookup sink` or `Lookup-Sink` would read fine and match
+        # nothing, which is the failure mode this whole file exists for.
+        for row in self.rows:
+            self.assertEqual(row, row.lower().strip())
+
+
 class MethodTableTierTestCase(unittest.TestCase):
     """The same check as `DemoTierTestCase`, for the two tables under `docs/`.
 

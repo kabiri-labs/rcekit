@@ -5309,6 +5309,186 @@ class InjectionPointEnumerationTestCase(unittest.TestCase):
         self.assertFalse([p for p in points if p.kind == "json"])
 
 
+RAW_MULTIPART = (
+    "POST /upload HTTP/1.1\r\n"
+    "Host: target.example\r\n"
+    "Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryAbC123\r\n"
+    "\r\n"
+    "------WebKitFormBoundaryAbC123\r\n"
+    'Content-Disposition: form-data; name="user"\r\n'
+    "\r\n"
+    "alice\r\n"
+    "------WebKitFormBoundaryAbC123\r\n"
+    'Content-Disposition: form-data; name="avatar"; filename="a.txt"\r\n'
+    "Content-Type: text/plain\r\n"
+    "\r\n"
+    "line one\nline two\r\n"
+    "------WebKitFormBoundaryAbC123\r\n"
+    'Content-Disposition: form-data; name="note"\r\n'
+    "\r\n"
+    "hello\r\n"
+    "------WebKitFormBoundaryAbC123--\r\n"
+)
+
+
+def _graphql_capture(payload):
+    head = ("POST /graphql HTTP/1.1\r\n"
+            "Host: target.example\r\n"
+            "Content-Type: application/json\r\n\r\n")
+    return parse_raw_request(head + json.dumps(payload))
+
+
+class MultipartInjectionPointTestCase(unittest.TestCase):
+    """A multipart body has fields, and until now none of them were tested.
+
+    The form branch split the body on `&` and produced one point named after a
+    Content-Disposition line. Every probe for it rewrote a part *header*, so it
+    could not confirm anything, while `user`, `avatar` and `note` -- the fields
+    the form actually posts -- were never reached. The run still printed a
+    point and a probe count, which is the failure that matters: coverage
+    reported and not delivered reads exactly like a clean target.
+    """
+
+    def setUp(self):
+        self.req = parse_raw_request(RAW_MULTIPART)
+
+    def _points(self, **kwargs):
+        return rcekit.enumerate_injection_points(self.req, **kwargs)
+
+    def _place(self, name, mark="FUZZ"):
+        point = next(p for p in self._points()
+                     if p.kind == "multipart" and p.name == name)
+        return rcekit.place_injection_point(
+            self.req["target"], self.req["headers"], self.req["body"], point, mark)
+
+    def test_every_part_is_a_point_including_the_file_part(self):
+        self.assertEqual([p.name for p in self._points() if p.kind == "multipart"],
+                         ["user", "avatar", "note"])
+
+    def test_the_form_branch_no_longer_makes_a_point_out_of_a_part_header(self):
+        # The counterexample, not just the fix: a point whose name is a
+        # Content-Disposition line is the bug's signature.
+        names = [p.name for p in self._points()]
+        self.assertFalse([p for p in self._points() if p.kind == "form"])
+        self.assertFalse([n for n in names if "Content-Disposition" in n],
+                         f"a part header is still being offered as a field: {names}")
+
+    def _read_back(self, body):
+        """Parse the rendered body with the standard library's MIME parser.
+
+        Not with rcekit's own splitter: a parser and a renderer that are wrong
+        in the same direction agree with each other, and the question here is
+        whether the application on the other end can read what we send."""
+        import email
+        ctype = next(v for n, v in self.req["headers"] if n.lower() == "content-type")
+        msg = email.message_from_string(f"Content-Type: {ctype}\r\n\r\n{body}")
+        self.assertTrue(msg.is_multipart(), "the rendered body is not valid multipart")
+        return {part.get_param("name", header="content-disposition"):
+                part.get_payload(decode=True).decode("utf-8")
+                for part in msg.get_payload()}
+
+    def test_a_part_value_is_replaced_and_the_others_are_left_alone(self):
+        _, _, body = self._place("note")
+        self.assertEqual(self._read_back(body),
+                         {"user": "alice", "avatar": "line one\nline two",
+                          "note": "FUZZ"})
+
+    def test_the_part_keeps_its_own_headers(self):
+        # The file part is still a file part; we are testing its value, not
+        # rewriting what the application thinks it received.
+        _, _, body = self._place("avatar")
+        self.assertIn('filename="a.txt"', body)
+        self.assertIn("Content-Type: text/plain", body)
+
+    def test_the_rendered_body_uses_crlf_and_keeps_content_untouched(self):
+        """The line endings a capture loses, and the one it must not invent.
+
+        `parse_raw_request` normalises the whole request to LF, so a multipart
+        body read back from a file no longer has the endings it was sent with
+        and RFC 2046 wants CRLF between the delimiters and part headers. The
+        newline *inside* an uploaded text file is content, and stays."""
+        _, _, body = self._place("note")
+        self.assertNotIn("\n------WebKitFormBoundaryAbC123",
+                         body.replace("\r\n", "\x00"),
+                         "a delimiter is preceded by a bare newline")
+        self.assertIn("line one\nline two", body)
+        self.assertTrue(body.endswith("------WebKitFormBoundaryAbC123--\r\n"))
+
+    def test_a_field_that_is_not_there_places_nothing(self):
+        point = rcekit.InjectionPoint("multipart", "absent", "multipart field 'absent'")
+        self.assertIsNone(rcekit.place_injection_point(
+            self.req["target"], self.req["headers"], self.req["body"], point, "FUZZ"))
+
+    def test_a_probe_and_its_control_differ_only_in_the_field_under_test(self):
+        """Both go through the same renderer, so the control holds everything
+        else constant -- which is the whole basis on which `confirmed` rests."""
+        _, _, probed = self._place("note", "PAYLOAD")
+        _, _, control = self._place("note", "CONTROL")
+        self.assertEqual(probed.replace("PAYLOAD", "X"), control.replace("CONTROL", "X"))
+
+    def test_the_kind_can_be_narrowed_like_any_other(self):
+        self.assertEqual({p.kind for p in self._points(kinds=("multipart",))},
+                         {"multipart"})
+
+    def test_a_body_that_does_not_parse_yields_no_points_rather_than_garbage(self):
+        req = parse_raw_request(
+            RAW_MULTIPART.split("\r\n\r\n")[0] + "\r\n\r\nnot a multipart body at all")
+        self.assertFalse([p for p in rcekit.enumerate_injection_points(req)
+                          if p.kind in {"multipart", "form"}])
+
+
+class GraphQLPointOrderTestCase(unittest.TestCase):
+    """A GraphQL POST spends most of its budget where nothing can be confirmed.
+
+    `variables` carries the values the operation is called with, and those reach
+    resolvers. `query` is the operation document itself: a payload there
+    *replaces* it, so the server answers with a parse error before a resolver
+    runs, and `operationName` then names an operation that is no longer in the
+    document. On the capture this was measured against, those two were two
+    points of five -- each one a full probe ladder.
+
+    They are reordered, never dropped. A server that logs the query document
+    before parsing it is reachable through exactly that field, which is the
+    route Log4Shell took through access logs.
+    """
+
+    PAYLOAD = {
+        "operationName": "Search",
+        "query": "query Search($term: String!) { search(term: $term) { id } }",
+        "variables": {"term": "hello", "limit": 10, "filter": {"lang": "en"}},
+    }
+
+    def _names(self, payload):
+        return [p.name for p in rcekit.enumerate_injection_points(
+            _graphql_capture(payload)) if p.kind == "json"]
+
+    def test_variables_are_tried_before_the_operation_document(self):
+        names = self._names(self.PAYLOAD)
+        self.assertLess(names.index("variables.filter.lang"), names.index("query"))
+        self.assertLess(names.index("variables.term"), names.index("operationName"))
+
+    def test_nothing_is_dropped_and_the_structural_fields_come_last(self):
+        # Reach is not traded for yield: a full run still tests both.
+        names = self._names(self.PAYLOAD)
+        self.assertEqual(sorted(names),
+                         sorted(["operationName", "query", "variables.term",
+                                 "variables.limit", "variables.filter.lang"]))
+        self.assertEqual(names[-2:], ["operationName", "query"])
+
+    def test_variables_keep_their_document_order_among_themselves(self):
+        names = self._names(self.PAYLOAD)
+        self.assertEqual(names[:3],
+                         ["variables.term", "variables.limit", "variables.filter.lang"])
+
+    def test_a_plain_json_body_with_a_query_field_is_not_reordered(self):
+        # `{"query": ...}` alone is as likely to be a search API, and there the
+        # query field is the one worth testing first.
+        self.assertEqual(self._names({"query": "shoes", "page": 1}), ["query", "page"])
+
+    def test_a_graphql_body_without_variables_keeps_its_query_point(self):
+        self.assertIn("query", self._names({"query": "{ me { id } }"}))
+
+
 class InjectionPointPlacementTestCase(unittest.TestCase):
     """Each kind is rewritten in its own serialization, so the value is escaped
     by the layer that owns it rather than blanket-encoded for all of them."""

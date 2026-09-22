@@ -70,7 +70,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--sink-shape` | Sink shapes the shell probes try: `auto`, or any of `sep`, `raw`, `chain`, `newline`, `dq`, `sq`, `subshell` | `auto` |
 | `--sink-env` | Shell that runs the injected command: `auto`, `unix`, `windows`, `powershell` | `auto` |
 | `--eval-engines` | (`eval`) Engine carriers to add to the bare expression probes: `auto`, or names from `eval_carriers` | `auto` |
-| `--auto-params` | (`-r` with `--methods`) Enumerate injection points: kinds from `query`, `json`, `form`, `cookie`, `header`, `path`, or `all`. Implied by `-p all` | off |
+| `--auto-params` | (`-r` with `--methods`) Enumerate injection points: kinds from `query`, `json`, `form`, `multipart`, `cookie`, `header`, `path`, or `all`. Implied by `-p all` | off |
 | `--point-order` | (enumeration) `fast` (curated high-yield headers) or `thorough` (every non-hop-by-hop header) | `fast` |
 | `--max-points` | (enumeration) Stop after N candidates; the run reports how many it dropped | `40` |
 | `--include-path-segments` | (enumeration) Also inject into URL path segments | off |
@@ -438,12 +438,34 @@ serialization rather than blanket-encoded:
 | `query` | parameter name | the `a=1&b=2` encoder |
 | `json` | path — `user.profile.name`, `tags[1]` | the JSON encoder, re-serialised |
 | `form` | field name | the `a=1&b=2` encoder |
+| `multipart` | part name from `Content-Disposition` | the part's own body, re-serialised with CRLF delimiters |
 | `cookie` | crumb name | the `Cookie` header, other crumbs untouched |
 | `header` | header name | single-line header escaping |
 | `path` | segment index | the URL path (opt-in, see below) |
 
 A JSON leaf is only *replaced*, never created: assigning to a missing key would
 test a field the application never sends.
+
+A **multipart** body is recognised from `Content-Type`, and each part is a
+candidate — including a file part, whose content is the value under test while
+its `filename` and `Content-Type` stay as captured. The body is re-serialised
+with the CRLF delimiters RFC 2046 requires, which a capture loses: `-r` reads
+the whole request with its line endings normalised. Part *content* is left
+character for character, so a lone newline inside an uploaded text file
+survives. The payload-free control is rendered the same way, so it differs from
+the probe in the field under test and in nothing else.
+
+A **GraphQL** body is enumerated as JSON, then reordered. `variables` carries
+the values the operation is called with, and those reach resolvers; `query` is
+the operation document itself, so a payload there *replaces* it and the server
+answers with a parse error before a resolver runs. `operationName` then names an
+operation that is no longer in the document. Both are moved behind the
+variables, **not dropped** — a server that logs the query document before
+parsing it is reachable through exactly that field, which is the route
+Log4Shell took through access logs — so `--max-points` cuts the least likely to
+pay first. A plain `{"query": ...}` body with no `variables` is left alone: it
+is as likely to be a search API, and there the query field is the one worth
+testing.
 
 `Host`, `Content-Length`, `Cookie` and the hop-by-hop headers are never
 candidates — injecting into those changes the request's plumbing rather than

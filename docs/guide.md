@@ -111,11 +111,13 @@ proxy and let RCEKit reuse its method, path, headers, body and cookies:
 python rcekit.py --acknowledge-consent -r request.txt -p host --methods reflected
 ```
 
-Two ways to mark the injection point:
+Three ways to mark the injection point:
 
 - **Inline** — put `FUZZ` or `*` in the saved request where the payload goes.
 - **By name** — `-p host` selects a parameter, searched in the order
-  query → body → header → cookie. One injection point per run in this release.
+  query → body → header → cookie, and picks exactly one.
+- **All of them** — `-p all` (or `--auto-params`) enumerates every candidate the
+  capture carries, including each part of a `multipart/form-data` body.
 
 **The scheme trap.** A portless capture cannot record whether it was HTTPS, so
 RCEKit infers `https` when the `Host` is on `:443` and `http` otherwise — which
