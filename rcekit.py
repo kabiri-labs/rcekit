@@ -4788,12 +4788,17 @@ class EvalExpr(DetectionMethod):
         for name, carrier in carriers.items():
             if not isinstance(carrier, dict) or not carrier.get("template"):
                 continue
-            # A template carrying no token renders the same constant for every
-            # probe, so it can never confirm: the operands would not be random
-            # to the run and the product would not be the target's work. Sending
-            # it would spend a request per context to learn nothing.
-            if not any(token in str(carrier["template"])
-                       for token in self._carrier_tokens()):
+            # A template that is not parameterised by *both* operands can
+            # never confirm. With no token at all it renders the same constant
+            # every probe; with only one operand the target is never handed the
+            # other, so nothing it can compute is the product RCEKit is looking
+            # for. Either way the request is spent to learn nothing, and an
+            # unconfirmable probe still counts toward the coverage the run
+            # reports -- which is the failure worth avoiding, not the request.
+            template = str(carrier["template"])
+            left, right = self.CARRIER_OPERAND_TOKENS
+            if not (self.CARRIER_TOKEN in template
+                    or (left in template and right in template)):
                 continue
             if wanted:
                 engines = set(carrier.get("engines") or []) | {name}
@@ -6753,11 +6758,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--eval-engines", default=None, metavar="ENGINES",
                         help="(--methods eval) Comma-separated engine carriers to add to the "
                              "bare expression probes, or 'auto' (default) for all of them. "
-                             "Carriers exist only for engines that do not return a bare product "
-                             "from a bare expression — freemarker (groups digits: 2,070,761,401), "
-                             "velocity (${a*b} is a reference, not an expression) and thymeleaf "
-                             "(needs its inlining brackets). Every other engine is covered by the "
-                             "bare probes, sandboxed or not, so narrowing this saves little.")
+                             "Carriers exist only for engines a bare expression cannot "
+                             "confirm — freemarker (groups digits: 2,070,761,401), velocity "
+                             "(${a*b} is a reference, not an expression), thymeleaf (needs its "
+                             "inlining brackets), liquid (no * operator at all; multiplies with "
+                             "a filter) and django (no arithmetic by design; multiplies with a "
+                             "tag). Every other engine measured is covered by the bare probes, "
+                             "sandboxed or not, so narrowing this saves little.")
     parser.add_argument("--sink-shape", default=None, metavar="SHAPES",
                         help="(--methods) Which sink shapes the shell probes try, comma-separated: "
                              f"auto (default, the whole ladder) or any of {', '.join(SINK_SHAPE_RUNGS)}. "

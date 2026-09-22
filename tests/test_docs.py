@@ -689,7 +689,24 @@ class CLIDocumentationTestCase(unittest.TestCase):
             if declaration:
                 options.update(OPTION_RE.findall(declaration.group(1)))
         cls.cli_options = options - {"--help"}
+        # Newlines joined: argparse wraps help at word boundaries, so a name
+        # survives intact but may sit across two lines.
+        cls.help_text = " ".join(result.stdout.split())
         cls.reference_text = (DOCS_DIR / "reference.md").read_text(encoding="utf-8")
+
+    def test_the_eval_engines_help_names_every_carrier_the_corpus_ships(self):
+        """The help enumerated three engines by hand and two more were added.
+
+        An operator narrowing `--eval-engines` reads that list and nothing else,
+        so a stale one tells them an engine needs no carrier when it does --
+        and they cut the only probe that could have confirmed it. Every
+        hand-written list of this kind in this repository has gone stale; this
+        one is held to the corpus instead."""
+        carriers = rcekit.RCEKit().eval_carriers
+        self.assertTrue(carriers)
+        missing = sorted(n for n in carriers if n not in self.help_text)
+        self.assertFalse(
+            missing, f"--eval-engines help does not name {missing}")
 
     def test_help_output_was_parsed(self):
         # A guard on the test itself: if argparse ever changes its help layout,
