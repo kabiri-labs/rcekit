@@ -66,6 +66,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--separators` | Break-out separators for shell probes; `\n` = newline | `; `, `\| `, `\|\| `, `&& `, newline |
 | `--evade` | WAF posture: `none`, or `low` for minimal `${IFS}`-for-spaces | `none` |
 | `--probe-depth` | `full` (also the substitution-free and comment-terminated shapes) or `quick` | `full` |
+| `--confirm-depth` | Once a carrier confirms: `first` (stop that carrier) or `every` (map every shape it accepts) | `first` |
 | `--detect-json` | Also write the run to this path as JSON: overall verdict, counts, every probe | None |
 | `--sink-shape` | Sink shapes the shell probes try: `auto`, or any of `sep`, `raw`, `chain`, `newline`, `dq`, `sq`, `subshell` | `auto` |
 | `--sink-env` | Shell that runs the injected command: `auto`, `unix`, `windows`, `powershell` | `auto` |
@@ -489,12 +490,52 @@ probe against a query probe's control would compare two different responses and
 prove nothing. Use `--max-points` and `--max-payloads` to bound a run, and
 `--verify-delay` to pace it — the delay applies across the whole enumeration.
 
-Cheap methods run first per candidate. `reflected` and `eval` cost one response
-each; `time` sleeps and `oob` waits for a callback. Once a candidate has proven
-execution, the slow methods on *that* candidate are skipped — they would buy a
-second name for a finding already made. Candidates that stay clean still get
-every method. Single-point runs (`-p NAME`, or a `FUZZ` marker) are unchanged
-and still run every method.
+### Stopping once something is proven
+
+Two stops, and they answer different questions.
+
+**A method that would only rename a finding is skipped.** Cheap methods run
+first per candidate — `reflected` and `eval` cost one response each, `time`
+sleeps and `oob` waits for a callback — and once a candidate has proven
+execution, the slow ones are not paid for.
+
+Which methods those are comes from the tier each one declares, not from a list
+of names. `reflected`, `eval`, `file`, `write`, `oob` and `time` all answer *did
+this target execute my input* and differ only in how hard they look, so a second
+one is a second name for one finding. **`lookup` and `deser` answer something
+else** — a lookup sink and a deserialization sink, each with its own
+remediation — and are never skipped for this, however thoroughly execution is
+proven. They used to be, for sitting on the expensive side of a hand-written
+list, so a candidate that confirmed RCE was never asked whether it was also one
+of those.
+
+**A carrier that has confirmed stops there** (`--confirm-depth first`, the
+default). One carrier is one method in one environment and context. Every other
+carrier still runs in full, so a sink reachable only as `nodejs` is never missed
+because `unix` answered first — the stop is per carrier and never per candidate.
+
+This is not a saving. Measured against an executing target, one candidate spent
+115 of its 120 probes after the first confirmation and printed 32 confirmations,
+29 of them duplicates inside a single carrier. Those probes were not idle: they
+were spent instead of reaching carriers never examined at all. At the same
+budget the run went from 4 carriers examined to 23, and from 4 environments
+reached to 9.
+
+Pass `--confirm-depth every` to map every shape a sink accepts, which is what
+writing a proof of concept by hand needs. Either way the run reports how many
+shapes it held back and which carriers stopped.
+
+`--max-payloads` is spent **per question**, not per wave and not per candidate.
+Per wave it quietly doubled — a run capped at 5 sent 10 probes to every
+candidate that did not confirm. Per candidate it starves the different
+question: the cheap methods eat the whole allowance and `deser` never runs. So
+every method asking about execution shares one allowance, each different
+property gets its own, and the cost line says how many questions are being
+asked.
+
+Single-point runs (`-p NAME`, or a `FUZZ` marker) get the per-carrier stop too;
+the method skip is enumeration-only, because there is no next candidate to
+spend the budget on.
 
 ### Expression-engine carriers
 

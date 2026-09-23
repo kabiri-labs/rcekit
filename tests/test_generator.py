@@ -5394,6 +5394,173 @@ class EvalCarrierCorpusTestCase(unittest.TestCase):
         self.assertTrue(data["eval_carrier_survey"].get("out_of_reach"))
 
 
+class DetectionQuestionTestCase(unittest.TestCase):
+    """Two methods that answer the same question are not two findings.
+
+    `reflected`, `eval`, `file`, `write`, `oob` and `time` all ask *did this
+    target execute my input* and differ only in how hard they look. `lookup`
+    and `deser` ask something else, and their answers stand whatever execution
+    turned out to be.
+
+    The driver used to decide this from a set of method names on the
+    expensive side of a cost split, so `lookup` and `deser` were skipped on a
+    candidate that had confirmed -- as though a lookup sink were a second name
+    for the RCE rather than a separate property with its own remediation.
+    """
+
+    def test_every_method_is_sorted_by_the_tier_it_declares(self):
+        for name, cls in rcekit.DETECTION_METHODS.items():
+            expected = "execution" if cls.tier in rcekit.EXECUTION_TIERS else cls.tier
+            self.assertEqual(rcekit.detection_question(name), expected, name)
+
+    def test_the_sink_methods_ask_something_execution_cannot_answer(self):
+        # The counterexample the split exists for.
+        self.assertNotEqual(rcekit.detection_question("lookup"), "execution")
+        self.assertNotEqual(rcekit.detection_question("deser"), "execution")
+        self.assertEqual(rcekit.detection_question("time"), "execution")
+        self.assertEqual(rcekit.detection_question("oob"), "execution")
+
+    def test_the_cheap_set_is_read_from_the_classes(self):
+        """Every hand-written list naming methods in this repository has gone
+        stale, and this one had put `lookup` and `deser` where being skipped
+        cost findings rather than requests."""
+        self.assertEqual(
+            rcekit.CHEAP_DETECTION_METHODS,
+            {name for name, cls in rcekit.DETECTION_METHODS.items() if not cls.costly})
+        self.assertEqual(rcekit.CHEAP_DETECTION_METHODS, {"reflected", "eval"})
+
+    def test_a_costly_method_says_so_on_its_own_class(self):
+        for name in ("file", "write", "time", "oob", "lookup", "deser"):
+            self.assertTrue(rcekit.DETECTION_METHODS[name].costly, name)
+        for name in ("reflected", "eval"):
+            self.assertFalse(rcekit.DETECTION_METHODS[name].costly, name)
+
+
+class ConfirmDepthTestCase(unittest.TestCase):
+    """A carrier that has confirmed has nothing left to say.
+
+    One carrier is one (method, environment, context). Measured against a
+    target that executes: a candidate spent 115 of its 120 probes after the
+    first confirmation and printed 32 confirmations, 29 of which were
+    duplicates inside one carrier. Those probes were not merely wasted -- they
+    were spent instead of reaching carriers that were never examined at all.
+
+    The stop is per carrier and never per candidate. A candidate may confirm as
+    `unix` while a later `nodejs` carrier is the only thing a different target
+    would have shown; stopping the candidate would take that away, and a run
+    that stops looking reads exactly like a target with nothing left to find.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.records = [make_record(environment="unix", context="raw"),
+                        make_record(environment="nodejs", context="raw")]
+
+    @contextlib.contextmanager
+    def _target(self):
+        """The same executing sink the ReflectedMath test uses: /vuln runs the
+        injected string through a shell, /reflect echoes it without running
+        it."""
+        import http.server
+        import socketserver
+        import threading
+        import urllib.parse as up
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                parsed = up.urlparse(self.path)
+                cmd = up.parse_qs(parsed.query).get("cmd", [""])[0]
+                self.send_response(200)
+                self.end_headers()
+                if parsed.path == "/vuln":
+                    pipe = sh_popen("echo " + cmd + " 2>&1")
+                    out = pipe.read()
+                    pipe.close()
+                else:
+                    out = cmd
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield f"http://127.0.0.1:{server.server_address[1]}"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def _run(self, path="/vuln", confirm_depth=None):
+        config = {"confirm_depth": confirm_depth} if confirm_depth else {}
+        with self._target() as base:
+            return self.gen.run_detection(
+                list(self.records), url=f"{base}{path}?cmd=FUZZ", methods=["reflected"],
+                config=config, timeout=15)
+
+    def test_a_carrier_stops_at_its_first_confirmation(self):
+        results = self._run()
+        import collections
+        per_carrier = collections.Counter(
+            (r["method"], r["environment"], r["context"]) for r in results
+            if r["verdict"] == "confirmed")
+        self.assertTrue(per_carrier, "precondition: the target must confirm")
+        self.assertEqual(set(per_carrier.values()), {1},
+                         f"a carrier confirmed more than once: {per_carrier}")
+
+    def test_every_carrier_still_gets_its_own_chance(self):
+        # The distinction the whole change rests on: per carrier, never per
+        # candidate.
+        results = self._run()
+        confirmed = {r["environment"] for r in results if r["verdict"] == "confirmed"}
+        self.assertGreater(len(confirmed), 1,
+                           f"only one environment was examined: {confirmed}")
+
+    def test_the_run_says_how_many_shapes_it_held_back(self):
+        # A ladder that shrinks quietly is indistinguishable from a target with
+        # nothing left to find, which is why the other three tallies exist.
+        self._run()
+        self.assertGreater(self.gen.settled_probes, 0)
+        self.assertTrue(self.gen.settled_carriers)
+        self.assertTrue(any("reflected/unix/raw" == k for k in self.gen.settled_carriers),
+                        f"the carrier that stopped is not named: {self.gen.settled_carriers}")
+
+    def test_every_maps_every_shape_the_sink_accepts(self):
+        """The escape hatch, for an operator writing a proof of concept by hand.
+
+        Without it the default would be the only behaviour, and which
+        separators and quoting a sink accepts would stop being knowable."""
+        stopped = self._run()
+        gen_first = self.gen
+        self.gen = RCEKit()
+        exhaustive = self._run(confirm_depth="every")
+        self.assertGreater(len(exhaustive), len(stopped))
+        self.assertEqual(self.gen.settled_probes, 0)
+        self.assertGreater(gen_first.settled_probes, 0)
+
+    def test_nothing_is_held_back_on_a_target_that_never_confirms(self):
+        # The stop is triggered by a confirmation and by nothing else; a clean
+        # candidate must still get every shape.
+        self._run(path="/reflect")
+        self.assertEqual(self.gen.settled_probes, 0)
+        self.assertEqual(self.gen.settled_carriers, {})
+
+    def test_the_four_tallies_stay_apart(self):
+        """Four numbers because they say four different things.
+
+        A profile drop means the probe could not have reached the sink. A
+        safety hold means it could and was not sent. A reach note means it went
+        further than the tier asked. This one means it could have been sent and
+        there was nothing left for it to establish."""
+        self._run()
+        self.assertGreater(self.gen.settled_probes, 0)
+        self.assertEqual(self.gen.profile_dropped_probes, 0)
+        self.assertEqual(self.gen.safety_held_probes, 0)
+
+
 class InjectionPointEnumerationTestCase(unittest.TestCase):
     """Expanding one captured request into every candidate injection point.
 

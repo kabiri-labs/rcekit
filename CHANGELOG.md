@@ -144,6 +144,62 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.41.0] — 2026-09-23
+
+### Fixed
+
+- **A candidate that confirmed RCE was never asked whether it was also a
+  deserialization or lookup sink.** The enumeration driver split the methods
+  into a cheap wave and an expensive one and skipped the expensive wave once
+  execution was proven — reasonable for `time` and `oob`, which would only put
+  a second name on one finding, and wrong for `lookup` and `deser`, which
+  report *different properties* with their own remediation. They sat on the
+  expensive side of a hand-written set of names, so the answer was never asked
+  for and never reported.
+
+  The split now comes from the tier each method declares. Anything reporting
+  `confirmed` or `needs-review` is answering *did this target execute my
+  input*; anything else is a different question and is never skipped for an
+  answer to that one.
+
+- **`--max-payloads` is spent per question, not per wave and not per
+  candidate.** Per wave it quietly doubled: a run capped at 5 sent 10 probes to
+  every candidate that did not confirm, while the cost line printed before any
+  traffic said 5. Bounding the candidate instead starves the different
+  question — the cheap methods eat the whole allowance and `deser` never runs,
+  which is the same finding lost by another route. Every method asking about
+  execution now shares one allowance, each different property gets its own, and
+  the cost line names how many questions are being asked.
+
+### Changed
+
+- **A carrier that has confirmed stops there** (`--confirm-depth first`, the
+  new default). One carrier is one method in one environment and context, and
+  once it has confirmed every further shape of it can only say the same thing
+  again.
+
+  Measured against an executing target: one candidate spent 115 of its 120
+  probes after the first confirmation, and printed 32 confirmations of which 29
+  were duplicates inside a single carrier. Those probes were not idle — they
+  were spent instead of reaching carriers never examined at all. At the same
+  budget the run went from **4 carriers examined to 23**, and from **4
+  environments reached to 9**. This buys coverage rather than saving requests.
+
+  The stop is per carrier and **never** per candidate: a candidate may confirm
+  as `unix` while a later `nodejs` carrier is the only thing a different target
+  would have shown. `--confirm-depth every` maps every shape a sink accepts,
+  which is what writing a proof of concept by hand needs, and the run reports
+  how many shapes it held back and which carriers stopped — a fourth tally
+  beside the profile drops, the safety holds and the reach notes, because it
+  says a fourth thing: the probe could have been sent and had nothing left to
+  establish.
+
+- **A method declares what one of its probes costs.** `CHEAP_DETECTION_METHODS`
+  was a set literal; it is now derived from a `costly` attribute each class sets
+  for its own reason — a real sleep, a wait for a callback, a second fetch.
+  Every hand-written list naming methods in this repository has gone stale, and
+  this one had put `lookup` and `deser` where being skipped cost findings.
+
 ## [2.40.0] — 2026-09-22
 
 ### Added
@@ -1634,6 +1690,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.41.0]: https://github.com/kabiri-labs/rcekit/compare/v2.40.0...v2.41.0
 [2.40.0]: https://github.com/kabiri-labs/rcekit/compare/v2.39.0...v2.40.0
 [2.39.0]: https://github.com/kabiri-labs/rcekit/compare/v2.38.0...v2.39.0
 [2.38.0]: https://github.com/kabiri-labs/rcekit/compare/v2.37.0...v2.38.0
