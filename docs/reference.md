@@ -64,7 +64,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--oob-host` | (`oob`) host the **target** calls back to; required for `oob` | None |
 | `--time-base` | (`time`) base delay `N`; the regression fires `0/N/2N` | `2.0` |
 | `--separators` | Break-out separators for shell probes; `\n` = newline | `; `, `\| `, `\|\| `, `&& `, newline |
-| `--evade` | WAF posture: `none`, or `low` for minimal `${IFS}`-for-spaces | `none` |
+| `--evade` | How far a REFUSED probe may climb: `none`, `low` (`${IFS}`), `high` (also `ec$@ho`) | `high` |
 | `--probe-depth` | `full` (also the substitution-free and comment-terminated shapes) or `quick` | `full` |
 | `--confirm-depth` | Once a carrier confirms: `first` (stop that carrier) or `every` (map every shape it accepts) | `first` |
 | `--detect-json` | Also write the run to this path as JSON: overall verdict, counts, every probe | None |
@@ -331,6 +331,37 @@ level further in — so a refused probe gets its own verdict:
 [detect] Nothing was put in front of the sink, so this run says nothing about
          whether the target is vulnerable.
 ```
+
+### Climbing only where something was refused
+
+A refused probe is retried up the evasion rungs before anything is concluded
+from it — the filter answered, so the sink has not had its say yet. Only a
+refused one, which is the whole design:
+
+| | measured |
+|---|---|
+| a rung applied to **every** probe | broke 8 probe shapes the canonical form executes, improved none |
+| a rung applied to a **refused** probe | turned 1 confirmation into 5 against a whitespace filter |
+| an unfiltered target | zero retries, zero extra requests |
+
+So `--evade` is a **ceiling**, not a posture. Every probe goes out canonical;
+`low` removes whitespace (`${IFS}`), `high` also splits the command word
+(`ec$@ho`) for the other measured class of filter — the one matching command
+names — and `none` never retries. The run says how many retries it made and
+which rung got through, because extra traffic the operator did not ask for has
+to be visible.
+
+Cost is bounded by construction: at most one request per rung per refused
+probe. A shape whose command uses a redirect is never retried, because `${IFS}`
+around `>` yields an ambiguous redirect.
+
+**The substitution stops at a quote.** It used to not, and that was the whole
+of the 8 lost shapes: `awk 'BEGIN{print "RK" a+b "RK"}'` became
+`awk${IFS}'BEGIN{print${IFS}"RK"...`, where `${IFS}` is literal text rather
+than an expansion and awk answers with a syntax error. Double quotes are left
+alone from the other side — `${IFS}` *does* expand inside them, so substituting
+there would change the string the target computes rather than the spacing
+around it.
 
 **The signal is differential**, like everything else this tool decides: the
 payload-free control got through and the probe did not, so what was refused is
