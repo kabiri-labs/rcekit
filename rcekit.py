@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.41.0"
+__version__ = "2.42.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -2874,8 +2874,19 @@ class RCEKit:
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels)
                     verdict = meth.confirm(obs, probe)
+                    # Did the target hand the input back? Observed, not guessed,
+                    # and already computed on the confirmed path -- where it
+                    # becomes "target also reflects the payload verbatim". A
+                    # negative probe never looked, and it is the negative run
+                    # that has to say what it saw: input returned means a sink
+                    # that echoes without executing, input swallowed means it
+                    # went somewhere this response cannot show.
+                    reflected_verbatim = bool(probe.forbidden) and bool(
+                        meth._search_channels(probe.forbidden,
+                                              meth._channels_of(body, chans)))
                     result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
+                        "reflected_verbatim": reflected_verbatim,
                         "status": status, "payload": probe.payload,
                         "method": meth.name, "tier": meth.tier,
                         "environment": record.environment, "context": record.context,
@@ -5806,6 +5817,66 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
     return lines
 
 
+def second_order_advice(observe: Optional[Dict[str, Any]],
+                        results: List[Dict[str, Any]]) -> List[str]:
+    """What to try next when the execution may be happening somewhere else.
+
+    Execution often lands on one request and runs on another -- stored SSTI
+    rendered on a profile page, a payload written to a log a template engine
+    later renders, a queued job. The response a probe drew shows none of it, so
+    every probe reads `negative` however exploitable the target is.
+
+    Measured against a target that stores on one endpoint and renders through a
+    shell on another: `--methods time`, `oob`, `lookup` and `file` are all
+    `negative` there, because the execution does not happen on the request being
+    measured -- and those four were the entire list an operator was given.
+    `--observe-url` confirmed it on the first run and was named nowhere.
+
+    Unlike the blind-sink list this is not gated on which methods have run.
+    "The execution happens elsewhere" is a possibility no method rules out, so
+    the operator who has already tried the expensive ones is exactly the one
+    with nothing left to hear.
+
+    What the run *observed* about the input sharpens the sentence without
+    deciding it: both readings end at the same flag, so there is no guess here
+    that can turn out wrong. Input that comes back and does not execute is a
+    reflecting sink; input that comes back at all is not, and a swallowed input
+    is equally a blind sink or a stored one -- `ping <input> >/dev/null` returns
+    nothing either. Naming both possibilities is the honest answer; picking one
+    would be a heuristic."""
+    if observe is not None:
+        # The operator already named a channel; its own verdict stands, and the
+        # run reports separately when it never answered.
+        return []
+    # Three readings, because only two of them were measured. An aggregate
+    # method decides from a series and records no per-probe observation, so a
+    # run of `time` alone knows nothing about what came back -- and saying the
+    # input was swallowed on that evidence would be the guess this whole
+    # function avoids.
+    observed = [r["reflected_verbatim"] for r in results if "reflected_verbatim" in r]
+    if not observed:
+        seen = ("Execution may not be happening on the request being measured at "
+                "all. A stored payload rendered on another page, or a queued job, "
+                "executes somewhere this run never read.")
+    elif any(observed):
+        seen = ("The target returned your input verbatim and did not execute it. "
+                "If that value is also rendered somewhere else -- a profile page, "
+                "a log viewer, an export -- the execution would show there and not "
+                "here.")
+    else:
+        seen = ("The target accepted your input and returned none of it, so this "
+                "response cannot show what became of it. A stored payload rendered "
+                "on another page, or a queued job, executes somewhere this run "
+                "never read.")
+    return [
+        f"[detect] {seen} Name that endpoint and the same oracle applies to it:",
+        "[detect]   --observe-url URL                  (polled after the probes; "
+        "differenced against a snapshot taken before any probe was sent)",
+        "[detect]   --observe-request FILE             (same, when that page needs "
+        "a session)",
+    ]
+
+
 def partition_destructive(records: Iterator[PayloadRecord],
                           allow_destructive: bool) -> Tuple[List[PayloadRecord], int]:
     """Materialise ``records``, holding back the ones that alter or damage the
@@ -7850,6 +7921,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print("\n[detect] No execution confirmed. The target may be patched, or the probes "
                           "may not fit its sink/context (try --environments/--contexts).")
                     for line in blind_sink_advice(method_names, args):
+                        print(line)
+                    for line in second_order_advice(observe_request(detection_config),
+                                                    results):
                         print(line)
             return 0
         results = generator.run_verification(
