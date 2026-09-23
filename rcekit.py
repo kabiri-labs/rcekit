@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.42.0"
+__version__ = "2.43.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -460,6 +460,12 @@ class RCEKit:
         # "could not reach the sink" nor "the operator declined the risk".
         self.settled_probes = 0
         self.settled_carriers: Dict[str, int] = {}
+        # And a fifth, for probes a filter refused. Not a profile drop (they
+        # were sent), not a safety hold (nothing declined them), not a settled
+        # carrier (nothing was established) -- they arrived at something that
+        # was not the sink.
+        self.refused_probes = 0
+        self.refused_statuses: Dict[int, int] = {}
         self.setup_components()
 
     def setup_components(self):
@@ -2723,7 +2729,9 @@ class RCEKit:
         # One payload-free control for the reflection differential: the computed
         # value must be absent from every one of its channels for a confirmation
         # to hold.
-        _, control_body, control_channels, _ = self._fire_channels(
+        # The status is kept, not discarded: a probe refused where this got
+        # through is a payload a filter rejected, and that is not a negative.
+        control_status, control_body, control_channels, _ = self._fire_channels(
             f"rcekit-control-{self._generate_canary()}", url, method, data, headers,
             url_location, resolved_body_location, timeout)
 
@@ -2815,6 +2823,23 @@ class RCEKit:
                             return results
                         continue
                     verdict = meth.confirm_series(series)
+                    refused = [obs.status for _p, obs in series
+                               if payload_refused(obs.status, control_status)]
+                    if refused and len(refused) == len([1 for _p, o in series
+                                                        if o.status is not None]):
+                        # Every probe that arrived was refused, so the series
+                        # measured a filter rather than the target. An aggregate
+                        # method's honest answer to that ("no delay was
+                        # observed") reads as `negative`, which is the false
+                        # clean this verdict exists to stop.
+                        verdict = Verdict(
+                            "blocked",
+                            f"a filter refused every probe (HTTP {sorted(set(refused))[0]}) "
+                            "where the payload-free control got through -- the sink never "
+                            "saw one")
+                    for status in refused:
+                        self.refused_probes += 1
+                        self.refused_statuses[status] = self.refused_statuses.get(status, 0) + 1
                     probe = series[-1][0] if series else Probe(payload="", expected="")
                     series_result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
@@ -2874,6 +2899,17 @@ class RCEKit:
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels)
                     verdict = meth.confirm(obs, probe)
+                    if payload_refused(status, control_status):
+                        # Decided here rather than in a method's oracle: being
+                        # refused is a fact about delivery, not about what any
+                        # one method was looking for, and every method inherits
+                        # the right answer instead of the current one.
+                        verdict = Verdict(
+                            "blocked",
+                            f"a filter refused the payload (HTTP {status}) where the "
+                            "payload-free control got through -- the sink never saw it")
+                        self.refused_probes += 1
+                        self.refused_statuses[status] = self.refused_statuses.get(status, 0) + 1
                     result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
                         "status": status, "payload": probe.payload,
@@ -5673,6 +5709,28 @@ HIGH_RISK_CATEGORIES = {
 }
 
 
+def payload_refused(probe_status: Optional[int],
+                    control_status: Optional[int]) -> bool:
+    """Whether a filter refused the *payload*, rather than the request.
+
+    Differential, like everything else this tool decides: the payload-free
+    control got through and the probe did not, so what was refused is the
+    payload. An application that answers 403 to everything -- an endpoint
+    behind an auth wall, a path that does not exist for this session -- refuses
+    the control too, and is not mistaken for a WAF.
+
+    4xx only. A 5xx is as likely to be the payload *breaking* the application,
+    which means it reached something, and reading that as "blocked" would hide
+    the one response that says the sink is live.
+
+    No vendor list and no block-page fingerprints: those go stale, and this
+    tool has learned repeatedly that a hand-written list of names is a list
+    that drifts. A status the control did not get is the whole signal."""
+    if probe_status is None or control_status is None:
+        return False
+    return 400 <= probe_status < 500 and control_status < 400
+
+
 def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     """The one verdict that describes a whole detection run.
 
@@ -5685,7 +5743,10 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     errored on the way; a run where every probe failed to arrive tested nothing
     at all, and calling that ``negative`` would read as "not vulnerable".
     ``nothing-tested`` is its sibling: no probes were built, so there is not
-    even a delivery to speak of."""
+    even a delivery to speak of. ``blocked`` is the third of that family: the
+    probes were built and delivered, and a filter refused every one that
+    arrived, so the sink never saw a payload. A run where some probes got
+    through stays a real negative -- the sink saw those."""
     if not results:
         return "nothing-tested"
     verdicts = {result["verdict"] for result in results}
@@ -5703,6 +5764,13 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
         return "error"
     if "inconclusive" in verdicts:
         return "inconclusive"
+    if "blocked" in verdicts and verdicts <= {"blocked", "error"}:
+        # Every probe that arrived was refused, so nothing was ever put in front
+        # of the sink. `negative` claims the probes reached the target, and they
+        # reached a filter -- the same false clean `nothing-tested` exists to
+        # prevent, one level further in. A run where *some* probes got through
+        # is a real negative: the sink saw those and did nothing.
+        return "blocked"
     return "negative"
 
 
@@ -5881,6 +5949,41 @@ def second_order_advice(observe: Optional[Dict[str, Any]],
         "[detect]   --observe-request FILE             (same, when that page needs "
         "a session)",
     ]
+
+
+def refused_advice(refused: int, total: int, statuses: Dict[int, int],
+                   evade: str) -> List[str]:
+    """What to say when a filter answered instead of the target.
+
+    A run whose probes were refused has learned nothing about the sink, and the
+    ordinary "no execution confirmed, the target may be patched" reads as a
+    clean bill of health for a target that was never reached. So does the
+    blind-sink list, which names methods that will be refused in exactly the
+    same way, and the second-order line, which would say the target accepted an
+    input it in fact rejected.
+
+    Measured against a real command injection behind a filter that 403s a space
+    or a separator: every probe refused, and the run reported `negative=10`."""
+    if not refused:
+        return []
+    spelled = ", ".join(f"HTTP {code} x{count}"
+                        for code, count in sorted(statuses.items()))
+    every = refused >= total
+    lines = [
+        f"\n[detect] {refused} of {total} probe(s) WERE REFUSED BY A FILTER ({spelled}) "
+        "— the payload-free control got through and these did not, so what was "
+        "rejected is the payload and the sink never saw it."]
+    if every:
+        lines.append("[detect] Nothing was put in front of the sink, so this run says "
+                     "nothing about whether the target is vulnerable.")
+    if evade != "low":
+        lines.append("[detect]   --evade low                        (substitutes ${IFS} "
+                     "for spaces on Unix shell probes; deliberately minimal)")
+    lines.append("[detect]   --separators '&& ,%0a'             (a filter usually keys "
+                 "on particular separators; name ones it may not carry)")
+    lines.append("[detect]   --encodings ...                    (see --doctor for the "
+                 "corpus encodings, for a filter that inspects the raw value)")
+    return lines
 
 
 def partition_destructive(records: Iterator[PayloadRecord],
@@ -7923,7 +8026,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"\n[detect] {len(errored)} of {len(results)} probe(s) NEVER REACHED THE TARGET "
                           f"(a delivery error is not a negative): {errored[0]['detail']}")
                     print("[detect] check connectivity/auth; for a self-signed HTTPS cert add --insecure.")
-                if len(errored) < len(results):
+                refused_rows = [r for r in results if r["verdict"] == "blocked"]
+                if refused_rows:
+                    for line in refused_advice(len(refused_rows), len(results),
+                                               generator.refused_statuses, args.evade):
+                        print(line)
+                if len(errored) + len(refused_rows) < len(results):
+                    # Only for the probes that actually reached the sink. Saying
+                    # "the target may be patched" about a run a filter answered,
+                    # and then listing methods that will be refused the same
+                    # way, is advice pointing at the wrong thing entirely.
                     print("\n[detect] No execution confirmed. The target may be patched, or the probes "
                           "may not fit its sink/context (try --environments/--contexts).")
                     for line in blind_sink_advice(method_names, args):

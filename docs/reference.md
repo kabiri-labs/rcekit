@@ -308,6 +308,45 @@ boolean-only channel (its JS sandbox cannot reach a shell), so it needs a
 different oracle rather than this one; `mongo-express/CVE-2019-10758` is a plain
 JS `eval` sink that `--methods eval` already covers.
 
+### When a filter answers instead of the target
+
+A run whose payloads are refused has learned nothing about the sink. Measured
+against a real command injection sitting behind a filter that 403s a space or a
+separator, RCEKit used to report:
+
+```
+[detect] sent 10 probes: negative=10
+[detect] No execution confirmed. The target may be patched...
+```
+
+`negative` asserts that the probes **reached** the target. They reached a
+filter. That is the same false clean `nothing-tested` exists to prevent, one
+level further in — so a refused probe gets its own verdict:
+
+```
+[detect] sent 10 probes: blocked=10
+[detect] 10 of 10 probe(s) WERE REFUSED BY A FILTER (HTTP 403 x10) — the
+         payload-free control got through and these did not, so what was
+         rejected is the payload and the sink never saw it.
+[detect] Nothing was put in front of the sink, so this run says nothing about
+         whether the target is vulnerable.
+```
+
+**The signal is differential**, like everything else this tool decides: the
+payload-free control got through and the probe did not, so what was refused is
+the payload. An endpoint that answers 403 to everything — an auth wall, a path
+that does not exist for this session — refuses the control too and is not
+mistaken for a WAF.
+
+4xx only. A 5xx is as likely to be the payload *breaking* the application,
+which means it reached something, and reading that as blocked would hide the
+one response saying the sink is live. There is no vendor list and no block-page
+fingerprint: a status the control did not get is the whole signal.
+
+A run where **some** probes got through stays a real `negative` — the sink saw
+those and did nothing — and the refusals are still reported, because a ladder
+that shrinks quietly is indistinguishable from a target with nothing to find.
+
 ### Second-order execution: the observed channel
 
 Execution frequently happens on a **different request** than injection — stored
