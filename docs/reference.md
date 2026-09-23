@@ -316,6 +316,28 @@ later renders, a queued job run asynchronously. The engine diffs the response it
 injected into, so every one of those reads `negative` however exploitable the
 target is.
 
+**A run that finds nothing says so.** Against a target that stores on one
+endpoint and renders through a shell on another, every method is `negative` —
+including `time`, `oob`, `lookup` and `file`, because the execution does not
+happen on the request being measured. So a run with no confirmation names this
+flag, and unlike the blind-sink list it is not gated on which methods have
+already run: no method rules out *the execution happens elsewhere*, and the
+operator who has tried the expensive ones is the one with nothing else left to
+hear.
+
+The wording follows what the run **observed**, which is recorded rather than
+guessed:
+
+| What came back | What the run says |
+|---|---|
+| the input, verbatim | the target reflects and does not execute; if that value is rendered elsewhere, the execution would show there |
+| none of the input | the target accepted it and returned nothing, so this response cannot show what became of it |
+| not observed | only aggregate methods ran, so the run claims neither |
+
+A swallowed input is equally a blind sink or a stored one — `ping <input>
+>/dev/null` returns nothing either — so both possibilities are named and neither
+is picked.
+
 `--observe-url` names the endpoint where the execution surfaces:
 
 ```bash

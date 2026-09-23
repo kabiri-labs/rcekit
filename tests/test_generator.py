@@ -5683,6 +5683,101 @@ class ConfirmDepthTestCase(unittest.TestCase):
         self.assertEqual(self.gen.safety_held_probes, 0)
 
 
+class SecondOrderAdviceTestCase(unittest.TestCase):
+    """The one flag that works was the one flag never named.
+
+    Measured against a target that stores on one endpoint and renders through a
+    shell on another -- a real RCE. Every probe read `negative`, and the run
+    answered with four methods, all of which are also negative there because
+    the execution does not happen on the request being measured:
+
+        --methods time   -> negative=4
+        --observe-url    -> confirmed, first run
+
+    Worse, that list was gated on `selected <= {reflected, eval}`, so an
+    operator who had already tried the expensive methods -- exactly the one
+    with nothing left but second order -- was told only that the target might
+    be patched.
+    """
+
+    def _advice(self, results, observe=None):
+        return "\n".join(rcekit.second_order_advice(observe, results))
+
+    def test_it_names_the_flag_and_the_captured_request_form(self):
+        joined = self._advice([{"verdict": "negative", "reflected_verbatim": False}])
+        self.assertIn("--observe-url", joined)
+        self.assertIn("--observe-request", joined)
+
+    def test_it_is_not_gated_on_which_methods_have_run(self):
+        """The blind-sink list is; this is not, and that is the point.
+
+        No method rules out "the execution happens elsewhere", so the run that
+        has tried everything is the one that most needs to hear it."""
+        for results in ([{"verdict": "negative", "reflected_verbatim": False}],
+                        [{"verdict": "negative"}],
+                        [{"verdict": "negative", "reflected_verbatim": True}]):
+            with self.subTest(results=results):
+                self.assertTrue(self._advice(results))
+
+    def test_a_named_channel_is_not_suggested_again(self):
+        results = [{"verdict": "negative", "reflected_verbatim": False}]
+        self.assertEqual(self._advice(results, observe={"url": "http://t/p"}), "")
+
+    def test_the_wording_follows_what_the_run_observed(self):
+        echoed = self._advice([{"verdict": "negative", "reflected_verbatim": True}])
+        swallowed = self._advice([{"verdict": "negative", "reflected_verbatim": False}])
+        self.assertIn("returned your input verbatim", echoed)
+        self.assertIn("returned none of it", swallowed)
+        self.assertNotEqual(echoed, swallowed)
+
+    def test_an_unmeasured_run_claims_neither(self):
+        """An aggregate method decides from a series and records no per-probe
+        observation, so a run of `time` alone knows nothing about what came
+        back. Saying the input was swallowed on that evidence would be the
+        guess this advice exists to avoid."""
+        joined = self._advice([{"verdict": "negative"}])
+        self.assertNotIn("returned none of it", joined)
+        self.assertNotIn("returned your input verbatim", joined)
+        self.assertIn("may not be happening on the request being measured", joined)
+
+    def test_one_echoing_probe_is_enough_to_say_so(self):
+        joined = self._advice([{"verdict": "negative", "reflected_verbatim": False},
+                               {"verdict": "negative", "reflected_verbatim": True}])
+        self.assertIn("returned your input verbatim", joined)
+
+
+class ReflectedVerbatimRecordTestCase(unittest.TestCase):
+    """Whether the input came back is observed, not assumed.
+
+    It was already computed on the confirmed path, where it becomes "target
+    also reflects the payload verbatim". A negative probe never looked -- and
+    the negative run is the one that has to say what it saw.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _run(self, route):
+        with local_target(route) as base:
+            return self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=4, timeout=15)
+
+    def test_a_target_that_echoes_is_recorded_as_echoing(self):
+        # `params` is a flat dict: `[0]` here would echo the first character.
+        results = self._run(lambda m, p, params, h, b: (200, params.get("q", "")))
+        self.assertTrue(results)
+        self.assertTrue(any(r.get("reflected_verbatim") for r in results),
+                        "an echoing target was not recorded as echoing")
+
+    def test_a_target_that_swallows_the_input_is_recorded_as_swallowing(self):
+        results = self._run(lambda *a: (200, "<html>saved</html>"))
+        self.assertTrue(results)
+        self.assertTrue(all(r.get("reflected_verbatim") is False for r in results),
+                        "a target that returned nothing was recorded as echoing")
+
+
 class InjectionPointEnumerationTestCase(unittest.TestCase):
     """Expanding one captured request into every candidate injection point.
 

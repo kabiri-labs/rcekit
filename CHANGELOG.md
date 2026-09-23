@@ -144,6 +144,39 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.42.0] — 2026-09-23
+
+### Added
+
+- **A run that confirms nothing now names the second-order oracle.** Measured
+  against a target that stores on one endpoint and renders through a shell on
+  another — a real RCE — every probe read `negative`, and the run answered with
+  four methods that are all negative there too, because the execution does not
+  happen on the request being measured:
+
+  ```
+  --methods time   -> negative=4
+  --observe-url    -> confirmed, first run
+  ```
+
+  The one flag that works was named nowhere. It is named now, and **not gated
+  on which methods have run**: the blind-sink list is, so an operator who had
+  already tried the expensive methods — exactly the one with nothing left but
+  second order — was told only that the target might be patched.
+
+  The wording follows what the run observed rather than what it assumes. Input
+  returned verbatim means a sink that reflects without executing; input that
+  never came back means this response cannot show what became of it; and a run
+  of aggregate methods alone, which record no per-probe observation, claims
+  neither. A swallowed input is equally a blind sink or a stored one — `ping
+  <input> >/dev/null` returns nothing either — so both are named and neither is
+  picked.
+
+- **Whether the target returned the input is recorded on every probe.** It was
+  already computed on the confirmed path, where it becomes "target also
+  reflects the payload verbatim"; a negative probe never looked, and the
+  negative run is the one that has to say what it saw.
+
 ## [2.41.0] — 2026-09-23
 
 ### Fixed
@@ -1701,6 +1734,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.42.0]: https://github.com/kabiri-labs/rcekit/compare/v2.41.0...v2.42.0
 [2.41.0]: https://github.com/kabiri-labs/rcekit/compare/v2.40.0...v2.41.0
 [2.40.0]: https://github.com/kabiri-labs/rcekit/compare/v2.39.0...v2.40.0
 [2.39.0]: https://github.com/kabiri-labs/rcekit/compare/v2.38.0...v2.39.0
