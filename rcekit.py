@@ -162,8 +162,8 @@ SINK_SHAPE_CONTEXTS = SINK_SHAPE_CONTEXTS_BY_ENV["unix"]
 EVASION_RUNGS = ("none", "low", "high")
 
 
-def evade_spaces(body: str, replacement: str) -> str:
-    """Replace spaces *outside single quotes* with ``replacement``.
+def evade_spaces(body: str, replacement: str, opens_closed: bool = False) -> str:
+    """Replace spaces *outside quotes* with ``replacement``.
 
     Blind replacement was a shipped defect. A probe carrying a quoted program
     -- ``awk 'BEGIN{print "RK" a+b "RK"}'`` -- had the substitution pushed
@@ -174,9 +174,18 @@ def evade_spaces(body: str, replacement: str) -> str:
 
     Double quotes are left alone for the same reason from the other side:
     ``${IFS}`` *does* expand inside them, so substituting there would change the
-    string the target computes rather than the spacing around it."""
+    string the target computes rather than the spacing around it.
+
+    ``opens_closed`` says the payload begins by *closing* a quote the
+    application opened, which is what a break-out context is. ``'; echo ...``
+    continues outside quotes, not inside them, and reading that leading quote
+    as an opener left the whole body untouched -- the rung did nothing on
+    exactly the contexts a filter is most likely to sit in front of."""
     out: List[str] = []
     quote: Optional[str] = None
+    if opens_closed and body[:1] in "'\"":
+        out.append(body[0])
+        body = body[1:]
     for char in body:
         if quote:
             out.append(char)
@@ -191,7 +200,7 @@ def evade_spaces(body: str, replacement: str) -> str:
     return "".join(out)
 
 
-def evade_body(body: str, rung: str) -> str:
+def evade_body(body: str, rung: str, opens_closed: bool = False) -> str:
     """Apply one evasion rung to a Unix shell probe body.
 
     ``low`` removes whitespace, for a filter that keys on it. ``high`` also
@@ -204,13 +213,13 @@ def evade_body(body: str, rung: str) -> str:
         # split lands inside `${IFS}` and turns it into `${I$@FS}`, which is
         # neither an expansion nor a command. The canonical body is where a
         # command word is still recognisable.
-        body = split_command_word(body)
+        body = split_command_word(body, opens_closed=opens_closed)
     if rung in ("low", "high"):
-        body = evade_spaces(body, "${IFS}")
+        body = evade_spaces(body, "${IFS}", opens_closed=opens_closed)
     return body
 
 
-def split_command_word(body: str) -> str:
+def split_command_word(body: str, opens_closed: bool = False) -> str:
     """Break the command word with an expansion that vanishes: ``ec$@ho``.
 
     ``$@`` is empty in a shell with no positional parameters, so the word is
@@ -219,8 +228,11 @@ def split_command_word(body: str) -> str:
     whitespace rung leaves untouched.
 
     Only the command word, and only outside quotes. A quoted program is the
-    target's data, not a word the shell looks up."""
-    index = 0
+    target's data, not a word the shell looks up.
+
+    ``opens_closed`` skips a leading quote that closes the application's own,
+    rather than treating it as the start of the command word."""
+    index = 1 if opens_closed and body[:1] in "'\"" else 0
     while index < len(body) and body[index] in ";|& \t\n":
         index += 1
     start = index
@@ -2740,7 +2752,8 @@ class RCEKit:
         """Whether this run may send this probe shape. Counts nothing."""
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
-    def _escalate(self, meth: "DetectionMethod", probe: "Probe", url: str,
+    def _escalate(self, meth: "DetectionMethod", probe: "Probe",
+                  record: "PayloadRecord", url: str,
                   method: str, data: Optional[str], headers: Optional[List[str]],
                   url_location: str, body_location: str, timeout: float,
                   control_status: Optional[int]
@@ -2760,12 +2773,39 @@ class RCEKit:
         The transform is applied to the payload as sent rather than before the
         context wrapper, which is safe for these two rungs and only these two:
         neither ``${IFS}`` nor ``$@`` carries a character any context escapes,
-        so the wrapping cannot change underneath them."""
+        so the wrapping cannot change underneath them. What the wrapper does
+        change is the quote state the body starts in, which ``opens_closed``
+        carries.
+
+        Unix shell probes only. ``${IFS}`` and ``$@`` are POSIX, and a cmd.exe
+        or PowerShell probe rewritten with them loses its spaces -- so a
+        whitespace filter answers 200, the retry counts as a win, and a
+        vulnerable target reports `negative` instead of `blocked`. The rung
+        would be manufacturing the false clean the verdict beside it exists to
+        remove."""
         ceiling = self.config_evade
-        if ceiling == "none" or probe.carrier == "no-evade":
+        if ceiling == "none":
             return None
+        if ">" in probe.payload:
+            # A shape whose command redirects is left canonical. The build-time
+            # transform took an explicit `evade=False` for these, and that
+            # parameter stopped doing anything when the rung became a retry --
+            # so the guard is restored here, where the retry now happens.
+            #
+            # bash does run `echo X${IFS}>${IFS}/path` and writes the file;
+            # measured. The guard predates this change and names other shells,
+            # and a cross-shell measurement is not something this environment
+            # can produce, so it stays rather than being removed on one shell's
+            # say-so.
+            return None
+        if meth._sink_env(record) != "unix":
+            return None
+        # A break-out context opens with the quote it is closing, so the body
+        # after that quote is outside quotes rather than inside.
+        prefix = (self.contexts.get(record.context) or {}).get("prefix") or ""
+        opens_closed = prefix[-1:] in ("'", '"')
         for rung in EVASION_RUNGS[1:]:
-            climbed = evade_body(probe.payload, rung)
+            climbed = evade_body(probe.payload, rung, opens_closed=opens_closed)
             if climbed == probe.payload:
                 continue
             status, body, chans, elapsed = self._fire_channels(
@@ -2947,6 +2987,20 @@ class RCEKit:
                                 probe.payload, url, method, data, headers, url_location,
                                 resolved_body_location, req_timeout)
                             self.delivered_probes += 1
+                            # The same retry the per-probe path makes. `time`,
+                            # `oob`, `lookup` and `deser` live in this branch,
+                            # and leaving it out meant the documented ceiling
+                            # did nothing for four of the eight methods -- the
+                            # same branch, and the same omission, as the
+                            # refusal check itself a change ago.
+                            if payload_refused(status, control_status):
+                                climbed = self._escalate(
+                                    meth, probe, record, url, method, data, headers,
+                                    url_location, resolved_body_location, req_timeout,
+                                    control_status)
+                                if climbed is not None:
+                                    sent, status, body, chans, elapsed = climbed
+                                    probe = dataclass_replace(probe, payload=sent)
                             series.append((probe, Observation(
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, channels=chans,
@@ -3075,11 +3129,25 @@ class RCEKit:
                     # none.
                     if payload_refused(status, control_status):
                         climbed = self._escalate(
-                            meth, probe, url, method, data, headers, url_location,
-                            resolved_body_location, timeout, control_status)
+                            meth, probe, record, url, method, data, headers,
+                            url_location, resolved_body_location, timeout,
+                            control_status)
                         if climbed is not None:
                             sent, status, body, chans, elapsed = climbed
                             probe = dataclass_replace(probe, payload=sent)
+                            # Fetch the followup again. `file` writes its token
+                            # on the request that lands, and the first one was
+                            # refused -- so the body read before the retry is a
+                            # read of a file that did not exist yet, and
+                            # confirming against it reports a negative for a
+                            # write that succeeded.
+                            if probe.followup and probe.followup.get("url"):
+                                f_status, f_body, _ = self._fire(
+                                    "", probe.followup["url"], "GET", None,
+                                    self._followup_headers(
+                                        url, probe.followup["url"], headers),
+                                    "raw", "raw", timeout)
+                                followup_body = f_body if f_status is not None else None
                             obs = Observation(
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, followup_body=followup_body,
