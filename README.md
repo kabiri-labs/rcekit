@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.42.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.43.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -222,7 +222,7 @@ retest is the hard part, and it fails in two directions: a "possibly vulnerable"
 that turns out to be reflection, and a "not vulnerable" from a run that never
 actually tested anything.
 
-RCEKit answers with **eight verdicts that are never collapsed into each other**:
+RCEKit answers with **nine verdicts that are never collapsed into each other**:
 
 | Verdict | What it asserts |
 |---|---|
@@ -232,6 +232,7 @@ RCEKit answers with **eight verdicts that are never collapsed into each other**:
 | **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint. Worth your time, never worth the word "confirmed". |
 | **`inconclusive`** | The evidence appeared, but could not be attributed to execution — the payload-free control carried it too. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
+| **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
 | **`error`** | Nothing reached the target. |
 | **`nothing-tested`** | No probes were built at all. |
 
@@ -242,10 +243,11 @@ certain you are that the classpath is exploitable.
 
 ### The other half: a run that tested nothing is never clean
 
-The last two rows are the ones other tools do not have, and they matter more than
-they look. A scanner that could not reach the target, or built no probes because
-your flags excluded every one of them, has learned **nothing** about the target —
-and printing `negative` there is a lie that reads exactly like safety.
+The last three rows are the ones other tools do not have, and they matter more
+than they look. A scanner that could not reach the target, that built no probes
+because your flags excluded every one of them, or whose every payload was
+refused by a WAF, has learned **nothing** about the target — and printing
+`negative` there is a lie that reads exactly like safety.
 
 So `error` and `nothing-tested` are first-class verdicts, the run exits non-zero,
 and RCEKit says which of them happened and why:

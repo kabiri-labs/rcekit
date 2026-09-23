@@ -5816,6 +5816,182 @@ class ReflectedVerbatimRecordTestCase(unittest.TestCase):
                         "a target that returned nothing was recorded as echoing")
 
 
+class PayloadRefusedTestCase(unittest.TestCase):
+    """A probe a filter refused is not a probe that found nothing.
+
+    `negative` asserts that the probes reached the target. A 403 from a WAF
+    means they reached a filter, and the sink never saw a payload -- the same
+    false clean `nothing-tested` exists to prevent, one level further in.
+
+    Measured against a real command injection behind a filter that 403s a space
+    or a separator: every probe refused, and the run reported `negative=10`.
+    """
+
+    def test_the_signal_is_differential(self):
+        # The control got through and the probe did not, so what was refused is
+        # the payload.
+        self.assertTrue(rcekit.payload_refused(403, 200))
+        self.assertTrue(rcekit.payload_refused(406, 200))
+        self.assertTrue(rcekit.payload_refused(429, 302))
+
+    def test_an_endpoint_that_refuses_everything_is_not_a_filter(self):
+        """An auth wall, or a path that does not exist for this session.
+
+        Without the differential this is the false positive: every probe would
+        be reported as blocked on an endpoint that was simply never open."""
+        self.assertFalse(rcekit.payload_refused(403, 403))
+        self.assertFalse(rcekit.payload_refused(401, 401))
+
+    def test_a_server_error_is_not_a_refusal(self):
+        # A 5xx is as likely to be the payload *breaking* the application, which
+        # means it reached something. Reading that as blocked would hide the one
+        # response saying the sink is live.
+        self.assertFalse(rcekit.payload_refused(500, 200))
+        self.assertFalse(rcekit.payload_refused(502, 200))
+
+    def test_a_probe_that_never_arrived_is_not_a_refusal(self):
+        self.assertFalse(rcekit.payload_refused(None, 200))
+        self.assertFalse(rcekit.payload_refused(403, None))
+
+    def test_a_fully_refused_run_is_never_reported_negative(self):
+        self.assertEqual(
+            rcekit.overall_detection_verdict([{"verdict": "blocked"}] * 3), "blocked")
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "blocked"}, {"verdict": "error"}]), "blocked")
+
+    def test_a_run_that_got_some_probes_through_is_a_real_negative(self):
+        # The sink saw those and did nothing, which is what `negative` means.
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "blocked"}] * 9 + [{"verdict": "negative"}]), "negative")
+
+    def test_a_confirmation_still_outranks_everything(self):
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "blocked"}] * 5 + [{"verdict": "confirmed"}]), "confirmed")
+
+
+class FilteredTargetRunTestCase(unittest.TestCase):
+    """The whole path, against a target that is vulnerable behind a filter.
+
+    The unit tests above pin the predicate and the wording. This is the one
+    that would have caught the original defect: a real run, a real refusal, and
+    the verdict the operator actually reads.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _filtered(self, blocked_tokens):
+        """A route that refuses any payload carrying one of ``blocked_tokens``
+        and otherwise echoes, so the control gets through and probes do not."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if any(token in value for token in blocked_tokens):
+                return (403, "<html>403 Forbidden: blocked by security policy</html>")
+            return (200, f"ok: {value}")
+        return route
+
+    def test_a_filtered_run_reports_blocked_not_negative(self):
+        with local_target(self._filtered((" ", ";", "`", "|", "&"))) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=6, timeout=15)
+        self.assertTrue(results)
+        self.assertEqual(rcekit.overall_detection_verdict(results), "blocked",
+                         f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertEqual(self.gen.refused_probes, len(results))
+        self.assertIn(403, self.gen.refused_statuses)
+
+    def test_the_evidence_says_the_sink_never_saw_it(self):
+        with local_target(self._filtered((" ", ";", "`", "|", "&"))) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=3, timeout=15)
+        detail = results[0]["detail"]
+        self.assertIn("403", detail)
+        self.assertIn("the sink never saw it", detail)
+
+    def test_an_endpoint_that_refuses_everything_stays_negative(self):
+        """The control is refused too, so nothing says the payload was the
+        problem. Without the differential this whole run would read as blocked
+        on a target that was simply never open."""
+        with local_target(lambda *a: (403, "<html>403: authentication required</html>")) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=3, timeout=15)
+        self.assertTrue(results)
+        self.assertEqual(self.gen.refused_probes, 0)
+        self.assertNotIn("blocked", {r["verdict"] for r in results})
+
+    def test_a_target_that_lets_everything_through_records_no_refusal(self):
+        with local_target(lambda m, p, params, h, b: (200, f"ok: {params.get('q','')}")) as base:
+            self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=3, timeout=15)
+        self.assertEqual(self.gen.refused_probes, 0)
+        self.assertEqual(self.gen.refused_statuses, {})
+
+    def test_a_confirmation_through_the_filter_still_confirms(self):
+        """A filter that misses one shape must not turn the finding into a
+        refusal. The verdict is decided per probe, so the one that got through
+        keeps its own."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            # Only `;` is filtered, so the pipe, chain, newline and raw shapes
+            # all still arrive. A filter that blocks every shape is the case
+            # above; this is the one that misses.
+            if ";" in value:
+                return (403, "<html>403 Forbidden</html>")
+            return (200, f"ok: {value}")
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=8, timeout=15)
+        self.assertIn("blocked", {r["verdict"] for r in results})
+        self.assertNotEqual(rcekit.overall_detection_verdict(results), "blocked",
+                            "a run with probes that got through is not blocked")
+
+
+class RefusedAdviceTestCase(unittest.TestCase):
+    """What a filtered run is told, and what it is no longer told.
+
+    "The target may be patched" reads as a clean bill of health for a target
+    that was never reached. The blind-sink list names methods a filter refuses
+    the same way. The second-order line said the target *accepted* an input it
+    rejected with a 403. None of the three describes what happened.
+    """
+
+    def test_it_reports_the_count_and_the_statuses(self):
+        joined = "\n".join(rcekit.refused_advice(9, 10, {403: 9}, "none"))
+        self.assertIn("9 of 10", joined)
+        self.assertIn("HTTP 403 x9", joined)
+
+    def test_a_fully_refused_run_is_told_it_learned_nothing(self):
+        joined = "\n".join(rcekit.refused_advice(10, 10, {403: 10}, "none"))
+        self.assertIn("says nothing about whether the target is vulnerable", joined)
+
+    def test_a_partly_refused_run_is_not(self):
+        # Some probes reached the sink, so the run did learn something.
+        joined = "\n".join(rcekit.refused_advice(9, 10, {403: 9}, "none"))
+        self.assertNotIn("says nothing about whether the target is vulnerable", joined)
+
+    def test_it_names_the_flags_that_change_the_payload_shape(self):
+        joined = "\n".join(rcekit.refused_advice(4, 4, {403: 4}, "none"))
+        self.assertIn("--evade low", joined)
+        self.assertIn("--separators", joined)
+
+    def test_a_rung_already_in_use_is_not_suggested_again(self):
+        joined = "\n".join(rcekit.refused_advice(4, 4, {403: 4}, "low"))
+        self.assertNotIn("--evade low", joined)
+        self.assertIn("--separators", joined)
+
+    def test_nothing_refused_says_nothing(self):
+        self.assertEqual(rcekit.refused_advice(0, 10, {}, "none"), [])
+
+
 class InjectionPointEnumerationTestCase(unittest.TestCase):
     """Expanding one captured request into every candidate injection point.
 

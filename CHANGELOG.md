@@ -144,6 +144,48 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.43.0] — 2026-09-23
+
+### Added
+
+- **A ninth verdict: `blocked`.** A run whose payloads a filter refuses has
+  learned nothing about the sink, and it used to say otherwise. Measured
+  against a real command injection behind a filter that 403s a space or a
+  separator:
+
+  ```
+  before:  sent 10 probes: negative=10
+  after:   sent 10 probes: blocked=10
+  ```
+
+  `negative` asserts that the probes **reached** the target — the project's own
+  tier rule says so. They reached a filter. That is the same false clean
+  `nothing-tested` exists to prevent, one level further in.
+
+  **The signal is differential**, like everything else this tool decides: the
+  payload-free control got through and the probe did not, so what was refused
+  is the payload. An endpoint answering 403 to everything — an auth wall, a
+  path that does not exist for this session — refuses the control too and is
+  not mistaken for a filter. Verified against exactly that case.
+
+  4xx only. A 5xx is as likely to be the payload *breaking* the application,
+  which means it reached something, and reading that as blocked would hide the
+  one response saying the sink is live. No vendor list and no block-page
+  fingerprints: a status the control did not get is the whole signal.
+
+  A run where **some** probes got through stays a real `negative` — the sink
+  saw those — and the refusals are reported either way.
+
+### Fixed
+
+- **The advice on a filtered run pointed at the wrong thing entirely.** "The
+  target may be patched" reads as a clean bill of health for a target that was
+  never reached; the blind-sink list names methods a filter refuses in exactly
+  the same way; and the second-order line said the target *accepted* an input
+  it had in fact rejected with a 403. None of the three fires on a refused run
+  now. It is replaced by what was actually observed, with the flags that change
+  the payload's shape.
+
 ## [2.42.0] — 2026-09-23
 
 ### Added
@@ -1745,6 +1787,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.43.0]: https://github.com/kabiri-labs/rcekit/compare/v2.42.0...v2.43.0
 [2.42.0]: https://github.com/kabiri-labs/rcekit/compare/v2.41.0...v2.42.0
 [2.41.0]: https://github.com/kabiri-labs/rcekit/compare/v2.40.0...v2.41.0
 [2.40.0]: https://github.com/kabiri-labs/rcekit/compare/v2.39.0...v2.40.0
