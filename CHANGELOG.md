@@ -187,6 +187,29 @@ formats, or the template schema.
   whitespace substitution, because afterwards the split lands inside `${IFS}`
   and makes `${I$@FS}` — neither an expansion nor a command.
 
+  Four boundaries the retry has to respect, each of which was a way to turn a
+  vulnerable target into a `negative` — worse than the `blocked` the rung sits
+  beside, because `blocked` at least says the run learned nothing:
+
+  - **Unix shell probes only.** `${IFS}` and `$@` are POSIX. A cmd.exe probe
+    rewritten with them loses its spaces, so a whitespace filter answers 200
+    and the retry counts as a win while cmd.exe cannot run it.
+  - **A break-out context opens by *closing* a quote.** Reading that leading
+    quote as an opener left `'; echo …` untouched, so the rung did nothing on
+    exactly the contexts a filter is most likely to sit in front of.
+  - **A followup is read again after a retry that lands.** `file` writes its
+    token on the request that arrives, so a body read before the retry is a
+    read of a file that did not exist yet.
+  - **A redirect is never retried.** The build-time transform took an explicit
+    `evade=False` for these, and that parameter stopped doing anything when the
+    rung became a retry — a guard lost in the move, restored where the retry
+    now happens.
+
+  The aggregate methods escalate too. `time`, `oob`, `lookup` and `deser` take a
+  different branch, and leaving it out meant the documented ceiling did nothing
+  for four of the eight methods — the same branch, and the same omission, as the
+  refusal check one change earlier.
+
 ## [2.43.0] — 2026-09-23
 
 ### Added

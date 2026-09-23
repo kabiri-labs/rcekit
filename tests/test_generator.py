@@ -5969,6 +5969,114 @@ class EscalationTestCase(unittest.TestCase):
         self.assertEqual(built["none"], built["high"])
 
 
+class EscalationBoundaryTestCase(unittest.TestCase):
+    """Where a rung may be applied, and where applying it manufactures a lie.
+
+    Every one of these was a way for the retry to turn a vulnerable target into
+    a `negative` -- which is worse than the `blocked` it was added to replace,
+    because `blocked` at least says the run learned nothing.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+
+    def _refuse_whitespace(self, method, path, params, headers, body):
+        value = params.get("cmd", "")
+        if any(c in value for c in (" ", "\t", "\n")):
+            return (403, "<html>403 blocked</html>")
+        return (200, f"out: {value}")
+
+    def _run(self, record, methods=("reflected",), config=None):
+        with local_target(self._refuse_whitespace) as base:
+            return self.gen.run_detection(
+                [record], url=f"{base}/x?cmd=FUZZ", methods=list(methods),
+                config=dict(config or {}, evade="high"), max_payloads=8, timeout=15)
+
+    def test_a_windows_probe_is_never_rewritten_with_posix_syntax(self):
+        """`${IFS}` and `$@` mean nothing to cmd.exe.
+
+        The transformed payload loses its spaces, so a whitespace filter
+        answers 200 and the retry counts as a win -- while cmd.exe cannot run
+        it. The probe then reads `negative` instead of `blocked`, and a
+        vulnerable target looks clean."""
+        self._run(make_record(environment="windows", context="raw"))
+        self.assertEqual(self.gen.escalation_wins, {},
+                         "a POSIX rung was counted as getting a Windows probe through")
+
+    def test_a_unix_probe_still_escalates(self):
+        # The guard is about dialect, not about switching escalation off.
+        self._run(make_record(environment="unix", context="raw"))
+        self.assertGreater(self.gen.escalated_probes, 0)
+
+    def test_a_quote_breakout_context_is_transformed(self):
+        """The payload opens by *closing* the application\'s quote.
+
+        Reading that leading quote as an opener left the whole body untouched,
+        so the rung did nothing on exactly the contexts a filter is most likely
+        to sit in front of."""
+        for context in ("shell_single_quoted", "shell_double_quoted"):
+            with self.subTest(context=context):
+                wrapped = rcekit.evade_body(
+                    "'; echo RK$((1+2)) #" if "single" in context
+                    else '"; echo RK$((1+2)) #',
+                    "high", opens_closed=True)
+                self.assertIn("${IFS}", wrapped, wrapped)
+                self.assertIn("$@", wrapped, wrapped)
+
+    def test_a_quote_that_really_opens_is_still_respected(self):
+        # Without the flag the leading quote opens, which is what a quoted
+        # program inside a payload does.
+        untouched = rcekit.evade_body("awk 'BEGIN{print 1 + 2}'", "low")
+        self.assertIn("'BEGIN{print 1 + 2}'", untouched,
+                      "the quoted program lost its spaces")
+
+
+class RedirectIsNeverRetriedTestCase(unittest.TestCase):
+    """A shape whose command redirects stays canonical.
+
+    The build-time transform took an explicit `evade=False` for these, and that
+    parameter stopped doing anything the moment the rung became a retry -- a
+    guard lost in the move rather than removed on purpose. It is enforced where
+    the retry now happens.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+
+    def test_a_file_probe_is_not_retried(self):
+        import random as _random
+        record = make_record(environment="unix", context="raw")
+        method = rcekit.FileBased(self.gen, {"webroot": "/var/www",
+                                             "web_base_url": "http://t"})
+        probes = method.build_probes(record, _random.Random(1))
+        self.assertTrue(probes, "precondition: the method must build probes")
+        self.assertTrue(all(">" in p.payload for p in probes),
+                        "precondition: these are the redirect shapes")
+        self.gen.config_evade = "high"
+        self.gen.contexts = {}
+        for probe in probes[:2]:
+            with self.subTest(payload=probe.payload[:40]):
+                self.assertIsNone(self.gen._escalate(
+                    method, probe, record, "http://127.0.0.1:1/x", "GET", None,
+                    None, "query_value", "raw", 1.0, 200))
+        self.assertEqual(self.gen.escalated_probes, 0)
+
+    def test_the_followup_is_read_again_after_a_retry_that_lands(self):
+        """`file` writes its token on the request that arrives.
+
+        A followup fetched before the retry is a read of a file that did not
+        exist yet. The redirect guard above means `file` itself is never
+        retried, so this pins the rule for any method that carries a followup
+        without a redirect."""
+        source = (REPO_ROOT / "rcekit.py").read_text(encoding="utf-8")
+        marker = "Fetch the followup again."
+        self.assertIn(marker, source,
+                      "a retry that lands never re-reads the followup channel")
+        window = source[source.index(marker):]
+        self.assertLess(window.index("probe.followup"), window.index("obs = Observation("),
+                        "the followup is re-read after the observation is built")
+
+
 class PayloadRefusedTestCase(unittest.TestCase):
     """A probe a filter refused is not a probe that found nothing.
 
