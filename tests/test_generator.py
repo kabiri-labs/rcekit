@@ -5955,6 +5955,112 @@ class FilteredTargetRunTestCase(unittest.TestCase):
                             "a run with probes that got through is not blocked")
 
 
+class RefusalNeverUnmakesEvidenceTestCase(unittest.TestCase):
+    """A 4xx does not unmake what the run observed.
+
+    An application can execute the payload and then answer 400 with the output
+    in the body -- post-execution validation, an error page that echoes what it
+    choked on. The oracle has already proven execution from a value random to
+    that probe; replacing that with `blocked` turns demonstrated RCE into a
+    false negative, which is the one outcome worse than the false clean this
+    verdict was added to remove.
+
+    `negative` is the only verdict a refusal replaces, because it is the only
+    one a refusal contradicts: it claims the probes reached the target and
+    found nothing.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def test_a_confirmation_delivered_with_a_4xx_survives(self):
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if not value.startswith("rcekit-control"):
+                # Executes, then rejects: the computed value is in the body of a
+                # 400 the payload-free control never gets.
+                pipe = sh_popen(value + " 2>&1")
+                out = pipe.read()
+                pipe.close()
+                return (400, f"<html>could not process: {out}</html>")
+            return (200, "ok")
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=6, timeout=15)
+        verdicts = {r["verdict"] for r in results}
+        self.assertIn("confirmed", verdicts,
+                      f"a proven execution was overwritten: {verdicts}")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+
+    def test_the_refusal_is_still_counted_even_when_it_replaces_nothing(self):
+        # The run should still say a filter answered, whatever the verdict was.
+        self.test_a_confirmation_delivered_with_a_4xx_survives()
+        self.assertGreater(self.gen.refused_probes, 0)
+
+    def test_only_a_negative_is_replaced(self):
+        for status in ("confirmed", "needs-review", "lookup-sink",
+                       "deserialization-sink", "inconclusive", "error"):
+            with self.subTest(status=status):
+                self.assertIsNone(
+                    self.gen._refusal(403, 200, rcekit.Verdict(status, "evidence")),
+                    f"{status} rests on something observed and must not be replaced")
+        self.assertIsNotNone(
+            self.gen._refusal(403, 200, rcekit.Verdict("negative", "nothing found")))
+
+
+class CallbackMethodRefusalTestCase(unittest.TestCase):
+    """`oob`, `lookup` and `deser` decide per probe from a series.
+
+    That branch returned before refusal was looked at, so a run whose every
+    callback probe was refused reported `negative` for each of them -- because
+    no callback arrived. The exact false clean this verdict exists to remove,
+    on three of the eight methods, and the three that most look like a clean
+    target when they are wrong.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="java", context="raw")
+
+    def test_a_filtered_callback_run_is_blocked_not_negative(self):
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if not value.startswith("rcekit-control"):
+                return (403, "<html>403 Forbidden</html>")
+            return (200, "ok")
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["deser"],
+                config={"deser_formats": ["java"]}, max_payloads=4, timeout=15)
+        self.assertTrue(results, "precondition: the method must build probes")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "blocked",
+                         f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertGreater(self.gen.refused_probes, 0)
+
+    def test_the_requests_are_counted_not_the_rows(self):
+        """An aggregate method fires a ladder and reports few rows, so a tally
+        drawn from rows and one drawn from requests describe the same run with
+        different arithmetic."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if not value.startswith("rcekit-control"):
+                return (403, "<html>403</html>")
+            return (200, "ok")
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["deser"],
+                config={"deser_formats": ["java"]}, max_payloads=4, timeout=15)
+        self.assertEqual(self.gen.refused_probes,
+                         sum(self.gen.refused_statuses.values()))
+        self.assertGreaterEqual(self.gen.delivered_probes, self.gen.refused_probes)
+        self.assertGreaterEqual(self.gen.delivered_probes, len(results))
+
+
 class RefusedAdviceTestCase(unittest.TestCase):
     """What a filtered run is told, and what it is no longer told.
 
@@ -5970,13 +6076,21 @@ class RefusedAdviceTestCase(unittest.TestCase):
         self.assertIn("HTTP 403 x9", joined)
 
     def test_a_fully_refused_run_is_told_it_learned_nothing(self):
-        joined = "\n".join(rcekit.refused_advice(10, 10, {403: 10}, "none"))
+        joined = "\n".join(rcekit.refused_advice(10, 10, {403: 10}, "none", every=True))
         self.assertIn("says nothing about whether the target is vulnerable", joined)
 
     def test_a_partly_refused_run_is_not(self):
         # Some probes reached the sink, so the run did learn something.
-        joined = "\n".join(rcekit.refused_advice(9, 10, {403: 9}, "none"))
+        joined = "\n".join(rcekit.refused_advice(9, 10, {403: 9}, "none", every=False))
         self.assertNotIn("says nothing about whether the target is vulnerable", joined)
+
+    def test_whether_nothing_reached_the_sink_is_the_verdict_not_a_ratio(self):
+        """An aggregate method fires a whole ladder and reports one row, so a
+        ratio of refusals to rows says nothing about whether anything got
+        through. The run's own verdict is where that is decided."""
+        joined = "\n".join(rcekit.refused_advice(5, 5, {403: 5}, "none", every=False))
+        self.assertNotIn("says nothing about whether the target is vulnerable", joined,
+                         "a ratio was used in place of the run's verdict")
 
     def test_it_names_the_flags_that_change_the_payload_shape(self):
         joined = "\n".join(rcekit.refused_advice(4, 4, {403: 4}, "none"))

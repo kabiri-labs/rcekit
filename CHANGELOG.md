@@ -176,6 +176,23 @@ formats, or the template schema.
   A run where **some** probes got through stays a real `negative` — the sink
   saw those — and the refusals are reported either way.
 
+  **A refusal never unmakes evidence.** Only a `negative` is replaced, because
+  it is the only verdict a refusal contradicts. An application can execute the
+  payload and then answer 400 with the output in its body, and the oracle has
+  already proven execution from a value random to that probe; overwriting that
+  would turn demonstrated RCE into a false negative, which is worse than the
+  false clean this verdict removes.
+
+  **Every method is covered, including the three that decide per probe from a
+  series.** `oob`, `lookup` and `deser` take a different branch, which returned
+  before refusal was considered — so a callback run whose every probe was
+  refused reported `negative` for each of them, because no callback arrived.
+
+  Refusals are counted in **requests**, like the status tally beside them: an
+  aggregate method fires a whole ladder and reports one row, so counting rows
+  described the same run with different arithmetic and hid a partly filtered
+  series entirely.
+
 ### Fixed
 
 - **The advice on a filtered run pointed at the wrong thing entirely.** "The

@@ -466,6 +466,11 @@ class RCEKit:
         # was not the sink.
         self.refused_probes = 0
         self.refused_statuses: Dict[int, int] = {}
+        # Requests that actually went out, which is not len(results): an
+        # aggregate method fires a whole ladder and reports one row, so a
+        # refusal count drawn from rows and a status tally drawn from requests
+        # describe the same run with different arithmetic.
+        self.delivered_probes = 0
         self.setup_components()
 
     def setup_components(self):
@@ -2650,6 +2655,36 @@ class RCEKit:
         """Whether this run may send this probe shape. Counts nothing."""
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
+    def _refusal(self, status: Optional[int], control_status: Optional[int],
+                 verdict: "Verdict", every: bool = False) -> Optional["Verdict"]:
+        """The `blocked` verdict for a refused probe, or None to keep what the
+        method decided.
+
+        Only a `negative` is replaced. Every other verdict rests on something
+        the run *observed* -- a computed value, a callback, a parser
+        fingerprint -- and a 4xx does not unmake it: an application that
+        executes the payload and then answers 400 with the output in the body
+        has still executed it. Overwriting that would turn demonstrated RCE
+        into a false negative, which is the one outcome worse than the false
+        clean this verdict exists to remove.
+
+        `negative` is exactly the claim a refusal contradicts: it says the
+        probes reached the target and found nothing, and they reached a
+        filter."""
+        if not payload_refused(status, control_status):
+            return None
+        self.refused_probes += 1
+        self.refused_statuses[status] = self.refused_statuses.get(status, 0) + 1
+        if verdict.status != "negative":
+            return None
+        if every:
+            return Verdict("blocked",
+                           f"a filter refused every probe (HTTP {status}) where the "
+                           "payload-free control got through -- the sink never saw one")
+        return Verdict("blocked",
+                       f"a filter refused the payload (HTTP {status}) where the "
+                       "payload-free control got through -- the sink never saw it")
+
     def _note_reach(self, meth: "DetectionMethod", probe: "Probe") -> None:
         """Record a probe that reaches past the run's tier and goes anyway."""
         rung = probe.reaches_past
@@ -2785,6 +2820,7 @@ class RCEKit:
                             status, body, chans, elapsed = self._fire_channels(
                                 probe.payload, url, method, data, headers, url_location,
                                 resolved_body_location, req_timeout)
+                            self.delivered_probes += 1
                             series.append((probe, Observation(
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, channels=chans,
@@ -2811,7 +2847,18 @@ class RCEKit:
                         continue
                     per_probe = meth.confirm_each(series)
                     if per_probe is not None:
+                        # `oob`, `lookup` and `deser` decide per probe from a
+                        # series, and this branch used to return before refusal
+                        # was looked at -- so a run whose every callback probe
+                        # was refused reported `negative` for each of them,
+                        # because no callback arrived. The exact false clean
+                        # this verdict exists to remove, on three of the eight
+                        # methods.
+                        statuses = {id(p): o.status for p, o in series}
                         for probe, verdict in per_probe:
+                            refusal = self._refusal(statuses.get(id(probe)),
+                                                    control_status, verdict)
+                            verdict = refusal or verdict
                             results.append({
                                 "verdict": verdict.status, "detail": verdict.evidence,
                                 "status": None, "payload": probe.payload,
@@ -2823,23 +2870,18 @@ class RCEKit:
                             return results
                         continue
                     verdict = meth.confirm_series(series)
-                    refused = [obs.status for _p, obs in series
-                               if payload_refused(obs.status, control_status)]
-                    if refused and len(refused) == len([1 for _p, o in series
-                                                        if o.status is not None]):
-                        # Every probe that arrived was refused, so the series
-                        # measured a filter rather than the target. An aggregate
-                        # method's honest answer to that ("no delay was
-                        # observed") reads as `negative`, which is the false
-                        # clean this verdict exists to stop.
-                        verdict = Verdict(
-                            "blocked",
-                            f"a filter refused every probe (HTTP {sorted(set(refused))[0]}) "
-                            "where the payload-free control got through -- the sink never "
-                            "saw one")
-                    for status in refused:
-                        self.refused_probes += 1
-                        self.refused_statuses[status] = self.refused_statuses.get(status, 0) + 1
+                    # An aggregate method decides once for the whole series, so
+                    # the series is `blocked` only when every probe that arrived
+                    # was refused. Its honest answer to a filtered ladder ("no
+                    # delay was observed") otherwise reads as `negative`.
+                    arrived = [o.status for _p, o in series if o.status is not None]
+                    refused = [s for s in arrived if payload_refused(s, control_status)]
+                    every = bool(refused) and len(refused) == len(arrived)
+                    for index, status in enumerate(refused):
+                        replacement = self._refusal(status, control_status, verdict,
+                                                    every=every)
+                        if replacement is not None and index == 0:
+                            verdict = replacement
                     probe = series[-1][0] if series else Probe(payload="", expected="")
                     series_result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
@@ -2885,6 +2927,7 @@ class RCEKit:
                     status, body, chans, elapsed = self._fire_channels(
                         probe.payload, url, method, data, headers, url_location,
                         resolved_body_location, timeout)
+                    self.delivered_probes += 1
                     # A followup fetch (file-based self-OOB): retrieve the file the
                     # probe asked the target to write. Its body is the confirmation
                     # channel, so a blocked/failed fetch stays unconfirmed.
@@ -2899,17 +2942,12 @@ class RCEKit:
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels)
                     verdict = meth.confirm(obs, probe)
-                    if payload_refused(status, control_status):
-                        # Decided here rather than in a method's oracle: being
-                        # refused is a fact about delivery, not about what any
-                        # one method was looking for, and every method inherits
-                        # the right answer instead of the current one.
-                        verdict = Verdict(
-                            "blocked",
-                            f"a filter refused the payload (HTTP {status}) where the "
-                            "payload-free control got through -- the sink never saw it")
-                        self.refused_probes += 1
-                        self.refused_statuses[status] = self.refused_statuses.get(status, 0) + 1
+                    # Decided here rather than in a method's oracle: being
+                    # refused is a fact about delivery, not about what any one
+                    # method was looking for, so every method inherits the right
+                    # answer instead of the current one.
+                    refusal = self._refusal(status, control_status, verdict)
+                    verdict = refusal or verdict
                     result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
                         "status": status, "payload": probe.payload,
@@ -5952,7 +5990,7 @@ def second_order_advice(observe: Optional[Dict[str, Any]],
 
 
 def refused_advice(refused: int, total: int, statuses: Dict[int, int],
-                   evade: str) -> List[str]:
+                   evade: str, every: bool = False) -> List[str]:
     """What to say when a filter answered instead of the target.
 
     A run whose probes were refused has learned nothing about the sink, and the
@@ -5963,12 +6001,18 @@ def refused_advice(refused: int, total: int, statuses: Dict[int, int],
     input it in fact rejected.
 
     Measured against a real command injection behind a filter that 403s a space
-    or a separator: every probe refused, and the run reported `negative=10`."""
+    or a separator: every probe refused, and the run reported `negative=10`.
+
+    ``refused`` and ``total`` are counted in *requests*, matching the status
+    tally: an aggregate method fires a whole ladder and reports one row, so
+    counting rows here described the same run with different arithmetic and
+    hid a partly filtered series entirely. ``every`` comes from the run's
+    verdict rather than from a ratio, because that is where "nothing reached
+    the sink" is actually decided."""
     if not refused:
         return []
     spelled = ", ".join(f"HTTP {code} x{count}"
                         for code, count in sorted(statuses.items()))
-    every = refused >= total
     lines = [
         f"\n[detect] {refused} of {total} probe(s) WERE REFUSED BY A FILTER ({spelled}) "
         "— the payload-free control got through and these did not, so what was "
@@ -8027,9 +8071,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                           f"(a delivery error is not a negative): {errored[0]['detail']}")
                     print("[detect] check connectivity/auth; for a self-signed HTTPS cert add --insecure.")
                 refused_rows = [r for r in results if r["verdict"] == "blocked"]
-                if refused_rows:
-                    for line in refused_advice(len(refused_rows), len(results),
-                                               generator.refused_statuses, args.evade):
+                if generator.refused_probes:
+                    # Counted in requests, like the status tally beside it. An
+                    # aggregate method fires a ladder and reports one row, so a
+                    # partly filtered `time` series shows no `blocked` row at
+                    # all -- and drawing the notice from rows hid every refusal
+                    # it made.
+                    for line in refused_advice(
+                            generator.refused_probes, generator.delivered_probes,
+                            generator.refused_statuses, args.evade,
+                            every=overall_detection_verdict(results) == "blocked"):
                         print(line)
                 if len(errored) + len(refused_rows) < len(results):
                     # Only for the probes that actually reached the sink. Saying
