@@ -192,11 +192,17 @@ formats, or the template schema.
     degrades part-way through a run splits an ordered true-then-false series
     perfectly: at the worst point of a swept degradation, 100 false findings out
     of 100.
-  - **An anchor before and after the series.** Shuffling alone still left 2 in
-    100, which is just the chance a shuffle lands separable. Re-measuring the
-    channel afterwards caught it 100 times in 100, because a target that moved
-    during the series cannot answer the closing anchor the way it answered the
-    opening one.
+  - **An anchor before and after the series, each a different true predicate.**
+    Shuffling alone still left 2 in 100, which is just the chance a shuffle
+    lands separable. Re-measuring the channel afterwards caught it 100 times in
+    100, because a target that moved during the series cannot answer the
+    closing anchor the way it answered the opening one. Sending *one* anchor
+    payload three times does not merely weaken that: a cache keyed on the query
+    string answers the repeats from its store, so the closing anchor agrees
+    with the opening one whatever the target did in between. Measured against
+    an input-blind target that degrades mid-series, identical anchors caught it
+    in 36 of 39 runs live and in 0 of 39 behind a cache. Every probe payload is
+    unique, so nothing else in the series is replayable.
 
   With every guard on, a genuinely evaluating target still read as a
   differential in 100 runs of 100.

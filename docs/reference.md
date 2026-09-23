@@ -354,7 +354,7 @@ a measured false-finding rate rather than a precaution:
 | Compare response **structure**, not the body or its length | A reflected payload changes the text between tags, and the text between tags is what the signature throws away | A length-based signature claimed a differential in 13 of 25 runs against a reflect-only target; comparing raw bodies was unusable outright, reading `unstable` in 25 of 25 runs against a target that *was* vulnerable |
 | Several **independently randomised** true/false pairs | A response that varies on its own | One pair claimed a differential in 46 of 200 runs against a noisy target; two claimed none in 200 |
 | **Randomised firing order** | A target that never reads the payload but degrades part-way through the run — a rate limiter, a filling log | An ordered true-then-false series claimed a differential in 100 runs of 100 |
-| An **anchor before and after** the series | The same, structurally rather than probabilistically | Shuffling alone still left 2 in 100, which is just the chance a shuffle lands separable |
+| An **anchor before and after** the series, each a *different* true predicate | The same, structurally rather than probabilistically | Shuffling alone still left 2 in 100, which is just the chance a shuffle lands separable. Repeating one anchor payload instead of varying it is worse than weakening the guard — a cache keyed on the query string replays the opening answer, and the check measures the cache: 36 catches in 39 runs live, **0 in 39** behind a cache |
 
 With every guard on, a genuinely evaluating target still read as a differential
 in 100 runs of 100 — the guards cost nothing they were not meant to cost.

@@ -5716,7 +5716,10 @@ class BooleanDifferential(DetectionMethod):
       just the chance a shuffle is still separable. Re-measuring the channel
       after the series caught it in 100 runs of 100, because a target that
       moved during the series cannot answer the closing anchor the way it
-      answered the opening one. With every guard on, a genuinely evaluating
+      answered the opening one -- provided the closing anchor is a *different*
+      predicate, since a cache keyed on the query string would otherwise replay
+      the opening answer and the check would measure the cache. With every
+      guard on, a genuinely evaluating
       target still read as a differential in 100 runs of 100 -- the guards cost
       nothing they were not meant to cost.
     """
@@ -5813,7 +5816,6 @@ class BooleanDifferential(DetectionMethod):
             return []
         self._contexts_done.add(record.context)
         pairs = self._pairs()
-        wrapped_anchor = self._wrap_context(record, self._predicate(rng, True))
 
         def probe(payload: str, phase: str, carrier: Optional[str] = None,
                   safety: Optional[str] = None) -> Probe:
@@ -5836,8 +5838,21 @@ class BooleanDifferential(DetectionMethod):
         # Two anchors before and one after. The opening pair says whether the
         # channel is steady enough to carry one bit at all; the closing one
         # says whether it stayed that way while the series was fired.
-        opening = [probe(wrapped_anchor, "anchor-open") for _ in range(2)]
-        return opening + body + [probe(wrapped_anchor, "anchor-close")]
+        #
+        # Three *different* true predicates, not one sent three times. A cache
+        # keyed on the query string answers a repeated payload from its store,
+        # so identical anchors are one live request and two replays of it --
+        # and the closing anchor then agrees with the opening one whatever the
+        # target did in between. Measured against an input-blind target that
+        # degrades mid-series, identical anchors caught it in 36 of 39 runs
+        # live and in 0 of 39 behind a cache. Distinct payloads are each a live
+        # request, so the check measures the target rather than the cache; they
+        # are all true, so on a sink that evaluates them they carry the same
+        # shape exactly as one repeated probe would.
+        anchors = [self._wrap_context(record, self._predicate(rng, True))
+                   for _ in range(3)]
+        opening = [probe(payload, "anchor-open") for payload in anchors[:2]]
+        return opening + body + [probe(anchors[2], "anchor-close")]
 
     def confirm_series(self, series: "List[Tuple[Probe, Observation]]") -> Verdict:
         shapes = [(probe, response_shape(obs.status, obs.body))
@@ -5851,8 +5866,8 @@ class BooleanDifferential(DetectionMethod):
         # of them, and "the target is clean" is not what that means.
         if len(opening) < 2 or len(set(opening)) != 1:
             return Verdict("inconclusive",
-                           "the same probe drew two different response shapes, so this "
-                           "channel cannot carry a one-bit answer")
+                           "two predicates that are both true drew different response "
+                           "shapes, so this channel cannot carry a one-bit answer")
         if not closing or set(closing) != set(opening):
             return Verdict("inconclusive",
                            "the response shape moved while the series was being fired, so a "
