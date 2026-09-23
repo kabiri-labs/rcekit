@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.40.0"
+__version__ = "2.41.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -153,10 +153,29 @@ SINK_SHAPE_CONTEXTS_BY_ENV = {
 SINK_SHAPE_CONTEXTS = SINK_SHAPE_CONTEXTS_BY_ENV["unix"]
 
 
-# Methods that cost one response per probe. The rest sleep (time) or wait for a
-# callback (oob) or need a second fetch (file), which is what makes them worth
-# skipping on a candidate that has already proven execution.
-CHEAP_DETECTION_METHODS = {"reflected", "eval"}
+# Tiers that are a name for *execution*: the thing a `confirmed` already
+# establishes, or a weaker claim about the same thing. A method reporting one
+# of these on a candidate that has already confirmed adds a second name for one
+# finding, and skipping it costs nothing.
+#
+# Any other tier is a different property with its own remediation -- a
+# deserialization sink, a lookup sink -- and has not been asked yet, however
+# thoroughly execution is proven. Deciding this from a list of method names is
+# how `lookup` and `deser` came to be skipped for being expensive, when what
+# they report was never the same question.
+EXECUTION_TIERS = {"confirmed", "needs-review"}
+
+
+def detection_question(name: str) -> str:
+    """Which question a method answers, so two that answer the same one are not
+    counted, budgeted or skipped as though they were separate.
+
+    ``reflected``, ``eval``, ``file``, ``write``, ``oob`` and ``time`` all ask
+    *did this target execute my input* and differ only in how hard they look.
+    ``lookup`` and ``deser`` ask something else entirely and their answers stand
+    whatever execution turned out to be."""
+    tier = DETECTION_METHODS[name].tier
+    return "execution" if tier in EXECUTION_TIERS else tier
 
 # Methods whose probes are shell commands, and so ride the sink-shape ladder.
 # `eval` and `write` are deliberately absent: their probes are template /
@@ -434,6 +453,13 @@ class RCEKit:
         # are disclosed.
         self.reach_noted_probes = 0
         self.reach_notes: Dict[str, int] = {}
+        # And apart once more from the shapes not sent because the carrier they
+        # belong to had already confirmed. A fourth number rather than a fourth
+        # meaning for one of the others: this says the probe *could* have been
+        # sent and there was nothing left for it to establish, which is neither
+        # "could not reach the sink" nor "the operator declined the risk".
+        self.settled_probes = 0
+        self.settled_carriers: Dict[str, int] = {}
         self.setup_components()
 
     def setup_components(self):
@@ -2686,6 +2712,10 @@ class RCEKit:
         """
         import time
         rng = rng or random.Random()
+        # `first` stops a carrier at its first confirmation; `every` maps every
+        # shape the sink accepts, which is what an operator writing a proof of
+        # concept by hand actually wants.
+        confirm_depth = (config or {}).get("confirm_depth") or "first"
         resolved_body_location = body_location or self._detect_body_location(data, headers)
         selected = [DETECTION_METHODS[name](self, config) for name in methods
                     if name in DETECTION_METHODS]
@@ -2805,7 +2835,25 @@ class RCEKit:
                     if max_payloads and len(results) >= max_payloads:
                         return results
                     continue
-                for probe in self._apply_target_profile(meth, meth.build_probes(record, rng)):
+                # One carrier is one (method, environment, context). Once it
+                # has confirmed, every further shape of the *same* carrier can
+                # only say the same thing again: the measured run that prompted
+                # this spent 115 of a point's 120 probes after the first
+                # confirmation, and printed 32 confirmations of which 29 were
+                # duplicates within one carrier.
+                #
+                # The stop is per carrier and never per point, which is the
+                # whole of it. A point may confirm as `unix` and be the only
+                # thing a later `nodejs` or `windows` carrier could have found;
+                # stopping the point would take that away, and a run that
+                # stops looking is indistinguishable from a target with
+                # nothing more to find.
+                carrier_settled = False
+                built_probes = self._apply_target_profile(meth, meth.build_probes(record, rng))
+                for probe in built_probes:
+                    if carrier_settled:
+                        self.settled_probes += 1
+                        continue
                     if probe.payload in seen:
                         continue
                     seen.add(probe.payload)
@@ -2836,6 +2884,10 @@ class RCEKit:
                     if probe.followup and probe.followup.get("cleanup"):
                         result["cleanup"] = probe.followup["cleanup"]
                     results.append(result)
+                    if verdict.status == "confirmed" and confirm_depth == "first":
+                        carrier_settled = True
+                        label = f"{meth.name}/{record.environment}/{record.context}"
+                        self.settled_carriers[label] = self.settled_carriers.get(label, 0) + 1
                     # Read the observed channel now, before the next probe.
                     # Batch-then-poll alone is only correct for a channel that
                     # *accumulates* (a log, a comment list): where the store
@@ -3530,6 +3582,14 @@ class DetectionMethod:
     # works today, and when the configuration is missing the run has something
     # more useful to say than which tier to raise.
     gated_by_config = False
+    # Whether one probe of this method costs more than a single response: a
+    # real sleep, a wait for a callback, or a second fetch to read the result
+    # back. The enumeration driver runs the cheap methods first for that
+    # reason, and asks the class rather than consulting a list of names --
+    # every hand-written list naming methods in this repository has gone stale,
+    # and this one had `lookup` and `deser` on the expensive side, where being
+    # skipped cost findings rather than requests.
+    costly = False
 
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
         self.gen = gen
@@ -4184,6 +4244,7 @@ class FileBased(DetectionMethod):
     cleanup command."""
     name = "file"
     tier = "confirmed"
+    costly = True          # a second fetch reads the written token back
     # It writes a file to the target, and its own configuration is what gates
     # that: naming the directory and the read-back URL says more than the rung.
     safety = "stateful"
@@ -4324,6 +4385,7 @@ class WriteThenExecute(DetectionMethod):
     than one per probe is also the right trade for a state-changing method."""
     name = "write"
     tier = "confirmed"
+    costly = True          # uploads, then fetches the file back
     # A write that is served but not interpreted is a real finding about a
     # different property, and it is this method that reports it.
     also_reports = ("needs-review",)
@@ -4505,6 +4567,7 @@ class ParametricTime(DetectionMethod):
     the results-based confirmation."""
     name = "time"
     tier = "needs-review"
+    costly = True          # every probe is a real sleep
     aggregate = True
     # Per-carrier state, set by build_probes before next_probes/confirm_series
     # ever run. Declared here so a partially-driven instance is still coherent.
@@ -4872,6 +4935,7 @@ class OobCallback(DetectionMethod):
     connections, so it never runs unless the operator names that host."""
     name = "oob"
     tier = "confirmed"
+    costly = True          # waits for a callback to arrive
     # It makes the target open outbound connections.
     safety = "intrusive"
     needs_oob_host = True
@@ -5141,6 +5205,7 @@ class LookupCallback(DetectionMethod):
     Requires ``--oob-host``. Without it there are no probes, which is
     ``nothing-tested`` -- never ``negative``."""
     name = "lookup"
+    costly = True          # waits for a callback to arrive
     # Resolving a name is intrusive; fetching from an address RCEKit did not
     # choose is not, and rides at `stateful` on the probes that do it.
     safety = "intrusive"
@@ -5307,6 +5372,7 @@ class DeserSink(DetectionMethod):
     """
     name = "deser"
     tier = "deserialization-sink"
+    costly = True          # its DNS gadget waits for a callback
     # The shape oracle needs no listener and changes nothing, so the method
     # itself sits at `safe`.
     #
@@ -5566,6 +5632,12 @@ DETECTION_METHODS = {
     LookupCallback.name: LookupCallback,
     DeserSink.name: DeserSink,
 }
+
+# Methods whose probe costs one response. Derived, so a method added later
+# inherits the right answer instead of the answer that was current when
+# somebody last edited a set literal.
+CHEAP_DETECTION_METHODS = {name for name, cls in DETECTION_METHODS.items()
+                           if not cls.costly}
 
 
 # Categories whose payloads have a real-world side effect when fired at a live
@@ -6765,6 +6837,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "a filter) and django (no arithmetic by design; multiplies with a "
                              "tag). Every other engine measured is covered by the bare probes, "
                              "sandboxed or not, so narrowing this saves little.")
+    parser.add_argument("--confirm-depth", default="first", choices=("first", "every"),
+                        help="(--methods) How much to keep proving once a carrier -- one "
+                             "method in one environment and context -- has confirmed. "
+                             "'first' (default) stops that carrier there; every other "
+                             "carrier still runs in full, so a sink reachable only as "
+                             "another environment is never missed. 'every' maps every "
+                             "shape the sink accepts, which is what writing a proof of "
+                             "concept by hand needs. The run reports how many shapes it "
+                             "held back either way.")
     parser.add_argument("--sink-shape", default=None, metavar="SHAPES",
                         help="(--methods) Which sink shapes the shell probes try, comma-separated: "
                              f"auto (default, the whole ladder) or any of {', '.join(SINK_SHAPE_RUNGS)}. "
@@ -7245,6 +7326,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "observe_poll": args.observe_poll,
                                 "observe_timeout": args.observe_timeout,
                                 "eval_engines": eval_engines,
+                                "confirm_depth": args.confirm_depth,
                                 "probe_depth": args.probe_depth,
                                 "contexts_explicit": bool(selected_contexts),
                                 "oob_host": args.oob_host,
@@ -7480,38 +7562,83 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # different responses and prove nothing.
                 #
                 # Cheap methods first, per candidate. reflected and eval cost one
-                # response each; time sleeps and oob waits for a callback. Once a
-                # candidate has proven execution, paying for the slow methods on
-                # it buys a second name for a finding already made, so that
-                # candidate stops there. Candidates that stay clean still get
-                # every method.
-                cheap = [m for m in method_names if m in CHEAP_DETECTION_METHODS]
-                costly = [m for m in method_names if m not in CHEAP_DETECTION_METHODS]
-                waves = [w for w in (cheap, costly) if w]
+                # response each; time sleeps and oob waits for a callback.
+                #
+                # Once a candidate has proven execution, a method that would
+                # only name that execution again buys nothing and is skipped.
+                # A method whose tier is a *different property* is not skipped,
+                # however thoroughly execution is proven: `lookup` reports a
+                # lookup sink and `deser` a deserialization sink, each with its
+                # own remediation, and both sat on the expensive side of a
+                # hand-written list -- so a point that confirmed RCE was never
+                # asked whether it was also one of those, and the answer was
+                # never reported. Candidates that stay clean still get every
+                # method either way.
+                # Waves are ordered by cost and grouped by question. Cheap
+                # execution methods first (one response each), then the
+                # expensive ones, then each different property on its own.
+                execution = [m for m in method_names
+                             if detection_question(m) == "execution"]
+                distinct: Dict[str, List[str]] = {}
+                for name in method_names:
+                    question = detection_question(name)
+                    if question != "execution":
+                        distinct.setdefault(question, []).append(name)
+                waves = [("execution", w) for w in (
+                    [m for m in execution if m in CHEAP_DETECTION_METHODS],
+                    [m for m in execution if m not in CHEAP_DETECTION_METHODS],
+                ) if w] + list(distinct.items())
                 per_point = generator.estimate_detection_probes(
                     to_send, method_names, detection_config, max_payloads=args.max_payloads)
                 print(f"[detect] enumerating {len(injection_runs)} injection point(s) "
                       f"x {len(method_names)} method(s)")
-                capped = f" (capped by --max-payloads {args.max_payloads})" if args.max_payloads else ""
+                questions = len({q for q, _ in waves})
+                capped = (f" (capped by --max-payloads {args.max_payloads} per question"
+                          if args.max_payloads else "")
+                capped += f", {questions} question(s) asked)" if args.max_payloads else ""
                 print(f"[detect] cost: {len(injection_runs)} points x ~{per_point} probes{capped} "
                       f"= at least {len(injection_runs) * (per_point + len(waves))} requests "
                       f"(each point carries its own payload-free control)")
                 results = []
                 for point, point_url, point_method, point_data, point_headers, label in injection_runs:
                     point_results: List[Dict[str, Any]] = []
-                    for wave in waves:
+                    confirmed_here = False
+                    # `--max-payloads` is spent per question, not per wave and
+                    # not per candidate. Per wave, splitting the methods in two
+                    # quietly doubled it: a run capped at 5 sent 10 probes to
+                    # every candidate that did not confirm, while the cost line
+                    # printed before any traffic said 5. Per candidate is wrong
+                    # the other way -- the cheap wave eats the whole allowance
+                    # and the method asking a *different* question never runs,
+                    # which is the same finding lost by a different route.
+                    spent: Dict[str, int] = {}
+                    for question, wave in waves:
+                        if confirmed_here and question == "execution":
+                            # Execution is proven here. Another method would put
+                            # a second name on one finding. A different question
+                            # is never skipped for this, however thorough the
+                            # proof: `lookup` and `deser` report properties with
+                            # their own remediation, and both used to sit on the
+                            # expensive side of a hand-written list.
+                            continue
+                        remaining = None
+                        if args.max_payloads:
+                            remaining = args.max_payloads - spent.get(question, 0)
+                            if remaining <= 0:
+                                continue
                         wave_results = generator.run_detection(
                             to_send, url=point_url, methods=wave,
                             method=args.verify_method or point_method,
                             data=point_data, headers=point_headers, delay=args.verify_delay,
-                            timeout=args.verify_timeout, max_payloads=args.max_payloads,
+                            timeout=args.verify_timeout, max_payloads=remaining,
                             url_location=args.verify_url_location,
                             body_location=args.verify_body_location,
                             config=detection_config,
                         )
                         point_results.extend(wave_results)
-                        if any(r["verdict"] == "confirmed" for r in wave_results):
-                            break
+                        spent[question] = spent.get(question, 0) + len(wave_results)
+                        confirmed_here = confirmed_here or any(
+                            r["verdict"] == "confirmed" for r in wave_results)
                     for result in point_results:
                         result["point"] = label
                     verdict = overall_detection_verdict(point_results)
@@ -7565,6 +7692,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for reason, count in sorted(generator.safety_held_reasons.items(),
                                             key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {reason}")
+            if generator.settled_probes:
+                # Stated for the same reason the other three are: a ladder that
+                # shrinks quietly is indistinguishable from a target that had
+                # nothing left to find. The difference here is that the shapes
+                # were not held back for risk or reach -- the carrier they
+                # belong to had already answered.
+                print(f"[detect] {generator.settled_probes} probe shape(s) were not sent "
+                      "because their carrier had already confirmed; pass "
+                      "--confirm-depth every to map every shape the sink accepts:")
+                for label, count in sorted(generator.settled_carriers.items(),
+                                           key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {label} confirmed and stopped")
             if generator.reach_noted_probes:
                 # Not held back -- disclosed. The operator asked for a tier and
                 # got reach past it, so the run says which shapes and how far,
