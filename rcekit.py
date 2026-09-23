@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.44.0"
+__version__ = "2.45.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -93,6 +93,24 @@ SINK_ENVIRONMENTS = ("unix", "windows", "powershell")
 # Sink dialects whose filesystem paths use a backslash and whose delete command
 # is not `rm`.
 WINDOWS_PATH_SINK_ENVS = frozenset({"windows", "powershell"})
+
+# Contexts where the injected value arrives as *code* rather than as a value
+# something else evaluates -- either because the context's prefix ends the
+# construct the value sat in and starts a new one (`';` then a statement, `<?php`
+# then a program), or because the value simply is the command.
+#
+# A boolean predicate needs the other kind: a wrapper the value sits inside, so
+# that what the target evaluates is the comparison. `attribute`, `yaml` and
+# `xml_cdata` open and close around the value and belong on the predicate side
+# however elaborate their delimiters are, while `unix_shell` has no delimiters
+# at all and does not -- which is why this is a declared list and not a test on
+# whether the prefix is empty. That test was tried first and got both halves
+# wrong: it offered the three shell dialects and refused the four wrappers.
+CODE_POSITION_CONTEXTS = frozenset({
+    "javascript", "sql", "php",
+    "shell_single_quoted", "shell_double_quoted", "shell_subshell", "shell_backtick",
+    "unix_shell", "windows_cmd", "powershell",
+})
 
 # Break-out contexts that are POSIX syntax on a Unix shell and *also* valid
 # PowerShell: `'; ... #` closes the quote and comments the tail (PowerShell's
@@ -3890,13 +3908,21 @@ class DetectionMethod:
     # works today, and when the configuration is missing the run has something
     # more useful to say than which tier to raise.
     gated_by_config = False
-    # Whether one probe of this method costs more than a single response: a
-    # real sleep, a wait for a callback, or a second fetch to read the result
-    # back. The enumeration driver runs the cheap methods first for that
+    # Whether one probe of this method buys an answer, or whether an answer
+    # costs more than one: a real sleep, a wait for a callback, a second fetch
+    # to read the result back -- or a whole series before anything can be
+    # decided. The enumeration driver runs the cheap methods first for that
     # reason, and asks the class rather than consulting a list of names --
     # every hand-written list naming methods in this repository has gone stale,
     # and this one had `lookup` and `deser` on the expensive side, where being
     # skipped cost findings rather than requests.
+    #
+    # It was written as "does one probe cost more than one response", which was
+    # the same question while every method's probe was also its unit of
+    # information. `boolean` is the first where the two come apart -- each of
+    # its probes is one ordinary request, and none of them means anything until
+    # the series is complete -- so the wording follows what the driver uses it
+    # for rather than what happened to be equivalent.
     costly = False
 
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
@@ -5643,6 +5669,223 @@ class LookupCallback(DetectionMethod):
         return Verdict("negative", "no lookup callback received for any probe")
 
 
+class BooleanDifferential(DetectionMethod):
+    """A sink that **evaluates** a predicate and renders nothing of it.
+
+    MongoDB ``$where`` is the shape this exists for, and this repository has
+    carried the note for two releases: a JS sandbox that cannot reach a shell
+    and returns no value, only a document set that a predicate narrows. Every
+    shipped oracle is structurally blind to it -- ``reflected`` and ``eval``
+    need the computed value rendered, ``time`` needs a sleep, ``oob`` needs
+    egress. Measured against exactly that sink, ``--methods reflected,eval,time``
+    sent 2426 probes and reported ``negative`` for every one of them.
+
+    So the channel here is the *shape of the response*, and the answer it
+    carries is one bit. That makes this the weakest oracle in the tool, and
+    this docstring is mostly about the ways it can lie.
+
+    **It never confirms, and the reason is not the obvious one.** The obvious
+    reason is that no computed value reaches the response, so there is nothing
+    reflection would be unable to forge. The real reason is worse: against a
+    sandboxed ``eval`` sink and against a plain SQLite predicate, this oracle
+    produced an identical clean differential in 40 runs each. It cannot tell
+    *code executed* from *a query engine compared two numbers*, and the second
+    is not RCE. Extracting a locally computed product bit by bit through the
+    channel does not fix that -- it was tried, and recovered the product
+    through both sinks alike, for about 80 requests and a string function a
+    sandbox may well deny. The ceiling is ``needs-review``, and there is no
+    path from here to ``confirmed``.
+
+    **The naive form of this oracle is unusable**, which is why none of it is
+    naive. Sending ``1==1`` against ``1==2`` and calling a changed response a
+    finding reported "vulnerable" in 40 of 40 runs against a target that only
+    *reflected* its input, and in 32 of 40 against one whose response merely
+    wobbled. Four guards, each of which earned its place by measurement:
+
+    * **A structural signature**, not the body and not its length. See
+      :func:`response_shape`.
+    * **Several independently randomised pairs**, not one. Against a target
+      whose response varies on its own, one pair claimed a differential in 46
+      of 200 runs; two claimed none in 200, and four claimed none in 200.
+    * **Randomised firing order.** A target that never reads the payload but
+      degrades part-way through a run -- a rate limiter, a filling log --
+      splits an ordered true-then-false series perfectly. At the worst point of
+      a swept degradation, an ordered series claimed a differential in 100 runs
+      out of 100.
+    * **An anchor before and after.** Shuffling alone left 2 in 100, which is
+      just the chance a shuffle is still separable. Re-measuring the channel
+      after the series caught it in 100 runs of 100, because a target that
+      moved during the series cannot answer the closing anchor the way it
+      answered the opening one. With every guard on, a genuinely evaluating
+      target still read as a differential in 100 runs of 100 -- the guards cost
+      nothing they were not meant to cost.
+    """
+    name = "boolean"
+    tier = "needs-review"
+    aggregate = True
+    # Nothing here sleeps, waits for a callback or fetches anything back: every
+    # probe is one ordinary request. What makes it costly is that no single one
+    # of them says anything. The answer is the partition across the whole
+    # series, so the unit an operator pays for is 27 requests per context and
+    # not one -- which is what the enumeration driver is asking when it runs
+    # the cheap methods first. Reading the attribute the other way would put a
+    # 27-request measurement in the wave that exists to be answered cheaply,
+    # ahead of `reflected` and `eval`, and spending the same per-question
+    # budget they do.
+    costly = True
+    safety = "safe"
+
+    # The connectives a predicate breaks out of a condition the application
+    # already wrote with, and the rung each needs. The split is measured rather
+    # than cautious:
+    #
+    #   `AND` differentiates only when the application's own predicate is TRUE.
+    #   `OR`  differentiates only when it is FALSE. They are complements, so
+    #         dropping OR is a blind spot and not a saving.
+    #
+    #   A true predicate `OR`-ed into a `DELETE ... WHERE` took a table from 3
+    #   rows to 0. The same predicate `AND`-ed into it left all 3.
+    #
+    # So OR ships -- a coverage hole is a false negative wearing a safety
+    # label -- and it ships at the top rung, held back by default and named by
+    # the pre-flight, because emptying a table is not an effect a notice can
+    # take back.
+    CONNECTIVES = (
+        ("bare", "{expr}", "safe"),
+        ("and", " && {expr}", "safe"),
+        ("and-word", " and {expr}", "safe"),
+        ("or", " || {expr}", "stateful"),
+        ("or-word", " or {expr}", "stateful"),
+    )
+
+    # How many true/false pairs each connective gets. `quick` is 2 because 1
+    # was measured to claim a differential on an ordinary noisy target in 23%
+    # of runs; there is no rung below 2 that is honest, so --probe-depth trades
+    # 4 for 2 and never for 1.
+    PAIRS = {"quick": 2, "full": 4}
+    MIN_PAIRS = 2
+
+    def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
+        super().__init__(gen, config)
+        # Contexts already measured in this run. A predicate carries no shell
+        # dialect, so the probes for `unix` and for `windows` in the same
+        # context are the same bytes -- and the aggregate branch, unlike the
+        # per-probe one, has no payload de-duplication to notice. Without this
+        # the whole series is refired once per environment, to ask a question
+        # whose answer cannot differ.
+        self._contexts_done: Set[str] = set()
+
+    def applicable(self, record: "PayloadRecord") -> bool:
+        """Contexts that carry the value *as a value*.
+
+        Where the injected input is code -- a statement the context breaks out
+        into, or the command itself -- a bare comparison has no observable
+        effect, so the probe would be spent asking nothing. The break-out this
+        method needs is a boolean connective, which it supplies itself and
+        which is the axis ``CONNECTIVES`` runs along."""
+        return record.context not in CODE_POSITION_CONTEXTS
+
+    def _pairs(self) -> int:
+        return self.PAIRS.get(self._depth(), self.PAIRS["full"])
+
+    def _predicate(self, rng: "random.Random", truth: bool) -> str:
+        """``a*b==P``, where ``P`` is the product when ``truth`` and a different
+        number *of the same length* when not.
+
+        Matched lengths, so a validator that rejects long values or a filter
+        that counts characters cannot answer in the target's place. Matched
+        syntax for the same reason: both forms parse or neither does, so a sink
+        that merely rejects what it cannot parse never splits the series."""
+        a = rng.randint(1000, 9999)
+        b = rng.randint(1000, 9999)
+        product = a * b
+        if truth:
+            return f"{a}*{b}=={product}"
+        digits = len(str(product))
+        low, high = 10 ** (digits - 1), 10 ** digits - 1
+        wrong = product
+        while wrong == product:
+            wrong = rng.randint(low, high)
+        return f"{a}*{b}=={wrong}"
+
+    def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
+        if record.context in self._contexts_done:
+            return []
+        self._contexts_done.add(record.context)
+        pairs = self._pairs()
+        wrapped_anchor = self._wrap_context(record, self._predicate(rng, True))
+
+        def probe(payload: str, phase: str, carrier: Optional[str] = None,
+                  safety: Optional[str] = None) -> Probe:
+            return Probe(payload=payload, expected="", phase=phase,
+                         carrier=carrier, safety=safety)
+
+        body: List[Probe] = []
+        for name, form, rung in self.CONNECTIVES:
+            for _ in range(pairs):
+                for truth in (True, False):
+                    payload = form.format(expr=self._predicate(rng, truth))
+                    body.append(probe(self._wrap_context(record, payload),
+                                      "yes" if truth else "no", name,
+                                      None if rung == self.safety else rung))
+        # The order is a guard, not presentation. Fired as built -- every true,
+        # then every false -- a target that simply degrades part-way through
+        # answers the two halves differently, and the series reads as a perfect
+        # finding.
+        rng.shuffle(body)
+        # Two anchors before and one after. The opening pair says whether the
+        # channel is steady enough to carry one bit at all; the closing one
+        # says whether it stayed that way while the series was fired.
+        opening = [probe(wrapped_anchor, "anchor-open") for _ in range(2)]
+        return opening + body + [probe(wrapped_anchor, "anchor-close")]
+
+    def confirm_series(self, series: "List[Tuple[Probe, Observation]]") -> Verdict:
+        shapes = [(probe, response_shape(obs.status, obs.body))
+                  for probe, obs in series if obs.status is not None]
+        if not shapes:
+            return Verdict("error", "no probe reached the target")
+        opening = [shape for probe, shape in shapes if probe.phase == "anchor-open"]
+        closing = [shape for probe, shape in shapes if probe.phase == "anchor-close"]
+        # `inconclusive` and never `negative` for a channel that cannot be read.
+        # The probes arrived; what the run failed to do was read an answer out
+        # of them, and "the target is clean" is not what that means.
+        if len(opening) < 2 or len(set(opening)) != 1:
+            return Verdict("inconclusive",
+                           "the same probe drew two different response shapes, so this "
+                           "channel cannot carry a one-bit answer")
+        if not closing or set(closing) != set(opening):
+            return Verdict("inconclusive",
+                           "the response shape moved while the series was being fired, so a "
+                           "difference between probes is not attributable to the predicate")
+        for name, _form, _rung in self.CONNECTIVES:
+            sent = [(probe, shape) for probe, shape in shapes if probe.carrier == name]
+            true_probes = [shape for probe, shape in sent if probe.phase == "yes"]
+            false_probes = [shape for probe, shape in sent if probe.phase == "no"]
+            yes, no = set(true_probes), set(false_probes)
+            # Fewer pairs than the floor is not a weaker answer, it is the
+            # answer the measurement rejected: at one pair an ordinary noisy
+            # target read as a finding in 23% of runs. A connective the profile
+            # or the rung thinned below the floor is skipped, not graded down.
+            #
+            # Counted on each side rather than across both. A connective left
+            # with three true probes and one false one clears a floor on the
+            # total, and then `len(no) == 1` holds because there is only one
+            # false sample to disagree with itself -- which is the single-pair
+            # answer arriving by the back door, on the half that matters most.
+            if min(len(true_probes), len(false_probes)) < self.MIN_PAIRS:
+                continue
+            if len(yes) == 1 and len(no) == 1 and yes != no:
+                return Verdict(
+                    "needs-review",
+                    f"the response shape partitioned exactly along "
+                    f"{min(len(true_probes), len(false_probes))} "
+                    f"randomised true/false predicates via the {name} connective, and held "
+                    "its shape across anchors either side -- an evaluator consumed the "
+                    "input. Which evaluator is not shown: a query engine comparing two "
+                    "numbers produces this same differential, so it is not execution")
+        return Verdict("negative", "no response-shape differential tracked the predicate")
+
+
 # The detection methods RCEKit can run, keyed by their --methods name. Adding a
 # phase = adding a class above and an entry here.
 class DeserSink(DetectionMethod):
@@ -5935,9 +6178,10 @@ DETECTION_METHODS = {
     OobCallback.name: OobCallback,
     LookupCallback.name: LookupCallback,
     DeserSink.name: DeserSink,
+    BooleanDifferential.name: BooleanDifferential,
 }
 
-# Methods whose probe costs one response. Derived, so a method added later
+# Methods one probe of which buys an answer. Derived, so a method added later
 # inherits the right answer instead of the answer that was current when
 # somebody last edited a set literal.
 CHEAP_DETECTION_METHODS = {name for name, cls in DETECTION_METHODS.items()
@@ -5974,6 +6218,80 @@ def payload_refused(probe_status: Optional[int],
     if probe_status is None or control_status is None:
         return False
     return 400 <= probe_status < 500 and control_status < 400
+
+
+# A response's structure, with everything the response *said* removed. Three
+# regexes rather than a parser: the input is whatever a target returned, often
+# malformed, and a parser that raises on it would turn an oracle into an error.
+_SHAPE_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+_SHAPE_TAG_RE = re.compile(r"<([a-zA-Z][\w:.-]*)[^>]*>")
+_SHAPE_MARKUP_RE = re.compile(r"<[^>]*>")
+_SHAPE_WORD_RE = re.compile(r"\S+")
+
+
+def _shape_tree(value: Any) -> Any:
+    """A JSON document reduced to its shape: keys, nesting, container sizes and
+    scalar *types*. Every scalar the document carried is dropped.
+
+    A list keeps its length, because that is exactly the signal -- a predicate
+    that selected three rows and one that selected none differ in nothing else
+    once the rows themselves are gone."""
+    if isinstance(value, dict):
+        return {key: _shape_tree(item) for key, item in sorted(value.items())}
+    if isinstance(value, list):
+        # One element's shape stands for the whole list: a hundred rows of the
+        # same shape say nothing a single row does not, and walking them all
+        # would make the signature grow with the page.
+        return ["list", len(value)] + [_shape_tree(item) for item in value[:1]]
+    return type(value).__name__
+
+
+def response_shape(status: Optional[int], body: str) -> Tuple[Any, ...]:
+    """What a response *is*, with what it *said* taken out.
+
+    The oracle underneath :class:`BooleanDifferential`. A boolean channel
+    carries one bit, and the bit is read from whether the response changed --
+    so the thing compared has to be blind to everything that changes for other
+    reasons, and blind above all to the payload itself.
+
+    Three readings, because a response is one of three things and the wrong
+    reading is not a near miss:
+
+    * **JSON** -- keys, nesting and list lengths. Every scalar is dropped, so a
+      request id and a timestamp do not make two identical answers look
+      different.
+    * **Markup** -- the tag skeleton: element names and nesting, no attributes
+      and no text. This is the reading that makes the method safe against a
+      target that merely *reflects*, and it is structural rather than lucky:
+      a reflected payload lands in the text between two tags, and the text
+      between two tags is exactly what is thrown away. Measured against a
+      reflect-only target, a length-based signature claimed a differential in
+      13 of 25 runs; this one claimed none in 200.
+    * **Anything else** -- one marker per whitespace-separated word, per line.
+      Plain text has no structure but its layout, and a payload that carries no
+      whitespace cannot change a word count by being echoed into a line.
+
+    ``status`` is part of the shape: an endpoint that answers 200 to one
+    predicate and 500 to another has answered."""
+    shape: Any
+    stripped = body.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            shape = json.dumps(_shape_tree(json.loads(stripped)), sort_keys=True)
+        except (ValueError, TypeError, RecursionError):
+            shape = None
+        if shape is not None:
+            return ("json", status, shape)
+    if _SHAPE_TAG_RE.search(body):
+        text = _SHAPE_COMMENT_RE.sub("", body)
+        text = _SHAPE_TAG_RE.sub(lambda m: "<" + m.group(1).lower() + ">", text)
+        # Keep the tags and nothing between them. A closing tag survives on its
+        # own -- it is structure, and dropping it would make <p>a</p><p>b</p>
+        # and <p>ab</p> the same shape.
+        return ("markup", status, "".join(_SHAPE_MARKUP_RE.findall(text)))
+    return ("text", status,
+            "\n".join(" ".join("w" for _ in _SHAPE_WORD_RE.findall(line))
+                      for line in body.splitlines()))
 
 
 def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
@@ -7213,7 +7531,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "computed product); file (self-OOB write+read-back, needs --file-write-path "
                              "and --file-read-url, or the --webroot/--web-base-url alias); oob (DNS/HTTP callback to the built-in listener, needs "
                              "--oob-host — the only confirmed-tier method for a fully blind sink); "
-                             "time (hardened blind-timing regression, needs-review only). "
+                             "time (hardened blind-timing regression, needs-review only); "
+                             "boolean (a sink that evaluates a predicate and renders nothing of it, "
+                             "read from a response-shape differential across randomised true/false "
+                             "predicates — needs-review only, because a query engine comparing two "
+                             "numbers produces the same differential). "
                              "Opt-in and additive: when omitted, verification keeps its existing behaviour "
                              "unchanged.")
     parser.add_argument("--detect-json", default=None, metavar="PATH",

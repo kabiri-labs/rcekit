@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.44.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.45.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -229,7 +229,7 @@ RCEKit answers with **nine verdicts that are never collapsed into each other**:
 | **`confirmed`** | The target executed the input. It returned a value it could not produce otherwise — computed from operands random to that probe — and that value is absent from a payload-free control. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
-| **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint. Worth your time, never worth the word "confirmed". |
+| **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint, a response shape that tracks a predicate. Worth your time, never worth the word "confirmed". |
 | **`inconclusive`** | The evidence appeared, but could not be attributed to execution — the payload-free control carried it too. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
 | **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
@@ -239,7 +239,10 @@ RCEKit answers with **nine verdicts that are never collapsed into each other**:
 The moment `confirmed` and `maybe` blur, `confirmed` stops meaning anything — so
 nothing is ever promoted upward. A timing regression stays `needs-review` however
 clean the slope. A deserialization callback stays `deserialization-sink` however
-certain you are that the classpath is exploitable.
+certain you are that the classpath is exploitable. A response shape that tracks a
+predicate stays `needs-review` however cleanly it partitions: measured against a
+sandboxed `eval` sink and against a plain SQLite comparison, that oracle produced
+the same clean differential in 40 runs each, and only one of those two is RCE.
 
 ### The other half: a run that tested nothing is never clean
 
@@ -283,6 +286,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `confirmed` RCE, the source coming back verbatim is `needs-review` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
+| **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `needs-review`: a query engine comparing two numbers produces the same differential, so the differential is not execution. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `confirmed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 
 Three things widen where those methods can reach, without changing what any of
@@ -385,8 +389,10 @@ verdict, and they run on every confirmation:
   does not widen what it will call `confirmed`.
 
 The same instinct runs the other way. Timing **never self-confirms**, a
-deserialization callback is **never** called RCE, and a run that built no probes
-is **never** called negative.
+deserialization callback is **never** called RCE, a response shape that tracks a
+predicate is **never** called execution — a query engine comparing two numbers
+produces the same shape — and a run that built no probes is **never** called
+negative.
 
 ### 3. It is built for an authorised engagement, not a lab
 
@@ -440,6 +446,7 @@ what it sends, and how to read what comes back.
 | The payload runs later, on a different request | [When execution happens on another request](docs/guide.md#when-execution-happens-on-another-request) |
 | The injection point is SQL and the sink is the database host | [Query-language bridges](docs/reference.md#query-language-bridges) |
 | The endpoint takes a serialized object | [Deserialization sinks](docs/reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce) |
+| The sink evaluates my input but renders nothing of it | [When the sink answers yes or no](docs/reference.md#when-the-sink-answers-yes-or-no-and-nothing-else) |
 | The sink is behind a login or a file upload | [Multi-step chains](docs/guide.md#multi-step-chains) |
 | I got `needs-review` / `inconclusive` / `error` | [Reading the results](docs/guide.md#reading-the-results) |
 | It says the corpus is unusable | [Troubleshooting](docs/guide.md#troubleshooting) |
