@@ -177,6 +177,17 @@ formats, or the template schema.
   reflects the payload verbatim"; a negative probe never looked, and the
   negative run is the one that has to say what it saw.
 
+  Measured against the payload that actually went out. A carrier that
+  multiplies through a filter never spells the joined `a*b` out — Liquid sends
+  `{{ a | times: b }}` and Django `{% widthratio a 1 b %}` — so an endpoint
+  echoing the whole payload recorded a measured `False`, and a target profile
+  filtering the `*` shapes leaves only those, at which point the run would
+  report "returned none of it" about a target that returned everything.
+
+  Recorded only when there was a response to look at. A delivery error is not
+  an observation, and a `False` for one would put an unmeasured claim exactly
+  where the unobserved branch belongs.
+
 ## [2.41.0] — 2026-09-23
 
 ### Fixed
