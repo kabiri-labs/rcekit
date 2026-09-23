@@ -2874,19 +2874,8 @@ class RCEKit:
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels)
                     verdict = meth.confirm(obs, probe)
-                    # Did the target hand the input back? Observed, not guessed,
-                    # and already computed on the confirmed path -- where it
-                    # becomes "target also reflects the payload verbatim". A
-                    # negative probe never looked, and it is the negative run
-                    # that has to say what it saw: input returned means a sink
-                    # that echoes without executing, input swallowed means it
-                    # went somewhere this response cannot show.
-                    reflected_verbatim = bool(probe.forbidden) and bool(
-                        meth._search_channels(probe.forbidden,
-                                              meth._channels_of(body, chans)))
                     result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
-                        "reflected_verbatim": reflected_verbatim,
                         "status": status, "payload": probe.payload,
                         "method": meth.name, "tier": meth.tier,
                         "environment": record.environment, "context": record.context,
@@ -2894,6 +2883,23 @@ class RCEKit:
                     }
                     if probe.followup and probe.followup.get("cleanup"):
                         result["cleanup"] = probe.followup["cleanup"]
+                    # Did the target hand the input back? Observed, not guessed.
+                    # Measured against the payload that actually went out, not
+                    # against `forbidden`: a carrier that multiplies through a
+                    # filter never spells the joined `a*b` out, so an endpoint
+                    # echoing the whole of `{{ a | times: b }}` recorded a
+                    # measured False -- and a target profile that filters the
+                    # `*` shapes leaves only those, so the run would report
+                    # "returned none of it" about a target that returned
+                    # everything.
+                    #
+                    # Set only when there was a response to look at. A delivery
+                    # error is not an observation, and recording False for one
+                    # would put an unmeasured claim where the unobserved branch
+                    # belongs.
+                    if status is not None:
+                        result["reflected_verbatim"] = bool(meth._search_channels(
+                            probe.payload, meth._channels_of(body, chans)))
                     results.append(result)
                     # Read the observed channel now, before the next probe.
                     # Batch-then-poll alone is only correct for a channel that

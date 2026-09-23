@@ -5771,6 +5771,44 @@ class ReflectedVerbatimRecordTestCase(unittest.TestCase):
         self.assertTrue(any(r.get("reflected_verbatim") for r in results),
                         "an echoing target was not recorded as echoing")
 
+    def test_a_carrier_payload_counts_as_the_payload(self):
+        """Measured against what actually went out, not against `forbidden`.
+
+        A carrier that multiplies through a filter never spells the joined
+        `a*b` out -- Liquid sends `{{ a | times: b }}` and Django
+        `{% widthratio a 1 b %}` -- so an endpoint echoing the whole payload
+        recorded a measured False. A target profile that filters the `*` shapes
+        leaves only those, and the run would then report "returned none of it"
+        about a target that returned everything."""
+        with local_target(lambda m, p, params, h, b: (200, params.get("q", ""))) as base:
+            results = self.gen.run_detection(
+                [make_record(environment="java", context="raw")],
+                url=f"{base}/x?q=FUZZ", methods=["eval"], timeout=15)
+        carried = [r for r in results
+                   if "times:" in r["payload"] or "widthratio" in r["payload"]]
+        self.assertTrue(carried, "precondition: the operand carriers must be sent")
+        missed = [r["payload"] for r in carried if not r.get("reflected_verbatim")]
+        self.assertFalse(
+            missed, f"an echoing target was not recorded as echoing: {missed[:2]}")
+
+    def test_a_delivery_error_records_no_observation_at_all(self):
+        """There was no response to look at, so False would be a claim.
+
+        A mixed run where these requests fail while an aggregate method returns
+        an ordinary negative would otherwise have the advice say the target
+        accepted the input and returned none of it -- about probes that never
+        arrived."""
+        results = self.gen.run_detection(
+            [self.rec], url="http://127.0.0.1:1/x?q=FUZZ", methods=["reflected"],
+            max_payloads=2, timeout=3)
+        self.assertTrue(results)
+        self.assertEqual([r["verdict"] for r in results], ["error"] * len(results))
+        self.assertFalse(any("reflected_verbatim" in r for r in results),
+                         "a probe that never arrived recorded an observation")
+        advice = "\n".join(rcekit.second_order_advice(None, results))
+        self.assertIn("may not be happening on the request being measured", advice)
+        self.assertNotIn("returned none of it", advice)
+
     def test_a_target_that_swallows_the_input_is_recorded_as_swallowing(self):
         results = self._run(lambda *a: (200, "<html>saved</html>"))
         self.assertTrue(results)
