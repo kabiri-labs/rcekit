@@ -9195,6 +9195,28 @@ class BooleanTargets:
         return (200, self.chrome(
             self._listing(self.ROWS[:self.rng.randint(0, len(self.ROWS))])))
 
+    def caching_degrader(self, switch):
+        """The same input-blind degradation, behind a cache keyed on the query
+        string -- which is what most GET endpoints sit behind.
+
+        Every probe payload is unique and so stays live. What a cache *can*
+        replay is a payload sent more than once, which is why the anchors are
+        three different true predicates rather than one repeated: identical
+        anchors would be one live request and two replays of it, and the
+        closing anchor would agree with the opening one whatever happened in
+        between."""
+        cache = {}
+
+        def route(method, path, params, headers, body):
+            key = params.get("q", "")
+            if key in cache:
+                return (200, cache[key])
+            served = self.degrading_after(switch)(method, path, params, headers, body)
+            cache[key] = served[1]
+            return served
+
+        return route
+
     def degrading_after(self, switch):
         """Never reads the payload either, but starts refusing to work
         part-way through -- a rate limiter, a filling log, a pool running out.
@@ -9321,6 +9343,27 @@ class BooleanUnreadableChannelTestCase(unittest.TestCase):
     def test_a_response_that_varies_on_its_own_is_inconclusive(self):
         results = self._run(BooleanTargets().wobbling)
         self.assertEqual([r["verdict"] for r in results], ["inconclusive"])
+
+    def test_a_cache_cannot_answer_the_anchors_for_the_target(self):
+        """The anchors are three different true predicates, not one sent three
+        times, and this is the difference.
+
+        Measured against an input-blind target that degrades mid-series and
+        replays any query string it has already answered: identical anchors
+        caught it in 36 of 39 runs live and in **0 of 39** behind the cache --
+        the guard was not weakened, it was switched off. Distinct payloads are
+        each a live request, so the check measures the target."""
+        targets = BooleanTargets()
+        results = self._run(targets.caching_degrader(2 + 4 * 2))
+        self.assertEqual([r["verdict"] for r in results], ["inconclusive"])
+
+    def test_every_anchor_is_a_different_predicate(self):
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), {})
+        probes = meth.build_probes(_boolean_record(), random.Random(5))
+        anchors = [p.payload for p in probes if p.phase.startswith("anchor")]
+        self.assertEqual(len(anchors), 3)
+        self.assertEqual(len(set(anchors)), 3,
+                         "a repeated anchor payload is one a cache can replay")
 
     def test_a_target_that_degrades_mid_series_is_not_a_finding(self):
         """The anchor either side, which is the guard that earned its place
