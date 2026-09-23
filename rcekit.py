@@ -2884,10 +2884,6 @@ class RCEKit:
                     if probe.followup and probe.followup.get("cleanup"):
                         result["cleanup"] = probe.followup["cleanup"]
                     results.append(result)
-                    if verdict.status == "confirmed" and confirm_depth == "first":
-                        carrier_settled = True
-                        label = f"{meth.name}/{record.environment}/{record.context}"
-                        self.settled_carriers[label] = self.settled_carriers.get(label, 0) + 1
                     # Read the observed channel now, before the next probe.
                     # Batch-then-poll alone is only correct for a channel that
                     # *accumulates* (a log, a comment list): where the store
@@ -2906,6 +2902,16 @@ class RCEKit:
                             self._observe_match(
                                 result, o_chans or ([("response body", o_body)] if o_body else []),
                                 observe_control, observe["url"])
+                    # Decided from the result, and only once the observed
+                    # channel has had its say. A second-order sink answers on
+                    # that poll and not in the response the probe drew, so
+                    # reading the pre-poll verdict left the carrier running
+                    # after it had in fact confirmed -- spending the budget the
+                    # stop exists to hand to carriers not yet examined.
+                    if result["verdict"] == "confirmed" and confirm_depth == "first":
+                        carrier_settled = True
+                        label = f"{meth.name}/{record.environment}/{record.context}"
+                        self.settled_carriers[label] = self.settled_carriers.get(label, 0) + 1
                     if delay:
                         time.sleep(delay)
                     if max_payloads and len(results) >= max_payloads:
@@ -7588,8 +7594,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                     [m for m in execution if m in CHEAP_DETECTION_METHODS],
                     [m for m in execution if m not in CHEAP_DETECTION_METHODS],
                 ) if w] + list(distinct.items())
-                per_point = generator.estimate_detection_probes(
-                    to_send, method_names, detection_config, max_payloads=args.max_payloads)
+                # Estimated per question and summed, because the budget is
+                # granted per question. Counting the cap once while the loop
+                # below hands it out `questions` times advertised 44 requests
+                # for a run that sent 80 -- and this line exists for the
+                # operator bounding a monitored engagement, who has nothing
+                # else to go on before the traffic starts.
+                per_point = sum(
+                    generator.estimate_detection_probes(
+                        to_send, [m for _q, w in waves for m in w if _q == question],
+                        detection_config, max_payloads=args.max_payloads)
+                    for question in dict.fromkeys(q for q, _ in waves))
                 print(f"[detect] enumerating {len(injection_runs)} injection point(s) "
                       f"x {len(method_names)} method(s)")
                 questions = len({q for q, _ in waves})

@@ -169,7 +169,18 @@ formats, or the template schema.
   question — the cheap methods eat the whole allowance and `deser` never runs,
   which is the same finding lost by another route. Every method asking about
   execution now shares one allowance, each different property gets its own, and
-  the cost line names how many questions are being asked.
+  the cost line names how many questions are being asked — and **sums** the
+  estimate across them. Counting the cap once while the run grants it per
+  question advertised 44 requests for a run that sent 80, which is wrong in
+  the direction that matters for the operator bounding a monitored engagement.
+
+- **A second-order confirmation settles its carrier too.** With `--observe-url`
+  a probe can read negative in the response it drew and `confirmed` on the
+  observed channel a moment later. The stop was decided from the pre-poll
+  verdict, so the carrier kept probing after it had in fact confirmed —
+  spending the budget the stop exists to hand to carriers not yet examined,
+  which is the coverage loss this change was written to remove, reappearing on
+  the one oracle that needs a second request to answer.
 
 ### Changed
 

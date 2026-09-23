@@ -5436,6 +5436,64 @@ class DetectionQuestionTestCase(unittest.TestCase):
             self.assertFalse(rcekit.DETECTION_METHODS[name].costly, name)
 
 
+class CostLineQuestionTestCase(unittest.TestCase):
+    """The cost line has to describe the run it precedes.
+
+    `--max-payloads` is granted once per question, so counting it once while
+    the run hands it out for every question advertised 44 requests for a run
+    that sent 80. That line is the only thing an operator bounding a monitored
+    engagement has to go on before the traffic starts, and it was wrong in the
+    direction that matters -- under, not over.
+
+    It went out in a measured run I printed and read past, which is the case
+    for checking it rather than looking at it.
+    """
+
+    def _cost_line(self, methods, max_payloads):
+        with local_target(lambda *a: (200, "<html>static</html>")) as base:
+            request = (f"POST /x HTTP/1.1\r\nHost: {base.split('//')[1]}\r\n"
+                       "Content-Type: application/x-www-form-urlencoded\r\n\r\na=1&b=2")
+            # newline="" or Windows turns the CRLFs already in the string
+            # into CRCRLF and the capture no longer parses.
+            with tempfile.NamedTemporaryFile("w", suffix=".req", delete=False,
+                                             encoding="utf-8", newline="") as handle:
+                handle.write(request)
+                path = handle.name
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "-r", path, "--auto-params", "form",
+                     "--methods", methods, "--acknowledge-consent",
+                     "--max-payloads", str(max_payloads), "--verify-timeout", "2"],
+                    cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+            finally:
+                os.unlink(path)
+        line = next((l for l in result.stdout.splitlines() if "[detect] cost:" in l), "")
+        self.assertTrue(line, f"no cost line in:\n{result.stdout[-2000:]}")
+        sent = next((l for l in result.stdout.splitlines() if "probes:" in l), "")
+        return line, sent, result.stdout
+
+    def test_the_estimate_counts_every_question_the_run_will_ask(self):
+        """Two questions cost two allowances, and the line says so."""
+        one, _sent, _out = self._cost_line("reflected,time", 6)
+        two, _sent2, _out2 = self._cost_line("reflected,deser", 6)
+        per_one = int(re.search(r"~(\d+) probes", one).group(1))
+        per_two = int(re.search(r"~(\d+) probes", two).group(1))
+        self.assertGreater(
+            per_two, per_one,
+            "a run asking two questions is estimated as though it asked one:\n"
+            f"  reflected,time  -> {one}\n  reflected,deser -> {two}")
+
+    def test_the_line_names_how_many_questions_are_being_asked(self):
+        line, _sent, _out = self._cost_line("reflected,deser", 6)
+        self.assertIn("2 question(s) asked", line, line)
+
+    def test_methods_answering_one_question_are_not_counted_twice(self):
+        # `time` looks harder for the same thing `reflected` looks for, so
+        # naming both must not double the estimate.
+        line, _sent, _out = self._cost_line("reflected,time", 6)
+        self.assertIn("1 question(s) asked", line, line)
+
+
 class ConfirmDepthTestCase(unittest.TestCase):
     """A carrier that has confirmed has nothing left to say.
 
@@ -5547,6 +5605,70 @@ class ConfirmDepthTestCase(unittest.TestCase):
         self._run(path="/reflect")
         self.assertEqual(self.gen.settled_probes, 0)
         self.assertEqual(self.gen.settled_carriers, {})
+
+    def test_a_second_order_confirmation_settles_the_carrier_too(self):
+        """The stop has to read the verdict the run ends up reporting.
+
+        With `--observe-url` a probe can be negative in the response it drew and
+        `confirmed` on the observed channel a moment later. Deciding the stop
+        from the pre-poll verdict left the carrier running after it had in fact
+        confirmed, spending the budget the stop exists to hand to carriers not
+        yet examined -- the coverage loss this change was written to remove,
+        reappearing on the one oracle that needs a second request to answer.
+        """
+        import http.server
+        import socketserver
+        import threading
+        import urllib.parse as up
+
+        stored = {"value": ""}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                parsed = up.urlparse(self.path)
+                self.send_response(200)
+                self.end_headers()
+                if parsed.path == "/store":
+                    # Swallows the payload: nothing comes back in this response,
+                    # so every probe reads negative here.
+                    cmd = up.parse_qs(parsed.query).get("cmd", [""])[0]
+                    pipe = sh_popen("echo " + cmd + " 2>&1")
+                    stored["value"] = pipe.read()
+                    pipe.close()
+                    out = "stored"
+                else:                      # /observe renders what was stored
+                    out = stored["value"]
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            results = self.gen.run_detection(
+                [make_record(environment="unix", context="raw")],
+                url=f"{base}/store?cmd=FUZZ", methods=["reflected"],
+                config={"observe_url": f"{base}/observe"}, timeout=15)
+        finally:
+            server.shutdown()
+            server.server_close()
+        import collections
+        per_carrier = collections.Counter(
+            (r["method"], r["environment"], r["context"]) for r in results
+            if r["verdict"] == "confirmed")
+        self.assertTrue(per_carrier, "precondition: the observed channel must confirm")
+        self.assertTrue(all("OBSERVED" in r["detail"] for r in results
+                            if r["verdict"] == "confirmed"),
+                        "precondition: the confirmation must come from the poll")
+        self.assertEqual(set(per_carrier.values()), {1},
+                         "a carrier kept probing after it had confirmed on the "
+                         f"observed channel: {per_carrier}")
+        self.assertGreater(self.gen.settled_probes, 0)
 
     def test_the_four_tallies_stay_apart(self):
         """Four numbers because they say four different things.
