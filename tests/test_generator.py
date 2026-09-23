@@ -2571,15 +2571,34 @@ class EvadeTestCase(unittest.TestCase):
         self.assertNotIn("${IFS}", probe.payload)
         self.assertIn(" ", probe.payload)
 
-    def test_evade_low_substitutes_ifs_for_reflected_and_time(self):
+    def test_a_rung_does_not_change_what_is_built(self):
+        """The rung is a retry for a refused probe, not a coating on the ladder.
+
+        It used to substitute `${IFS}` into every probe at build time. Measured
+        shape by shape against an unfiltered target that broke 8 shapes the
+        canonical form executes and improved none, so the transform moved to
+        where a filter actually refused something. What the ladder offers is
+        the same at every rung now."""
         import random as _random
-        reflected = ReflectedMath(self.gen, {"evade": "low"}).build_probes(self.rec, _random.Random(1))[0]
-        self.assertIn("${IFS}", reflected.payload)
-        self.assertNotIn(" ", reflected.payload)
-        timing = ParametricTime(self.gen, {"evade": "low", "time_base": 2}).build_probes(
-            self.rec, _random.Random(1))[-1]
-        self.assertIn("${IFS}", timing.payload)
-        self.assertNotIn(" ", timing.payload)
+        for method, config in ((ReflectedMath, {}),
+                               (ParametricTime, {"time_base": 2})):
+            built = {}
+            for rung in rcekit.EVASION_RUNGS:
+                payloads = [p.payload for p in method(
+                    self.gen, dict(config, evade=rung)).build_probes(
+                        self.rec, _random.Random(1))]
+                built[rung] = payloads
+            with self.subTest(method=method.name):
+                self.assertEqual(built["none"], built["low"])
+                self.assertEqual(built["none"], built["high"])
+
+    def test_the_rung_still_produces_a_space_free_payload_on_retry(self):
+        # What `--evade low` is for, now applied where it is paid for.
+        import random as _random
+        probe = ReflectedMath(self.gen).build_probes(self.rec, _random.Random(1))[0]
+        climbed = rcekit.evade_body(probe.payload, "low")
+        self.assertIn("${IFS}", climbed)
+        self.assertNotIn(" ", climbed)
 
     def test_file_write_stays_canonical_under_evade(self):
         import random as _random
@@ -2616,10 +2635,17 @@ class EvadeTestCase(unittest.TestCase):
         try:
             results = self.gen.run_detection(
                 [self.rec], url=f"http://127.0.0.1:{port}/vuln?host=FUZZ", methods=["reflected"],
-                config={"evade": "low"})
+                # `every`, because the carrier stop would otherwise end this
+                # carrier as soon as a canonical shape confirms -- correctly,
+                # since it has answered -- and the space-free shapes sit later
+                # in the ladder. They are reached on the sink they are for: one
+                # that refuses the canonical shapes, where nothing confirms
+                # early. Measured: 10 sent here, 7 of them confirm.
+                config={"evade": "low", "confirm_depth": "every"})
             confirmed = [r for r in results if r["verdict"] == "confirmed"]
             self.assertTrue(confirmed, "the ${IFS} variant must still execute and confirm")
-            self.assertIn("${IFS}", confirmed[0]["payload"])
+            self.assertTrue(any("${IFS}" in r["payload"] for r in confirmed),
+                            "no space-free payload executed against a shell sink")
         finally:
             server.shutdown()
             server.server_close()
@@ -4222,12 +4248,17 @@ class SpaceFilterTestCase(unittest.TestCase):
         # of the depth trade-off.
         self.assertTrue([p for p in self._payloads({"probe_depth": "quick"}) if " " not in p])
 
-    def test_evade_low_does_not_duplicate_it(self):
-        # --evade low already applies ${IFS} to every probe, so the dedicated
-        # variant would be a second copy of probes that are already space-free.
-        payloads = self._payloads({"evade": "low"})
-        self.assertTrue(all("${IFS}" in p for p in payloads))
-        self.assertEqual(len(payloads), len(set(payloads)))
+    def test_the_ladder_carries_no_duplicates_at_any_rung(self):
+        # The rung used to coat every probe, which made the dedicated space-free
+        # shape a second copy of one already in the ladder. It is a retry now,
+        # so the ladder is the same at every rung -- and still has to be free of
+        # duplicates, which is what a wasted request would look like.
+        for rung in rcekit.EVASION_RUNGS:
+            with self.subTest(rung=rung):
+                payloads = self._payloads({"evade": rung})
+                self.assertEqual(len(payloads), len(set(payloads)))
+                self.assertTrue([p for p in payloads if " " not in p],
+                                "the space-free shape must be sent at every rung")
 
     def test_the_expected_value_is_still_unforgeable(self):
         import random as _random
@@ -5814,6 +5845,128 @@ class ReflectedVerbatimRecordTestCase(unittest.TestCase):
         self.assertTrue(results)
         self.assertTrue(all(r.get("reflected_verbatim") is False for r in results),
                         "a target that returned nothing was recorded as echoing")
+
+
+class EvasionRungTestCase(unittest.TestCase):
+    """A rung transforms the payload without breaking it.
+
+    The shipped `low` rung substituted `${IFS}` for every space, including the
+    ones inside a quoted program: `awk 'BEGIN{print "RK" a+b "RK"}'` became
+    `awk${IFS}'BEGIN{print${IFS}"RK"...`, where `${IFS}` is literal text rather
+    than an expansion and awk answers with a syntax error. Measured shape by
+    shape against an unfiltered target, that cost 8 of the probe shapes the
+    canonical form executes and gained none.
+    """
+
+    QUOTED = """; awk 'BEGIN{print "RKA" 574354+686963 "RKB"}'"""
+
+    def test_a_quoted_program_keeps_its_spaces(self):
+        out = rcekit.evade_spaces(self.QUOTED, "${IFS}")
+        self.assertIn("""'BEGIN{print "RKA" 574354+686963 "RKB"}'""", out,
+                      f"the substitution went inside the quotes: {out}")
+        self.assertNotIn(" awk", out, "the spaces outside the quotes were not replaced")
+
+    def test_a_double_quoted_string_is_left_alone_too(self):
+        """`${IFS}` *does* expand inside double quotes, so substituting there
+        changes the string the target computes rather than the spacing around
+        it."""
+        out = rcekit.evade_spaces('echo "a b" c', "${IFS}")
+        self.assertIn('"a b"', out)
+        self.assertNotIn('" c', out)
+
+    def test_the_command_word_split_stays_outside_an_expansion(self):
+        """Applied after the space substitution it lands inside `${IFS}` and
+        makes `${I$@FS}`, which is neither an expansion nor a command."""
+        out = rcekit.evade_body("; echo RK$((1+2))", "high")
+        self.assertNotIn("$@FS", out, out)
+        self.assertIn("$@", out, "the command word was not split at all")
+
+    def test_a_word_too_short_to_split_is_left_alone(self):
+        self.assertEqual(rcekit.split_command_word("; x 1"), "; x 1")
+
+    def test_each_rung_changes_the_payload(self):
+        canonical = "; echo RK$((1+2))"
+        low = rcekit.evade_body(canonical, "low")
+        high = rcekit.evade_body(canonical, "high")
+        self.assertNotIn(" ", low.replace("${IFS}", ""))
+        self.assertNotEqual(low, high)
+        self.assertEqual(rcekit.evade_body(canonical, "none"), canonical)
+
+    def test_every_rung_is_in_the_ladder(self):
+        self.assertEqual(rcekit.EVASION_RUNGS[0], "none",
+                         "the ladder must start canonical")
+        self.assertIn("low", rcekit.EVASION_RUNGS)
+        self.assertIn("high", rcekit.EVASION_RUNGS)
+
+
+class EscalationTestCase(unittest.TestCase):
+    """A rung is paid for where a filter refused, and nowhere else.
+
+    Measured: applying one to every probe broke 8 probe shapes against an
+    unfiltered target and improved none, while against a filter that blocks
+    whitespace it turned 1 confirmation into 5. So the rung is a retry for a
+    refused probe rather than a posture for the run.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _run(self, route, evade="high"):
+        with local_target(route) as base:
+            return self.gen.run_detection(
+                [self.rec], url=f"{base}/x?cmd=FUZZ", methods=["reflected"],
+                config={"evade": evade}, max_payloads=10, timeout=15)
+
+    @staticmethod
+    def _whitespace_filter(method, path, params, headers, body):
+        value = params.get("cmd", "")
+        if any(c in value for c in (" ", "\t", "\n")):
+            return (403, "<html>403 blocked</html>")
+        return (200, f"out: {value}")
+
+    @staticmethod
+    def _open(method, path, params, headers, body):
+        return (200, f"out: {params.get('cmd', '')}")
+
+    def test_an_unfiltered_target_is_never_escalated(self):
+        # The counterexample for the whole design: no refusal, no retry, no
+        # extra request.
+        self._run(self._open)
+        self.assertEqual(self.gen.escalated_probes, 0)
+        self.assertEqual(self.gen.escalation_wins, {})
+
+    def test_a_refused_probe_is_retried(self):
+        self._run(self._whitespace_filter)
+        self.assertGreater(self.gen.escalated_probes, 0)
+
+    def test_the_retry_gets_through_a_whitespace_filter(self):
+        self._run(self._whitespace_filter)
+        self.assertTrue(self.gen.escalation_wins,
+                        "no rung converted a refusal, so the ladder bought nothing")
+
+    def test_the_ceiling_is_honoured(self):
+        self._run(self._whitespace_filter, evade="low")
+        self.assertNotIn("high", self.gen.escalation_wins)
+
+    def test_none_disables_the_retry_entirely(self):
+        self._run(self._whitespace_filter, evade="none")
+        self.assertEqual(self.gen.escalated_probes, 0)
+
+    def test_the_ladder_a_run_builds_does_not_depend_on_the_rung(self):
+        """The rung is a retry, so the probes offered are the same either way.
+
+        This is what the old behaviour cost: `--evade low` built a different,
+        smaller ladder and 13 fewer of its probes executed."""
+        import random as _random
+        built = {}
+        for rung in rcekit.EVASION_RUNGS:
+            gen = RCEKit()
+            method = rcekit.ReflectedMath(gen, {"evade": rung})
+            built[rung] = [p.payload for p in method.build_probes(
+                self.rec, _random.Random(11))]
+        self.assertEqual(built["none"], built["low"])
+        self.assertEqual(built["none"], built["high"])
 
 
 class PayloadRefusedTestCase(unittest.TestCase):
