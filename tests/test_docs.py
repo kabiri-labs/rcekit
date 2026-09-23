@@ -692,7 +692,39 @@ class CLIDocumentationTestCase(unittest.TestCase):
         # Newlines joined: argparse wraps help at word boundaries, so a name
         # survives intact but may sit across two lines.
         cls.help_text = " ".join(result.stdout.split())
+        # The unjoined lines as well, because the indentation is what separates
+        # one flag's help from the next one's.
+        cls.help_lines = result.stdout.splitlines()
         cls.reference_text = (DOCS_DIR / "reference.md").read_text(encoding="utf-8")
+
+    @classmethod
+    def _option_help(cls, option):
+        """The help argparse prints for one flag, its wrapped lines rejoined.
+
+        A question about one flag cannot be asked of the whole page. Every
+        detection method's name also occurs somewhere else in `--help` --
+        `file` inside `--request-file`, `write` inside `--file-write-path`,
+        `deser` inside `--deser-formats`, `time` inside `--time-base` -- so a
+        substring test against `help_text` would pass against a `--methods`
+        help that named none of them.
+        """
+        collected, inside = [], False
+        for line in cls.help_lines:
+            declaration = DECLARATION_RE.match(line)
+            if declaration:
+                if inside:
+                    break              # the next flag begins
+                inside = option in OPTION_RE.findall(declaration.group(1))
+                if inside:
+                    # argparse puts the first words of the description on the
+                    # declaration line itself whenever the flag is short.
+                    collected.append(line[len(declaration.group(0)):])
+                continue
+            if inside:
+                if not line.strip():
+                    break              # the group ends
+                collected.append(line)
+        return " ".join(" ".join(collected).split())
 
     def test_the_eval_engines_help_names_every_carrier_the_corpus_ships(self):
         """The help enumerated three engines by hand and two more were added.
@@ -707,6 +739,36 @@ class CLIDocumentationTestCase(unittest.TestCase):
         missing = sorted(n for n in carriers if n not in self.help_text)
         self.assertFalse(
             missing, f"--eval-engines help does not name {missing}")
+
+    def test_the_methods_help_names_every_registered_detection_method(self):
+        """The help enumerated five of the registered methods by hand.
+
+        `write`, `lookup` and `deser` were registered in `DETECTION_METHODS`
+        and had never once been named in the help, so `--help` described a
+        whole target class as out of reach -- a write primitive, a
+        `${jndi:...}` sink, a deserializing endpoint -- while the method for
+        it was already shipping. An operator choosing methods reads that list
+        and nothing else. Held to the registry, exactly as `--eval-engines` is
+        held to the corpus above."""
+        methods = rcekit.DETECTION_METHODS
+        self.assertTrue(methods)
+        help_text = self._option_help("--methods")
+        # Non-vacuity, in both directions: the slice has to be the `--methods`
+        # help, and it has to stop before the next flag's -- a helper that
+        # returned the whole page would make the assertion below meaningless.
+        self.assertIn("Comma-separated", help_text)
+        self.assertNotIn("--time-base", help_text)
+        # An entry is the name followed by the parenthesis that opens its
+        # description, because mere presence is not a claim about the method.
+        # A flag named after one would satisfy that -- `--file-read-url` for
+        # `file` -- and so would another method's prose: the help said `file`
+        # was a "write+read-back", which is how `write` counted as named for
+        # as long as it went undocumented.
+        missing = sorted(
+            name for name in methods
+            if not re.search(rf"(?<![\w-]){re.escape(name)} \(", help_text)
+        )
+        self.assertFalse(missing, f"--methods help does not name {missing}")
 
     def test_help_output_was_parsed(self):
         # A guard on the test itself: if argparse ever changes its help layout,

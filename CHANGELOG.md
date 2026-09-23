@@ -142,6 +142,35 @@ formats, or the template schema.
 
   Test-only: no version bump, and nothing about a run changes.
 
+### Fixed
+
+- **`--methods` enumerated five of the eight methods it accepts.** `write`,
+  `lookup` and `deser` were registered in `DETECTION_METHODS` and had never
+  once been named in the help, so `--help` described a whole target class as
+  out of reach -- an upload that stores a file, a `${jndi:...}` sink, an
+  endpoint that deserializes what it is handed -- while the method for it was
+  already shipping and documented everywhere else. Each now carries the tier
+  its class declares: `confirmed` for `write`, with `needs-review` for a write
+  that is served but not interpreted; `lookup-sink` for `lookup`;
+  `deserialization-sink` for `deser`; and neither of the last two ever
+  `confirmed`.
+
+  `oob` also called itself "the only confirmed-tier method for a fully blind
+  sink". The tier is right, but an exclusivity claim is the kind that goes
+  stale without anything failing, so the line now says what the class itself
+  says: it confirms a sink with no output channel and no writable web root.
+
+  A new test in `CLIDocumentationTestCase` holds the list to the registry, the
+  way `--eval-engines` is already held to the corpus. It reads the `--methods`
+  help alone rather than the whole page, because every one of these names also
+  occurs inside some other flag -- `file` in `--request-file`, `write` in
+  `--file-write-path`, `time` in `--time-base` -- and it looks for the name
+  followed by the parenthesis that opens its description, because the old help
+  carried the word `write` inside `file`'s "write+read-back" and a looser
+  match would have counted that as documentation.
+
+  No version bump -- this is documentation and tests only.
+
 ## [Unreleased]
 
 ## [2.45.0] — 2026-09-23
