@@ -4098,6 +4098,23 @@ class DetectionMethod:
         belonged to the format."""
         return self.uses_oob_host
 
+    def can_use_oob_host(self) -> bool:
+        """Whether the host, as the operator wrote it, is one this method can
+        put a token in.
+
+        The other half of the question, and separate because the two callers
+        compose them differently. The stranded notice wants capability alone --
+        it is *about* the address, and an address test inside
+        :meth:`builds_callback_probes` would silence it for exactly the case it
+        reports. The listener gate wants both: a listener bound for a method
+        that cannot use the host receives nothing, and the run then announced
+        "the target will open outbound connections" directly beneath a notice
+        saying those probes are not sent."""
+        host = str(self.config.get("oob_host") or "").strip().rstrip(".")
+        if not host:
+            return False
+        return not (self.oob_needs_dns_label and OobCallback._is_ip_literal(host))
+
     # Whether the operator's own configuration is this method's gate, in place
     # of the rung. `file` and `write` change the target and say so in `safety`,
     # but they do nothing at all until a directory to write into and a URL to
@@ -8459,7 +8476,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"payloads of that kind. Pass --verify-active-risk {cls.safety} to allow "
                       "it.")
                 return 1
-            if args.oob_host and any(m.builds_callback_probes() for m in configured_methods):
+            if args.oob_host and any(m.builds_callback_probes() and m.can_use_oob_host()
+                                     for m in configured_methods):
                 listener = OOBListener(answer_ip=args.listen_answer_ip, log_path=args.listen_log)
                 # HTTP is `oob`'s channel, not `lookup`'s. A JNDI lookup reaches
                 # this listener through DNS and nothing else, so a bound port
