@@ -219,7 +219,7 @@ Two oracles, of deliberately different strength:
 | Oracle | Needs | Reaches |
 |---|---|---|
 | **shape** | nothing | `needs-review` |
-| **dns** | `--oob-host` and a listener | `deserialization-sink` |
+| **dns** | a delegated `--oob-host` name and a listener | `deserialization-sink` |
 
 **shape** sends three payloads per ecosystem — a well-formed object stream, the
 same stream truncated, and the format's magic bytes followed by random noise of

@@ -7201,11 +7201,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "requests. 'quick' sends only the canonical probes, for rate-limited targets "
                              "or when the sink's shape is already known.")
     parser.add_argument("--oob-host", default=None,
-                        help="(--methods oob) Host the TARGET should call back to, e.g. an IP it can "
-                             "reach or a domain delegated to this listener. Required for --methods oob, "
-                             "which starts the built-in HTTP+DNS listener and confirms execution from "
-                             "the callback. Makes the target open outbound connections, so it never runs "
-                             "unless you name the host.")
+                        help="(--methods oob/lookup/deser) Host the TARGET should call back to: a domain "
+                             "delegated to this listener, or an IP it can reach. Required for --methods "
+                             "oob and lookup; optional for deser, whose shape oracle needs no listener at "
+                             "all. The built-in HTTP+DNS listener runs in-process and the verdict rests on "
+                             "the callback. An IP serves oob alone, which carries its token in the URL "
+                             "path — lookup and deser have nowhere but a DNS label to put one, so both "
+                             "need a delegated name. Makes the target open outbound connections, so it "
+                             "never runs unless you name the host.")
     parser.add_argument("--methods", default=None,
                         help="Comma-separated RCE detection methods to run against --verify-url/-r instead of "
                              "the classic per-payload oracle. Available: reflected (results-based execution "
@@ -7217,12 +7220,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "interpreted); oob (DNS/HTTP callback to the built-in listener, needs "
                              "--oob-host — confirms a sink with no output channel and no writable web root); "
                              "lookup (an expression-lookup sink in Log4Shell's shape, which resolves a "
-                             "${jndi:...} URI rather than shelling out, needs --oob-host — reaches "
-                             "lookup-sink, never confirmed); "
+                             "${jndi:...} URI rather than shelling out, needs a DNS name delegated to the "
+                             "listener for --oob-host and builds nothing from an address literal — "
+                             "reaches lookup-sink, never confirmed); "
                              "time (hardened blind-timing regression, needs-review only); "
                              "deser (proves the endpoint deserializes attacker data — deserialization-sink "
-                             "via a non-executing DNS gadget that needs --oob-host, needs-review for the "
-                             "listener-free shape differential, never confirmed). "
+                             "via a non-executing DNS gadget, which needs the same delegated --oob-host "
+                             "name lookup does, needs-review for the listener-free shape differential, "
+                             "never confirmed). "
                              "Opt-in and additive: when omitted, verification keeps its existing behaviour "
                              "unchanged.")
     parser.add_argument("--detect-json", default=None, metavar="PATH",
@@ -7788,8 +7793,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             if callback_methods and not args.oob_host:
                 print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
                       "listener, so it needs "
-                      "--oob-host: an address the target can reach that arrives here (an IP on "
-                      "a routable interface, or a domain delegated to this host).")
+                      "--oob-host: an address the target can reach that arrives here (a domain "
+                      "delegated to this host, or an IP on a routable interface — an IP serves oob "
+                      "alone, since lookup has nowhere but a DNS label to carry its token).")
                 return 1
             # Same gate the corpus payloads have always had. Detection methods
             # build their own probes and so bypass every corpus-level safety
