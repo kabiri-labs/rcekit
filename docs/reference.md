@@ -48,7 +48,7 @@ starting point — this page is for looking things up once you know what you wan
 
 | Option | Description | Default |
 |---|---|---|
-| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser` | None |
+| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser`, `boolean` | None |
 | `--file-write-path` | (`file`) server-side directory the target can write to, e.g. `/tmp` | None |
 | `--file-read-url` | (`file`) URL template that reads it back: `{name}`, `{path}`, `{path_enc}` | None |
 | `--webroot` | (`file`) web-root alias for `--file-write-path` | None |
