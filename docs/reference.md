@@ -48,7 +48,7 @@ starting point — this page is for looking things up once you know what you wan
 
 | Option | Description | Default |
 |---|---|---|
-| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser` | None |
+| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser`, `boolean` | None |
 | `--file-write-path` | (`file`) server-side directory the target can write to, e.g. `/tmp` | None |
 | `--file-read-url` | (`file`) URL template that reads it back: `{name}`, `{path}`, `{path_enc}` | None |
 | `--webroot` | (`file`) web-root alias for `--file-write-path` | None |
@@ -86,6 +86,7 @@ starting point — this page is for looking things up once you know what you wan
 | `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:…}` URI rather than running a command, and calls back carrying a per-probe token. Sends `dns://` at `intrusive`, and `ldap://` / `rmi://` as well at `stateful`. Needs a **name** for `--oob-host`; an address literal carries no token, so it builds nothing | `intrusive` | `lookup-sink` |
 | `time` | Blind execution, via a `0/N/2N` regression | `safe` | `needs-review` only |
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
+| `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `needs-review` only |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
 run's tier is refused **by name** rather than skipped, because a run that
@@ -305,8 +306,98 @@ target itself.
 shared object into the plugin directory, then `CREATE FUNCTION` — not something a
 single probe can carry, so there is no stub for it. MongoDB `$where` is a
 boolean-only channel (its JS sandbox cannot reach a shell), so it needs a
-different oracle rather than this one; `mongo-express/CVE-2019-10758` is a plain
-JS `eval` sink that `--methods eval` already covers.
+different oracle rather than this one — which is what [`--methods boolean`](#when-the-sink-answers-yes-or-no-and-nothing-else) is;
+`mongo-express/CVE-2019-10758` is a plain JS `eval` sink that `--methods eval`
+already covers.
+
+### When the sink answers yes or no and nothing else
+
+Some sinks evaluate an expression and render none of it. MongoDB `$where` is the
+canonical one: a JS sandbox with no shell, no egress and no value in the
+response — only a document set that a predicate narrows. Every other oracle in
+this tool is structurally blind to that. `reflected` and `eval` need the computed
+value rendered; `time` needs a sleep; `oob` needs egress. Measured against
+exactly that sink:
+
+```
+[detect] methods: reflected, eval, time
+[detect] sent 2426 probes: negative=2426
+```
+
+2426 requests and a clean negative on a target that evaluates whatever it is
+handed. `--methods boolean` reads the one channel that is left — whether the
+*shape* of the response changed:
+
+```bash
+python rcekit.py --acknowledge-consent \
+  --verify-url 'https://target.example/search?q=FUZZ' --methods boolean
+```
+
+**It is reported `needs-review` and it will never be anything else.** Not because
+the signal is weak — it is the strongest weak signal in the tool — but because of
+what it cannot distinguish. Against a sandboxed `eval` sink and against a plain
+SQLite comparison, this oracle produced an identical clean differential in 40
+runs each. A query engine comparing two numbers is not remote code execution, and
+nothing in the response says which of the two answered. Extracting a locally
+computed product bit by bit through the channel does not fix that either: it
+recovers the product through both sinks alike, for about 80 requests and a string
+function a sandbox may well deny.
+
+**The naive form of this oracle is unusable**, which is why none of it is naive.
+Sending `1==1` against `1==2` and calling a changed response a finding reported
+"vulnerable" in 40 of 40 runs against a target that only *reflected* its input,
+and in 32 of 40 against one whose response merely wobbled. Four guards, each one
+a measured false-finding rate rather than a precaution:
+
+| Guard | What it removes | Measured without it |
+|---|---|---|
+| Compare response **structure**, not the body or its length | A reflected payload changes the text between tags, and the text between tags is what the signature throws away | A length-based signature claimed a differential in 13 of 25 runs against a reflect-only target; comparing raw bodies was unusable outright, reading `unstable` in 25 of 25 runs against a target that *was* vulnerable |
+| Several **independently randomised** true/false pairs | A response that varies on its own | One pair claimed a differential in 46 of 200 runs against a noisy target; two claimed none in 200 |
+| **Randomised firing order** | A target that never reads the payload but degrades part-way through the run — a rate limiter, a filling log | An ordered true-then-false series claimed a differential in 100 runs of 100 |
+| An **anchor before and after** the series, each a *different* true predicate | The same, structurally rather than probabilistically | Shuffling alone still left 2 in 100, which is just the chance a shuffle lands separable. Repeating one anchor payload instead of varying it is worse than weakening the guard — a cache keyed on the query string replays the opening answer, and the check measures the cache: 36 catches in 39 runs live, **0 in 39** behind a cache |
+
+With every guard on, a genuinely evaluating target still read as a differential
+in 100 runs of 100 — the guards cost nothing they were not meant to cost.
+
+**A channel it cannot read is `inconclusive`, never `negative`.** If the same
+probe draws two different shapes, or the shape moves while the series is being
+fired, the run says so. `negative` asserts the probes reached the target and
+found nothing; here they reached it and no answer could be read out of them,
+which is the same false clean `blocked` and `nothing-tested` exist to prevent.
+
+**`AND` is safe, `OR` is not, and both are needed.** The probe breaks out of a
+condition the application already wrote, and the connective is this method's
+equivalent of a command separator:
+
+| Connective | Differentiates when | Rung |
+|---|---|---|
+| bare (the value *is* the predicate) | the sink takes the whole value | `safe` |
+| `&&`, `and` | the application's own predicate is **true** | `safe` |
+| `\|\|`, `or` | the application's own predicate is **false** | `stateful` |
+
+They are complements, not alternatives — dropping `OR` is a blind spot and not a
+saving. It is held at the top rung because a true predicate `OR`-ed into a
+`DELETE … WHERE` took a table from 3 rows to 0, where the same predicate `AND`-ed
+into it left all 3. The run names every shape it held back and the flag that
+sends it, so this is a decision the operator makes rather than one made for them.
+
+**Cost.** One series per *context*, not per carrier — a predicate carries no
+shell dialect, so the same context under `unix` and under `windows` would be the
+same bytes asking the same question. At `--probe-depth full` that is 27 requests
+per context and at `quick` it is 15; `quick` halves the pairs and never goes
+below two, because one pair is the rung the measurement rejected. During
+injection-point enumeration it runs in the second execution wave, with `time` and
+for the same reason: none of its probes means anything on its own, so it is worth
+paying for once the cheap results-based methods have found nothing.
+
+**What it is not offered.** Contexts that carry the injected value as *code*
+rather than as a value — `sql`, `javascript`, `php`, the shell break-out
+contexts, and the three shell dialects where the value simply is the command —
+are skipped. A bare comparison has no observable effect in any of them, so the
+probe would be spent asking nothing; the break-out this method needs is the
+connective above, which it supplies itself. Contexts that *wrap* the value stay
+on the predicate side however elaborate their delimiters are, `xml_cdata` and
+`yaml` included.
 
 ### When a filter answers instead of the target
 

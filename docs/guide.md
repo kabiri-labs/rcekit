@@ -183,6 +183,7 @@ reported separately.
 | The sink interpolates an expression rather than shelling out | `lookup` | same listener; `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them. Proves a lookup sink, **not** execution |
 | No output, but you control a web root | `file` | writes files (see [No-egress targets](#no-egress-targets)) |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
+| The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
 
 **Probe depth trades requests for coverage.** By default (`--probe-depth full`)
 each sink gets three extra probe shapes beyond the canonical ones, because the

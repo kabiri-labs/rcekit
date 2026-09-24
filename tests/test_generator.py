@@ -12,6 +12,7 @@ import base64
 import inspect
 import json
 import os
+import random
 import re
 import struct
 import subprocess
@@ -5461,10 +5462,29 @@ class DetectionQuestionTestCase(unittest.TestCase):
         self.assertEqual(rcekit.CHEAP_DETECTION_METHODS, {"reflected", "eval"})
 
     def test_a_costly_method_says_so_on_its_own_class(self):
-        for name in ("file", "write", "time", "oob", "lookup", "deser"):
+        for name in ("file", "write", "time", "oob", "lookup", "deser", "boolean"):
             self.assertTrue(rcekit.DETECTION_METHODS[name].costly, name)
         for name in ("reflected", "eval"):
             self.assertFalse(rcekit.DETECTION_METHODS[name].costly, name)
+
+    def test_a_method_whose_series_is_its_answer_is_costly(self):
+        """`costly` decides which wave the enumeration driver runs first, and
+        the question it is really asking is whether one probe buys an answer.
+
+        For every method before `boolean` that was the same question as "does
+        one probe cost more than one response", because each probe was also a
+        unit of information. `boolean` fires ordinary requests and none of them
+        means anything alone -- the answer is the partition across the series.
+        Read the other way it would sit in the wave that exists to be answered
+        cheaply, ahead of `reflected` and `eval` and spending the same
+        per-question budget, at 27 requests before it can say a word."""
+        for name, method in rcekit.DETECTION_METHODS.items():
+            if not method.aggregate:
+                continue
+            with self.subTest(method=name):
+                self.assertTrue(
+                    method.costly,
+                    f"{name} decides from a whole series but claims one probe is enough")
 
 
 class CostLineQuestionTestCase(unittest.TestCase):
@@ -9024,3 +9044,573 @@ class TerminalSafeOutputTestCase(unittest.TestCase):
         printed = buffer.getvalue()
         self.assertNotIn("\r", printed)
         self.assertIn("\\x0d", printed)
+
+
+class ResponseShapeTestCase(unittest.TestCase):
+    """The signature the boolean oracle reads.
+
+    A boolean channel carries one bit, read from whether the response changed.
+    So everything this function is blind to is a way the oracle cannot be
+    lied to, and everything it can see is the oracle's whole vocabulary.
+    """
+
+    PAGE = "<html><body><ul>{items}</ul>{tail}</body></html>"
+
+    def _page(self, items, tail=""):
+        return self.PAGE.format(
+            items="".join(f"<li>{item}</li>" for item in items), tail=tail)
+
+    def test_reflecting_two_different_payloads_leaves_one_shape(self):
+        """The guard that keeps this oracle off a plain reflection target.
+
+        It is structural rather than lucky: a reflected payload lands in the
+        text between two tags, and the text between two tags is what the
+        signature throws away. Measured against a reflect-only target, a
+        length-based signature claimed a differential in 13 of 25 runs."""
+        first = "<p>searched for: 1234*5678==7006652</p><ul><li>a</li></ul>"
+        second = "<p>searched for: 4321*8765==1000000</p><ul><li>a</li></ul>"
+        self.assertEqual(rcekit.response_shape(200, first),
+                         rcekit.response_shape(200, second))
+
+    def test_two_bodies_of_different_length_share_a_shape(self):
+        # The direct statement of "not a length". Same structure, very
+        # different size.
+        self.assertEqual(rcekit.response_shape(200, self._page(["a"])),
+                         rcekit.response_shape(200, self._page(["a" * 400])))
+
+    def test_a_structural_difference_is_seen(self):
+        # And the signal the oracle actually lives on: a predicate that
+        # selected rows against one that selected none.
+        self.assertNotEqual(rcekit.response_shape(200, self._page(["a", "b", "c"])),
+                            rcekit.response_shape(200, self._page([])))
+
+    def test_a_comment_carrying_a_counter_is_not_a_difference(self):
+        self.assertEqual(
+            rcekit.response_shape(200, self._page(["a"], "<!--rendered in 4ms-->")),
+            rcekit.response_shape(200, self._page(["a"], "<!--rendered in 91ms-->")))
+
+    def test_an_attribute_that_changes_every_request_is_not_a_difference(self):
+        # A CSRF token or a request id makes every response unique. Comparing
+        # raw bodies read `unstable` in 25 of 25 runs against a target that was
+        # genuinely vulnerable -- the oracle could not be used at all.
+        first = "<html><head><meta name=csrf content='ab12'></head><body><p>x</p></body></html>"
+        second = "<html><head><meta name=csrf content='ff99'></head><body><p>x</p></body></html>"
+        self.assertEqual(rcekit.response_shape(200, first),
+                         rcekit.response_shape(200, second))
+
+    def test_json_keeps_list_length_and_drops_every_scalar(self):
+        """A JSON API has no tags, so the markup reading sees nothing in it and
+        every response looks unstable. Measured on a JSON sink, the tag
+        skeleton read `unstable` 25 times out of 25 and a shape tree read the
+        differential 25 times out of 25."""
+        rows = '{"request": "%s", "at": %s, "results": %s}'
+        full = rows % ("aaaa", "1.5", '["x", "y"]')
+        other = rows % ("bbbb", "9.9", '["p", "q"]')
+        empty = rows % ("cccc", "3.3", "[]")
+        self.assertEqual(rcekit.response_shape(200, full),
+                         rcekit.response_shape(200, other))
+        self.assertNotEqual(rcekit.response_shape(200, full),
+                            rcekit.response_shape(200, empty))
+
+    def test_a_json_body_is_not_read_as_markup(self):
+        kind, _status, _shape = rcekit.response_shape(200, '{"a": "<b>hi</b>"}')
+        self.assertEqual(kind, "json")
+
+    def test_malformed_json_falls_back_rather_than_raising(self):
+        # The input is whatever a target returned. A signature that raises on a
+        # truncated body turns an oracle into an error.
+        kind, _status, _shape = rcekit.response_shape(200, '{"a": [1, 2')
+        self.assertEqual(kind, "text")
+
+    def test_plain_text_keeps_its_layout_and_not_its_words(self):
+        self.assertEqual(rcekit.response_shape(200, "alpha bravo\ncharlie"),
+                         rcekit.response_shape(200, "kilo lima\nmike"))
+        self.assertNotEqual(rcekit.response_shape(200, "alpha bravo\ncharlie"),
+                            rcekit.response_shape(200, "alpha bravo"))
+
+    def test_the_status_is_part_of_the_shape(self):
+        # An endpoint that answers 200 to one predicate and 500 to another has
+        # answered, whatever the bodies look like.
+        self.assertNotEqual(rcekit.response_shape(200, self._page(["a"])),
+                            rcekit.response_shape(500, self._page(["a"])))
+
+
+class BooleanTargets:
+    """The sinks the boolean oracle is measured against.
+
+    Every one of them wraps its answer in ordinary page chrome -- a token that
+    changes per request, a timestamp, a counter -- because a target without
+    that is a target this oracle was never at risk from.
+    """
+
+    ROWS = ("alpha", "bravo", "charlie")
+
+    def __init__(self, seed=5):
+        self.rng = random.Random(seed)
+        self.requests = 0
+
+    def chrome(self, inner):
+        self.requests += 1
+        return ("<html><head><meta name=csrf content='%08x'></head><body>"
+                "<p>generated %d</p>%s<footer>req %d</footer></body></html>"
+                % (self.rng.getrandbits(32), self.rng.getrandbits(30), inner,
+                   self.rng.getrandbits(20)))
+
+    def _listing(self, rows):
+        return "<ul>%s</ul>" % "".join(f"<li>{row}</li>" for row in rows)
+
+    @staticmethod
+    def _evaluates(expression):
+        """The sink: it evaluates the expression and renders nothing of it.
+
+        A sandbox with no builtins, which is what makes this the shape no
+        shipped oracle can reach -- there is no shell, no egress and no value
+        in the response."""
+        try:
+            return bool(eval(expression, {"__builtins__": {}}, {}))  # noqa: S307
+        except Exception:
+            return False
+
+    # -- the sink the method exists for ------------------------------------
+    def evaluating(self, method, path, params, headers, body):
+        hit = self._evaluates(params.get("q", ""))
+        return (200, self.chrome(self._listing(self.ROWS) if hit
+                                 else "<ul></ul><p>no results</p>"))
+
+    def evaluating_json(self, method, path, params, headers, body):
+        hit = self._evaluates(params.get("q", ""))
+        return (200, json.dumps({"request": "%08x" % self.rng.getrandbits(32),
+                                 "results": list(self.ROWS) if hit else []}))
+
+    # -- the three ways it can be lied to ----------------------------------
+    def reflecting(self, method, path, params, headers, body):
+        """Echoes the payload and evaluates nothing. The naive form of this
+        oracle called this target vulnerable in 40 runs out of 40."""
+        return (200, self.chrome("<p>searched for: %s</p>%s"
+                                 % (params.get("q", ""), self._listing(self.ROWS))))
+
+    def wobbling(self, method, path, params, headers, body):
+        """Never reads the payload; its listing varies on its own. The naive
+        oracle called this vulnerable in 32 runs out of 40."""
+        return (200, self.chrome(
+            self._listing(self.ROWS[:self.rng.randint(0, len(self.ROWS))])))
+
+    def caching_degrader(self, switch):
+        """The same input-blind degradation, behind a cache keyed on the query
+        string -- which is what most GET endpoints sit behind.
+
+        Every probe payload is unique and so stays live. What a cache *can*
+        replay is a payload sent more than once, which is why the anchors are
+        three different true predicates rather than one repeated: identical
+        anchors would be one live request and two replays of it, and the
+        closing anchor would agree with the opening one whatever happened in
+        between."""
+        cache = {}
+
+        def route(method, path, params, headers, body):
+            key = params.get("q", "")
+            if key in cache:
+                return (200, cache[key])
+            served = self.degrading_after(switch)(method, path, params, headers, body)
+            cache[key] = served[1]
+            return served
+
+        return route
+
+    def degrading_after(self, switch):
+        """Never reads the payload either, but starts refusing to work
+        part-way through -- a rate limiter, a filling log, a pool running out.
+
+        Fired in the order they were built, every true predicate then every
+        false one, this target splits the series perfectly: measured at the
+        worst switch point of a sweep, an ordered series read as a clean
+        finding in 100 runs out of 100."""
+
+        def route(method, path, params, headers, body):
+            if self.requests >= switch:
+                return (200, self.chrome("<ul></ul><p>slow down</p>"))
+            return (200, self.chrome(self._listing(self.ROWS)))
+
+        return route
+
+
+def _boolean_record(**overrides):
+    overrides.setdefault("context", "raw")
+    return make_record(**overrides)
+
+
+class BooleanOracleTestCase(unittest.TestCase):
+    """`/vuln` executes, `/reflect` echoes -- the test every detection method in
+    this repository owes, applied to the one oracle with no computed value to
+    lean on."""
+
+    def _run(self, route, records=None, config=None, gen=None):
+        gen = gen or RCEKit()
+        with local_target(route) as base:
+            results = gen.run_detection(
+                records or [_boolean_record()], url=f"{base}/s?q=FUZZ",
+                methods=["boolean"], config=dict(config or {}), timeout=15)
+        return gen, results
+
+    def test_a_sink_that_evaluates_the_predicate_is_reported(self):
+        targets = BooleanTargets()
+        _gen, results = self._run(targets.evaluating)
+        self.assertEqual([r["verdict"] for r in results], ["needs-review"])
+        self.assertIn("partitioned", results[0]["detail"])
+
+    def test_a_json_sink_is_reported_too(self):
+        targets = BooleanTargets()
+        _gen, results = self._run(targets.evaluating_json)
+        self.assertEqual([r["verdict"] for r in results], ["needs-review"])
+
+    def test_a_target_that_only_reflects_is_negative(self):
+        targets = BooleanTargets()
+        _gen, results = self._run(targets.reflecting)
+        self.assertEqual([r["verdict"] for r in results], ["negative"])
+
+    def test_the_finding_says_it_is_not_execution(self):
+        """The evidence line carries the limit, not just the docs.
+
+        Against a sandboxed `eval` sink and against a plain SQLite predicate
+        this oracle produced an identical differential in 40 runs each. A
+        reader of one finding cannot be expected to know that; the finding has
+        to say it."""
+        targets = BooleanTargets()
+        _gen, results = self._run(targets.evaluating)
+        self.assertIn("not execution", results[0]["detail"])
+
+
+class BooleanNeverConfirmsTestCase(unittest.TestCase):
+    """The tier ceiling, stated as behaviour rather than as an attribute.
+
+    `confirmed` means the target executed the input. This oracle cannot show
+    that: it reports a differential, and a query engine comparing two numbers
+    produces the same differential. Widening `confirmed` to include it would
+    end the one guarantee the tool rests on.
+    """
+
+    def test_the_class_declares_a_ceiling_below_confirmed(self):
+        self.assertEqual(rcekit.DETECTION_METHODS["boolean"].tier, "needs-review")
+
+    def test_no_series_of_any_shape_produces_confirmed(self):
+        """Drive `confirm_series` directly across the whole space of answers a
+        target could give, including the perfect one."""
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), {})
+        probes = meth.build_probes(_boolean_record(), random.Random(1))
+        self.assertTrue(probes, "the method built nothing to judge")
+        bodies = ("<ul><li>a</li></ul>", "<ul></ul>", "<p>err</p>")
+        rng = random.Random(7)
+        for trial in range(200):
+            series = []
+            for probe in probes:
+                if probe.phase == "anchor-open" or probe.phase == "anchor-close":
+                    body = bodies[0]
+                elif trial == 0:
+                    # The perfect answer: every true one way, every false the
+                    # other. This is the series that earns the method's best
+                    # verdict, and its best verdict is still not `confirmed`.
+                    body = bodies[0] if probe.phase == "yes" else bodies[1]
+                else:
+                    body = rng.choice(bodies)
+                series.append((probe, Observation(status=200, body=body)))
+            verdict = meth.confirm_series(series)
+            with self.subTest(trial=trial):
+                self.assertNotEqual(verdict.status, "confirmed")
+        # And the perfect series really did reach the ceiling, so the assertion
+        # above is not passing because nothing was ever found.
+        best = [(probe, Observation(status=200,
+                                    body=bodies[0] if probe.phase != "no" else bodies[1]))
+                for probe in probes]
+        self.assertEqual(meth.confirm_series(best).status, "needs-review")
+
+
+class BooleanUnreadableChannelTestCase(unittest.TestCase):
+    """A channel that cannot carry one bit is `inconclusive`, never `negative`.
+
+    `negative` asserts the probes reached the target and found nothing. Here
+    the probes reached the target and the run could not read an answer out of
+    them -- the same false clean `blocked` and `nothing-tested` exist to
+    prevent, one oracle further in.
+    """
+
+    def _run(self, route, records=None):
+        gen = RCEKit()
+        with local_target(route) as base:
+            return gen.run_detection(records or [_boolean_record()],
+                                     url=f"{base}/s?q=FUZZ", methods=["boolean"],
+                                     config={}, timeout=15)
+
+    def test_a_response_that_varies_on_its_own_is_inconclusive(self):
+        results = self._run(BooleanTargets().wobbling)
+        self.assertEqual([r["verdict"] for r in results], ["inconclusive"])
+
+    def test_a_cache_cannot_answer_the_anchors_for_the_target(self):
+        """The anchors are three different true predicates, not one sent three
+        times, and this is the difference.
+
+        Measured against an input-blind target that degrades mid-series and
+        replays any query string it has already answered: identical anchors
+        caught it in 36 of 39 runs live and in **0 of 39** behind the cache --
+        the guard was not weakened, it was switched off. Distinct payloads are
+        each a live request, so the check measures the target."""
+        targets = BooleanTargets()
+        results = self._run(targets.caching_degrader(2 + 4 * 2))
+        self.assertEqual([r["verdict"] for r in results], ["inconclusive"])
+
+    def test_every_anchor_is_a_different_predicate(self):
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), {})
+        probes = meth.build_probes(_boolean_record(), random.Random(5))
+        anchors = [p.payload for p in probes if p.phase.startswith("anchor")]
+        self.assertEqual(len(anchors), 3)
+        self.assertEqual(len(set(anchors)), 3,
+                         "a repeated anchor payload is one a cache can replay")
+
+    def test_a_target_that_degrades_mid_series_is_not_a_finding(self):
+        """The anchor either side, which is the guard that earned its place
+        last: shuffling alone still left 2 false findings in 100, because a
+        shuffle can land separable by chance. A target that moved during the
+        series cannot answer the closing anchor the way it answered the
+        opening one."""
+        targets = BooleanTargets()
+        # Two opening anchors, then the series: the switch is placed exactly
+        # where a true-then-false ordering would split cleanly.
+        results = self._run(targets.degrading_after(2 + 4 * 2))
+        self.assertEqual([r["verdict"] for r in results], ["inconclusive"])
+        self.assertIn("moved while the series", results[0]["detail"])
+
+
+class BooleanConnectiveTestCase(unittest.TestCase):
+    """`AND` is safe, `OR` is not, and both are needed.
+
+    Measured: `AND` differentiates only where the application's own predicate
+    is true and `OR` only where it is false, so they are complements. And a
+    true predicate `OR`-ed into a `DELETE ... WHERE` took a table from 3 rows
+    to 0, where the same predicate `AND`-ed into it left all 3.
+    """
+
+    def _probes(self, config=None):
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), dict(config or {}))
+        return meth, meth.build_probes(_boolean_record(), random.Random(3))
+
+    def test_every_or_shape_asks_for_the_top_rung(self):
+        meth, probes = self._probes()
+        ors = [p for p in probes if p.carrier in ("or", "or-word")]
+        self.assertTrue(ors, "no OR shapes were built")
+        for probe in ors:
+            with self.subTest(carrier=probe.carrier):
+                self.assertEqual(meth.probe_safety(probe), "stateful")
+
+    def test_no_and_shape_asks_for_more_than_safe(self):
+        meth, probes = self._probes()
+        ands = [p for p in probes if p.carrier in ("bare", "and", "and-word")]
+        self.assertTrue(ands)
+        for probe in ands:
+            with self.subTest(carrier=probe.carrier):
+                self.assertEqual(meth.probe_safety(probe), "safe")
+
+    def test_the_default_run_holds_the_or_shapes_back_by_name(self):
+        gen = RCEKit()
+        targets = BooleanTargets()
+        with local_target(targets.evaluating) as base:
+            gen.run_detection([_boolean_record()], url=f"{base}/s?q=FUZZ",
+                              methods=["boolean"], config={}, timeout=15)
+        self.assertGreater(gen.safety_held_probes, 0)
+        named = " ".join(gen.safety_held_reasons)
+        self.assertIn("boolean/or", named)
+        self.assertIn("--verify-active-risk stateful", named)
+
+    def test_raising_the_rung_sends_them(self):
+        # A coverage hole is a false negative wearing a safety label, so the OR
+        # shapes ship -- behind the flag, and they really do go when it is set.
+        gen = RCEKit()
+        targets = BooleanTargets()
+        with local_target(targets.evaluating) as base:
+            gen.run_detection([_boolean_record()], url=f"{base}/s?q=FUZZ",
+                              methods=["boolean"],
+                              config={"max_safety": "stateful"}, timeout=15)
+        self.assertEqual(gen.safety_held_probes, 0)
+
+
+class BooleanSeriesShapeTestCase(unittest.TestCase):
+    """How the series is built: the pair floor, the ordering, and the anchors.
+
+    Each of these is a measured false-finding rate rather than a preference.
+    """
+
+    def _probes(self, config=None, record=None, seed=3):
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), dict(config or {}))
+        return meth, meth.build_probes(record or _boolean_record(), random.Random(seed))
+
+    def test_a_connective_never_runs_at_a_single_pair(self):
+        """One pair claimed a differential on an ordinary noisy target in 46 of
+        200 runs. Two claimed none in 200. There is no honest rung below two,
+        so `--probe-depth quick` trades four for two and never for one."""
+        self.assertGreaterEqual(min(rcekit.DETECTION_METHODS["boolean"].PAIRS.values()), 2)
+        for depth in ("quick", "full"):
+            meth, probes = self._probes({"probe_depth": depth})
+            for name, _form, _rung in meth.CONNECTIVES:
+                built = [p for p in probes if p.carrier == name]
+                with self.subTest(depth=depth, connective=name):
+                    self.assertGreaterEqual(len(built), 4)
+                    self.assertEqual(sum(1 for p in built if p.phase == "yes"),
+                                     sum(1 for p in built if p.phase == "no"))
+
+    def test_a_connective_thinned_below_the_floor_is_skipped_not_graded_down(self):
+        """A profile or a rung can remove probes after they are built. Judging
+        a connective on what survives would put the run back at the pair count
+        the measurement rejected, silently and only for the operator who
+        narrowed the run."""
+        meth, probes = self._probes()
+        bare = [p for p in probes if p.carrier == "bare"]
+        # One pair left, answering perfectly.
+        thinned = [next(p for p in bare if p.phase == "yes"),
+                   next(p for p in bare if p.phase == "no")]
+        series = [(p, Observation(status=200, body="<ul><li>a</li></ul>"))
+                  for p in probes if p.phase == "anchor-open" or p.phase == "anchor-close"]
+        series += [(p, Observation(status=200,
+                                   body="<ul><li>a</li></ul>" if p.phase == "yes"
+                                        else "<ul></ul>"))
+                   for p in thinned]
+        self.assertEqual(meth.confirm_series(series).status, "negative")
+
+    def test_a_floor_on_the_total_is_not_a_floor_on_each_side(self):
+        """Three true probes and one false one clear a floor counted across
+        both sides -- and then the false side agrees with itself because there
+        is only one of it. That is the single-pair answer arriving by the back
+        door, on the half where a target gets to look clean."""
+        meth, probes = self._probes()
+        bare = [p for p in probes if p.carrier == "bare"]
+        thinned = [p for p in bare if p.phase == "yes"][:3]
+        thinned += [p for p in bare if p.phase == "no"][:1]
+        series = [(p, Observation(status=200, body="<ul><li>a</li></ul>"))
+                  for p in probes if p.phase in ("anchor-open", "anchor-close")]
+        series += [(p, Observation(status=200,
+                                   body="<ul><li>a</li></ul>" if p.phase == "yes"
+                                        else "<ul></ul>"))
+                   for p in thinned]
+        self.assertEqual(meth.confirm_series(series).status, "negative")
+
+    def test_the_series_is_not_fired_in_truth_order(self):
+        """Every true predicate and then every false one is the one ordering a
+        target can answer by accident. At the worst switch point of a swept
+        degradation, an ordered series read as a clean finding in 100 runs out
+        of 100 -- from a target that never looked at the payload."""
+        _meth, probes = self._probes()
+        answers = [p.phase for p in probes if p.phase in ("yes", "no")]
+        ordered = sorted(answers, key=lambda phase: phase != "yes")
+        self.assertNotEqual(answers, ordered,
+                            "the probes go out in truth order, so a target that "
+                            "degrades during the run reads as a finding")
+
+    def test_the_firing_order_is_not_the_same_twice(self):
+        """And the order is drawn per run rather than fixed.
+
+        The build order alone is already interleaved, so this is the narrower
+        thing the shuffle adds: a target cannot learn the sequence, and two
+        runs against the same endpoint do not present it the same series."""
+        orders = set()
+        for seed in range(8):
+            _meth, probes = self._probes(seed=seed)
+            orders.add(tuple(p.phase for p in probes))
+        self.assertGreater(len(orders), 1,
+                           "every run fires the same sequence of true and false probes")
+
+    def test_the_series_is_anchored_at_both_ends(self):
+        _meth, probes = self._probes()
+        phases = [p.phase for p in probes]
+        self.assertEqual(phases[:2], ["anchor-open", "anchor-open"],
+                         "nothing measures whether the channel is steady before the series")
+        self.assertEqual(phases[-1], "anchor-close",
+                         "nothing measures whether it stayed steady during the series")
+
+    def test_a_false_predicate_is_the_same_length_as_a_true_one(self):
+        """Matched lengths, so a validator that rejects long values or a filter
+        that counts characters cannot answer in the target's place."""
+        meth, _probes = self._probes()
+        rng = random.Random(11)
+        for _ in range(200):
+            seed = rng.randrange(1 << 30)
+            yes = meth._predicate(random.Random(seed), True)
+            no = meth._predicate(random.Random(seed), False)
+            self.assertEqual(len(yes), len(no), (yes, no))
+            self.assertNotEqual(yes, no)
+
+
+class BooleanCarrierScopeTestCase(unittest.TestCase):
+    """Where the series runs, and where running it again would ask a question
+    whose answer cannot differ."""
+
+    def test_one_series_per_context_however_many_environments(self):
+        """A predicate carries no shell dialect, so the probes for `unix` and
+        for `windows` in the same context are the same bytes -- and the
+        aggregate branch, unlike the per-probe one, has no payload
+        de-duplication to notice."""
+        gen = RCEKit()
+        targets = BooleanTargets()
+        records = [_boolean_record(environment=env)
+                   for env in ("unix", "windows", "powershell")]
+        with local_target(targets.evaluating) as base:
+            results = gen.run_detection(records, url=f"{base}/s?q=FUZZ",
+                                        methods=["boolean"], config={}, timeout=15)
+        self.assertEqual(len(results), 1, [r["verdict"] for r in results])
+        one_series = RCEKit().estimate_detection_probes(
+            [_boolean_record()], ["boolean"], {})
+        self.assertEqual(gen.delivered_probes, one_series)
+
+    def test_a_context_that_carries_code_is_not_offered_a_predicate(self):
+        """Where the injected input is code -- a statement the context breaks
+        out into, or the command itself -- a bare comparison has no observable
+        effect, so the probe would be spent asking nothing."""
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), {})
+        for context in ("sql", "javascript", "php", "shell_single_quoted",
+                        "shell_subshell", "unix_shell", "windows_cmd", "powershell"):
+            with self.subTest(context=context):
+                self.assertFalse(meth.applicable(_boolean_record(context=context)))
+
+    def test_a_context_that_wraps_the_value_is_offered_one(self):
+        """The other half, and the one the first attempt at this got wrong.
+
+        Reading "does the context have a prefix" as "does it break out of a
+        statement" refused `attribute`, `attribute_unquoted`, `xml_cdata` and
+        `yaml` -- four contexts whose delimiters open and close *around* the
+        value, leaving a predicate exactly where a predicate belongs. It also
+        offered the three shell dialects, which have no delimiters at all and
+        run the value as a command."""
+        meth = rcekit.DETECTION_METHODS["boolean"](RCEKit(), {})
+        for context in ("raw", "json", "xml", "yaml", "attribute",
+                        "attribute_unquoted", "xml_cdata", "http_header"):
+            with self.subTest(context=context):
+                self.assertTrue(meth.applicable(_boolean_record(context=context)))
+
+    def test_every_shipped_context_has_been_classified(self):
+        """A context added to the corpus and never classified would default to
+        the predicate side, which is the direction that spends requests on a
+        sink that cannot answer. Enumerated here so adding one fails until
+        somebody decides which side it is on."""
+        shipped = set(RCEKit().contexts)
+        code = set(rcekit.CODE_POSITION_CONTEXTS)
+        self.assertEqual(
+            code - shipped, set(),
+            "CODE_POSITION_CONTEXTS names a context the corpus no longer ships")
+        self.assertEqual(
+            sorted(shipped - code),
+            ["attribute", "attribute_unquoted", "graphql_string", "graphql_variable",
+             "html", "http_header", "json", "raw", "xml", "xml_cdata", "yaml"],
+            "a context was added or moved and nothing decided whether a boolean "
+            "predicate can live in it")
+
+    def test_the_cost_line_matches_what_the_run_sends(self):
+        """The estimate is what an operator on a monitored engagement sees
+        before anything is fired. An aggregate method whose series is built
+        once per context is exactly the shape that has made it wrong before."""
+        records = [_boolean_record(environment=env) for env in ("unix", "windows")]
+        for config in ({}, {"probe_depth": "quick"}, {"max_safety": "stateful"}):
+            gen = RCEKit()
+            estimate = gen.estimate_detection_probes(records, ["boolean"], config)
+            run = RCEKit()
+            targets = BooleanTargets()
+            with local_target(targets.evaluating) as base:
+                run.run_detection(records, url=f"{base}/s?q=FUZZ", methods=["boolean"],
+                                  config=dict(config), timeout=15)
+            with self.subTest(config=tuple(sorted(config.items()))):
+                self.assertEqual(estimate, run.delivered_probes)

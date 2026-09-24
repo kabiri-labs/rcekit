@@ -144,7 +144,7 @@ formats, or the template schema.
 
 ### Fixed
 
-- **`--methods` enumerated five of the eight methods it accepts.** `write`,
+- **`--methods` enumerated only some of the methods it accepts.** `write`,
   `lookup` and `deser` were registered in `DETECTION_METHODS` and had never
   once been named in the help, so `--help` described a whole target class as
   out of reach -- an upload that stores a file, a `${jndi:...}` sink, an
@@ -182,9 +182,133 @@ formats, or the template schema.
   `deser` oracle table in `docs/reference.md` now all say the same thing: an IP
   serves `oob` alone, because only `oob` can put its token in a URL path.
 
+  `boolean` landed on `main` while this branch was open. It was named in the
+  help but left out of the `--methods` row in `docs/reference.md` -- the same
+  drift, one table over. Both carry it now, and the new test covered it without
+  being told to, which is the point of reading the registry instead of a list.
+
   No version bump -- this is documentation and tests only.
 
 ## [Unreleased]
+
+## [2.45.0] — 2026-09-23
+
+### Added
+
+- **`--methods boolean` — a sink that evaluates a predicate and renders nothing
+  of it.** MongoDB `$where` is the shape, and this repository has carried the
+  note for two releases: a JS sandbox with no shell, no egress and no value in
+  the response, only a document set that a predicate narrows. Every shipped
+  oracle is structurally blind to it. Measured against exactly that sink:
+
+  ```
+  [detect] methods: reflected, eval, time
+  [detect] sent 2426 probes: negative=2426
+  ```
+
+  2426 requests and a clean negative on a target that evaluates whatever it is
+  handed. The new method reads the one channel left — whether the *shape* of the
+  response changed between a true predicate and a false one.
+
+  **It is `needs-review` and there is no path from here to `confirmed`.** Not
+  because the signal is weak, but because of what it cannot distinguish: against
+  a sandboxed `eval` sink and against a plain SQLite comparison it produced an
+  identical clean differential in 40 runs each, and a query engine comparing two
+  numbers is not remote code execution. Extracting a locally computed product
+  bit by bit through the channel was tried and does not fix it — it recovers the
+  product through both sinks alike, for about 80 requests and a string function
+  a sandbox may well deny.
+
+  **The naive form of this oracle is unusable**, which is why none of it is.
+  `1==1` against `1==2`, with a changed response read as a finding, called a
+  target that only *reflected* its input vulnerable in 40 runs out of 40, and
+  one whose response merely wobbled in 32 of 40. Four guards, each a measured
+  false-finding rate rather than a precaution:
+
+  - **Compare structure, not the body and not its length.** A reflected payload
+    lands in the text between two tags, and the text between two tags is what
+    the signature throws away. A length-based signature claimed a differential
+    in 13 of 25 runs against a reflect-only target; comparing raw bodies was
+    unusable outright, reading `unstable` in 25 of 25 runs against a target that
+    *was* vulnerable, because one CSRF token makes every response unique.
+  - **Several independently randomised pairs, not one.** Against a target whose
+    response varies on its own, one pair claimed a differential in 46 of 200
+    runs; two claimed none in 200. `--probe-depth quick` trades four pairs for
+    two and never for one.
+  - **Randomised firing order.** A target that never reads the payload but
+    degrades part-way through a run splits an ordered true-then-false series
+    perfectly: at the worst point of a swept degradation, 100 false findings out
+    of 100.
+  - **An anchor before and after the series, each a different true predicate.**
+    Shuffling alone still left 2 in 100, which is just the chance a shuffle
+    lands separable. Re-measuring the channel afterwards caught it 100 times in
+    100, because a target that moved during the series cannot answer the
+    closing anchor the way it answered the opening one. Sending *one* anchor
+    payload three times does not merely weaken that: a cache keyed on the query
+    string answers the repeats from its store, so the closing anchor agrees
+    with the opening one whatever the target did in between. Measured against
+    an input-blind target that degrades mid-series, identical anchors caught it
+    in 36 of 39 runs live and in 0 of 39 behind a cache. Every probe payload is
+    unique, so nothing else in the series is replayable.
+
+  With every guard on, a genuinely evaluating target still read as a
+  differential in 100 runs of 100.
+
+- **A channel that cannot carry one bit is `inconclusive`, never `negative`.**
+  If the same probe draws two different shapes, or the shape moves while the
+  series is being fired, the run says so. `negative` asserts the probes reached
+  the target and found nothing; here they reached it and no answer could be read
+  out of them, which is the same false clean `blocked` and `nothing-tested`
+  exist to prevent, one oracle further in. No new verdict: there are still nine.
+
+- **`response_shape()`** — a response reduced to its structure, with everything
+  it said removed. Three readings, because a response is one of three things and
+  the wrong reading is not a near miss: a JSON document keeps its keys, nesting
+  and list lengths and drops every scalar; markup keeps its tag skeleton;
+  anything else keeps one marker per word per line. Measured on a JSON sink, the
+  markup reading was unusable — `unstable` in 25 of 25 runs — and the shape tree
+  read the differential in 25 of 25.
+
+### Changed
+
+- **`CODE_POSITION_CONTEXTS`** names the contexts that carry the injected value
+  as code rather than as a value, and `boolean` is offered every other one. The
+  first cut of this asked whether the context had a break-out prefix at all, and
+  got both halves wrong: it refused `attribute`, `attribute_unquoted`,
+  `xml_cdata` and `yaml`, whose delimiters open and close *around* the value and
+  leave a predicate exactly where a predicate belongs, and it offered
+  `unix_shell`, `windows_cmd` and `powershell`, which have no delimiters at all
+  and run the value as a command. The suite enumerates both sides, so a context
+  added to the corpus fails until somebody decides which one it is on.
+
+- **`costly` now asks whether one probe buys an *answer*, not whether it costs
+  more than one response.** The two were the same question while every method's
+  probe was also its unit of information. `boolean` is the first where they come
+  apart: each of its probes is one ordinary request and none of them means
+  anything alone, because the answer is the partition across the whole series.
+  Read the old way it would have landed in the wave the enumeration driver runs
+  *first* — the one that exists to be answered cheaply — ahead of `reflected`
+  and `eval` and spending the same per-question budget, at 27 requests before it
+  could say a word. It sits with `time` instead, and the suite now holds every
+  aggregate method to that.
+
+### Security
+
+- **The `OR` connectives ship behind `--verify-active-risk stateful`.** A
+  predicate probe breaks out of a condition the application already wrote, and
+  the connective is this method's command separator. `AND` differentiates only
+  where the application's own predicate is true and `OR` only where it is false,
+  so they are complements and dropping `OR` is a blind spot rather than a
+  saving. But a true predicate `OR`-ed into a `DELETE … WHERE` took a table from
+  3 rows to 0, where the same predicate `AND`-ed into it left all 3 — so it goes
+  at the top rung, held back by default, with the run naming every shape it held
+  and the flag that sends it. `AND` and the bare form stay `safe` and change
+  nothing.
+
+- **Nothing widens `confirmed`.** The new method's ceiling is one tier below it
+  and the suite holds that as behaviour, not as an attribute: `confirm_series`
+  is driven across 200 series including the perfect one, and none of them
+  reaches `confirmed`.
 
 ## [2.44.0] — 2026-09-23
 
@@ -1912,6 +2036,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.0]: https://github.com/kabiri-labs/rcekit/compare/v2.44.0...v2.45.0
 [2.44.0]: https://github.com/kabiri-labs/rcekit/compare/v2.43.0...v2.44.0
 [2.43.0]: https://github.com/kabiri-labs/rcekit/compare/v2.42.0...v2.43.0
 [2.42.0]: https://github.com/kabiri-labs/rcekit/compare/v2.41.0...v2.42.0

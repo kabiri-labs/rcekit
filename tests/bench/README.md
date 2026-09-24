@@ -200,3 +200,26 @@ them. So `oob` must come back `negative` against a target that *is* exploitable.
 That claim is what `lookup` was added for, and until this case ran it rested on
 a fixture. It now rests on Solr 8.11.0.
 
+
+### `boolean` ships without a case, and this is the reason
+
+`--methods boolean` reads a sink that evaluates a predicate and renders nothing
+of it. The target that shape was designed against is MongoDB `$where`, and the
+case would be a vulhub Mongo image with an application in front of it -- which
+needs a container runtime this build environment does not have.
+
+So the method ships on its unit suite, as the contribution guide allows, and the
+gap is worth stating precisely rather than leaving implied. What a fixture
+proves here is narrower than usual: this oracle reads the *shape* of a real
+response, and real responses carry session tokens, timestamps, counters and
+pagination that a fixture only imitates. Its guards were measured against
+fixtures wearing that chrome deliberately, and the unit suite keeps them there
+-- but the question "does an ordinary application's response hold still enough
+between two requests to carry one bit" is exactly the question a fixture cannot
+settle, and it is the one this method lives or dies on.
+
+The control, when the case is written, is the point of it. A vulnerable
+`$where` endpoint must reach `needs-review`, and a patched build of the same
+application must come back `negative` rather than `inconclusive` -- because an
+`inconclusive` from a stable target would mean the signature is reading noise
+that is not there.
