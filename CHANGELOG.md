@@ -144,7 +144,7 @@ formats, or the template schema.
 
 ### Fixed
 
-- **`--methods` enumerated five of the eight methods it accepts.** `write`,
+- **`--methods` enumerated only some of the methods it accepts.** `write`,
   `lookup` and `deser` were registered in `DETECTION_METHODS` and had never
   once been named in the help, so `--help` described a whole target class as
   out of reach -- an upload that stores a file, a `${jndi:...}` sink, an
@@ -181,6 +181,11 @@ formats, or the template schema.
   message printed when a callback method is selected without a host, and the
   `deser` oracle table in `docs/reference.md` now all say the same thing: an IP
   serves `oob` alone, because only `oob` can put its token in a URL path.
+
+  `boolean` landed on `main` while this branch was open. It was named in the
+  help but left out of the `--methods` row in `docs/reference.md` -- the same
+  drift, one table over. Both carry it now, and the new test covered it without
+  being told to, which is the point of reading the registry instead of a list.
 
   No version bump -- this is documentation and tests only.
 
