@@ -130,7 +130,7 @@ rcekit --acknowledge-consent \
 
 ```
 [detect] methods: reflected, eval
-[detect] sent 13 probes: confirmed=4, negative=9
+[detect] sent 13 probes (13 result(s)): confirmed=4, negative=9
 
 [detect] CONFIRMED execution (4):
   [reflected/unix/raw] ; echo RKYZRIP$((540141+314681))RKFWVFS$(echo RKBWOOC)RKYZRIP
@@ -151,7 +151,7 @@ rcekit --acknowledge-consent \
 ```
 
 ```
-[detect] sent 4 probes: confirmed=3, negative=1
+[detect] sent 4 probes (4 result(s)): confirmed=3, negative=1
 
 [detect] CONFIRMED execution (3):
   [reflected/unix/raw] ; echo RKHWNHK$((114157+752773))RKXGFIH$(echo RKHSEIF)RKHWNHK
@@ -365,7 +365,7 @@ a measurement the run never finished gathering:
 
 ```
 [detect] methods: reflected, eval
-[detect] sent 13 probes: confirmed=0, inconclusive=2, negative=11
+[detect] sent 13 probes (13 result(s)): confirmed=0, inconclusive=2, negative=11
 ```
 
 Those two would have been someone else's finding. Five mechanisms produce that

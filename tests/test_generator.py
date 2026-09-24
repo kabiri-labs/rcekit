@@ -9706,6 +9706,81 @@ class PayloadBudgetTestCase(unittest.TestCase):
                     self.assertEqual(self._estimate(methods, cap), gen.delivered_probes)
 
 
+class BudgetCountsEveryRequestTestCase(unittest.TestCase):
+    """The meter has to see every request the target receives.
+
+    `delivered_probes` is what `--max-payloads` is spent against, so anything
+    that reaches the target without incrementing it is traffic outside the
+    bound. An evasion retry was exactly that: measured at `--max-payloads 5
+    --evade high` against a filter that refuses whitespace, the target received
+    12 requests and the run recorded 5.
+    """
+
+    @staticmethod
+    def _refuses_whitespace(received):
+        def route(method, path, params, headers, body):
+            value = params.get("cmd", "")
+            received.append(value)
+            if any(char in value for char in (" ", "	", chr(10))):
+                return (403, "<html>403 blocked</html>")
+            return (200, f"out: {value}")
+        return route
+
+    def _run(self, cap, evade):
+        received = []
+        gen = RCEKit()
+        with local_target(self._refuses_whitespace(received)) as base:
+            gen.run_detection(
+                [make_record(environment="unix", context="raw")],
+                url=f"{base}/x?cmd=FUZZ", methods=["reflected"],
+                config={"evade": evade}, max_payloads=cap, timeout=10)
+        # One payload-free control per run, which the cap has never covered.
+        return gen, len(received) - 1
+
+    def test_the_counter_matches_what_the_target_received(self):
+        for cap in (1, 2, 3, 5, 8, 12, 20):
+            for evade in ("none", "low", "high"):
+                gen, delivered = self._run(cap, evade)
+                with self.subTest(cap=cap, evade=evade):
+                    self.assertEqual(
+                        gen.delivered_probes, delivered,
+                        "requests reached the target without being counted")
+
+    def test_evasion_retries_stay_inside_the_cap(self):
+        # 10 and 23 are in the sweep deliberately: they are where a budget
+        # checked once before the ladder, rather than per rung, let one refused
+        # probe spend three requests and overshoot by one.
+        for cap in (1, 2, 3, 5, 8, 10, 12, 20, 23):
+            for evade in ("low", "high"):
+                gen, delivered = self._run(cap, evade)
+                with self.subTest(cap=cap, evade=evade):
+                    self.assertLessEqual(
+                        delivered, cap,
+                        f"--evade {evade} put {delivered} probes on the target under "
+                        f"--max-payloads {cap}")
+
+    def test_one_probe_may_be_retried_at_more_than_one_rung(self):
+        """Non-vacuity, and the reason the budget is checked per rung rather
+        than once before the ladder: a refused probe is retried at `low` and
+        again at `high`, so one probe can cost three requests. Checked at the
+        call site alone, that overshot the cap by one -- 11 requests against
+        `--max-payloads 10 --evade high`."""
+        gen, _delivered = self._run(None, "high")
+        self.assertGreater(gen.escalated_probes, 0, "nothing was ever retried")
+
+    def test_the_audit_counts_deliveries_rather_than_rows(self):
+        """`sent N probes` is a claim about what the target received.
+
+        Rows are the same number for a method that answers from each probe,
+        which is why it read true for so long. An aggregate method reports one
+        row for a whole series, so a `time` run that put 20 requests on the
+        target announced 5 -- and a measurement the budget declined announced
+        one probe for traffic that never left."""
+        source = (REPO_ROOT / "rcekit.py").read_text(encoding="utf-8")
+        self.assertIn("sent {generator.delivered_probes} probes", source,
+                      "the detection summary counts result rows as sent probes")
+
+
 class WholeSeriesBudgetTestCase(unittest.TestCase):
     """A budget may stop a series; it may never cut one in half.
 
