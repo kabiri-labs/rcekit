@@ -191,6 +191,89 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.45.1] — 2026-09-24
+
+### Fixed
+
+- **`--max-payloads` is a bound on requests, and it was being checked after
+  they had been sent.** The cap was measured against the number of result
+  *rows*. For a method that answers from each probe those are the same number,
+  so nothing showed. An aggregate method reports one row however many probes it
+  cost, so the whole series went out and the cap noticed afterwards:
+
+  | `--max-payloads 1` | the cost line said | requests sent |
+  |---|---|---|
+  | `reflected`, `eval` | 1 | 1 |
+  | `time` | 1 | **12** |
+  | `deser` | 1 | **15** |
+  | `boolean` | 1 | **27** |
+
+  A clean split: every aggregate method overran and no per-probe method did.
+  That line is the only thing an operator bounding a monitored engagement has
+  to go on before the traffic starts, and it was wrong in the direction that
+  matters — under, not over.
+
+  Rows were the wrong meter in a second way, which the first fix exposed. A
+  series the budget declines costs requests and produces no row at all, so the
+  next carrier recomputed the same allowance and fired again — `time` at
+  `--max-payloads 5` sent 4 requests per carrier with the cap never moving. And
+  in a mixed run, a per-probe method never saw what an aggregate one had
+  already spent: `boolean,eval` at 30 sent 56. The budget is counted in
+  requests for the whole call now. Swept across every method this build can run
+  without a callback host, alone and in combination, at seven caps: 63
+  combinations, worst overrun 0.
+
+- **A measurement that cannot be finished is no longer started.** What a budget
+  may do to a series depends on where the method's answer lives, and the class
+  already knows: `DetectionMethod.decides_per_probe()` reads it from whether
+  the class overrides `confirm_each`, rather than from a list of names that
+  would go stale like every other one in this repository.
+
+  Where each probe answers — `deser`, `lookup`, `oob` — running out of budget
+  stops the series and the probes already sent keep their verdicts. Where only
+  the series answers — `time`, `boolean` — a part of one is not a weaker answer
+  but a wrong one: `time` reports `negative` from a screen with no regression
+  behind it and from a regression short of four samples, and a `boolean` series
+  whose anchors never went out reads the same way. Both are false cleans, and
+  the budget would have been manufacturing them. So a wave that does not fit
+  abandons the measurement rather than cutting it short.
+
+- **An abandoned measurement leaves an `inconclusive` row, not a silence.**
+  Dropping it quietly let the *other* carriers describe the run, and the other
+  carriers are the ones with nothing to find: measured at `--max-payloads 12`
+  against a sink that honours an injected sleep, the unix carrier's regression
+  was abandoned for budget and a windows carrier's honest "no separator
+  delayed" was the only row left — so the run reported `negative` for a target
+  that was vulnerable. `inconclusive` is what an abandoned measurement is in
+  the word the tool already uses, and it outranks `negative` in the run
+  verdict. Swept across 31 caps against a sink that really does delay: no cap
+  reports it clean, and none overruns.
+
+- **What the budget declined is reported by name**, in a sixth run-wide tally
+  beside the profile drops, the safety holds, the reach notes, the settled
+  carriers and the refusals. A ladder that shrinks quietly is indistinguishable
+  from a target with nothing to find:
+
+  ```
+  [detect] --max-payloads held back 1 measurement(s) that could not have reached a
+           verdict within the budget:
+  [detect]   1 x boolean/raw needs 7 requests to reach a verdict and --max-payloads left 3
+  [!] No probes were built, so NOTHING WAS TESTED - this is not a negative result.
+  ```
+
+- **The cost line and the run make the same decision.** `estimate_detection_probes`
+  applies the same all-or-nothing rule, so under a cap the figure printed before
+  the traffic is the traffic. Uncapped it stays a floor by documented design — a
+  wave a method picks after seeing its own timings cannot be predicted from
+  there.
+
+### Security
+
+No authorization, deny-by-default or matrix-evaluation boundary moves, and
+nothing widens `confirmed`. The effect is one-way: fewer requests than before,
+and a run that could not afford to test something now says so instead of
+reporting it clean.
+
 ## [2.45.0] — 2026-09-23
 
 ### Added
@@ -2036,6 +2119,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.1]: https://github.com/kabiri-labs/rcekit/compare/v2.45.0...v2.45.1
 [2.45.0]: https://github.com/kabiri-labs/rcekit/compare/v2.44.0...v2.45.0
 [2.44.0]: https://github.com/kabiri-labs/rcekit/compare/v2.43.0...v2.44.0
 [2.43.0]: https://github.com/kabiri-labs/rcekit/compare/v2.42.0...v2.43.0

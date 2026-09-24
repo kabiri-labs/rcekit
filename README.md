@@ -2,7 +2,7 @@
 
 **`confirmed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.45.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 2.45.1** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -230,7 +230,7 @@ RCEKit answers with **nine verdicts that are never collapsed into each other**:
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
 | **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint, a response shape that tracks a predicate. Worth your time, never worth the word "confirmed". |
-| **`inconclusive`** | The evidence appeared, but could not be attributed to execution — the payload-free control carried it too. |
+| **`inconclusive`** | Nothing here can be attributed to execution. Either the evidence appeared and the payload-free control carried it too, or the run never gathered it — a response channel too unsteady to carry an answer, or a measurement `--max-payloads` could not afford to finish. It outranks `negative`, because a run that did not look is not a run that found nothing. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
 | **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
 | **`error`** | Nothing reached the target. |
@@ -359,8 +359,9 @@ python rcekit.py --acknowledge-consent -r request.txt -p host --methods reflecte
 ### 2. It argues with its own results
 
 A tool reports what it found. RCEKit also reports **what it refused to believe** —
-`inconclusive` is a verdict of its own, for evidence that showed up but could not
-be attributed to execution:
+`inconclusive` is a verdict of its own, for anything it cannot attribute to
+execution: evidence that showed up in the payload-free control too, and equally
+a measurement the run never finished gathering:
 
 ```
 [detect] methods: reflected, eval

@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.0"
+__version__ = "2.45.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -575,6 +575,14 @@ class RCEKit:
         # was not the sink.
         self.refused_probes = 0
         self.refused_statuses: Dict[int, int] = {}
+        # And a sixth, for a series the request budget could not pay for. Not a
+        # profile drop, not a safety hold, not a settled carrier, not a
+        # refusal: the method applied, the operator allowed it, and there were
+        # not enough requests left to reach any verdict but a wrong one. Named
+        # rather than silent, because a run that quietly tested less than it
+        # said reads exactly like a target with less to find.
+        self.budget_held_series = 0
+        self.budget_held_reasons: Dict[str, int] = {}
         # Retries a refusal bought, and the ones that got through. Reported,
         # because extra traffic the operator did not ask for has to be visible
         # -- and because a rung that never converts anything is one to stop
@@ -2731,9 +2739,23 @@ class RCEKit:
                         except Exception:  # an estimate must never break the run
                             probes = []
                         sendable, _ = meth.filter_probes(probes)
+                    # The same decision the run makes, so the line and the
+                    # traffic agree. A method that answers only from the whole
+                    # series is all or nothing: counting a truncated one here
+                    # would promise requests the run will not send, and
+                    # counting the cap would promise a bound it will not keep.
+                    remaining = None if not max_payloads else max(0, max_payloads - total)
+                    if remaining is not None and not meth.decides_per_probe():
+                        # All or nothing, the same rule the run applies wave by
+                        # wave: counting a truncated series here would promise
+                        # requests the run will not send.
+                        if remaining < len(sendable):
+                            continue
+                    elif remaining is not None:
+                        sendable = sendable[:remaining]
                     total += len(sendable)
                     if max_payloads and total >= max_payloads:
-                        return max_payloads
+                        return total
                     continue
                 probes = sendable
                 for probe in probes:
@@ -2867,6 +2889,19 @@ class RCEKit:
                        f"a filter refused the payload (HTTP {status}) where the "
                        "payload-free control got through -- the sink never saw it")
 
+    def _budget_spent(self, started_requests: int,
+                      max_payloads: Optional[int]) -> bool:
+        """Whether ``--max-payloads`` is used up for this call, counted in
+        *requests* rather than in result rows.
+
+        Rows were the wrong meter, and quietly so: for a per-probe method they
+        are the same number. They come apart wherever a method spends requests
+        without producing one row each -- an aggregate series is one row
+        however many probes it cost, and a series the budget abandons is no row
+        at all, so the next carrier recomputed the same allowance and fired
+        again."""
+        return bool(max_payloads) and (self.delivered_probes - started_requests) >= max_payloads
+
     def _note_reach(self, meth: "DetectionMethod", probe: "Probe") -> None:
         """Record a probe that reaches past the run's tier and goes anyway."""
         rung = probe.reaches_past
@@ -2972,6 +3007,12 @@ class RCEKit:
 
         results: List[Dict[str, Any]] = []
         seen: Set[str] = set()
+        # What the budget is spent against. Rows were the wrong meter: a series
+        # the budget abandons costs requests and produces no row, so the next
+        # carrier recomputed the same allowance and fired again -- `time` at
+        # `--max-payloads 5` sent 4 requests per carrier with the cap never
+        # moving. Requests are what the operator asked to bound.
+        started_requests = self.delivered_probes
         for meth in selected:
             for record in carriers:
                 if not meth.applicable(record):
@@ -2998,8 +3039,48 @@ class RCEKit:
                     # every one of those and reported `nothing-tested` for a sink
                     # the ladder could still have reached.
                     built = meth.build_probes(record, rng)
+                    # The budget is a bound on requests, and it used to be
+                    # checked only *after* the series had been fired -- against
+                    # the number of result rows, which for an aggregate method
+                    # is one however many probes it cost. Measured at
+                    # `--max-payloads 1`: `time` sent 12, `deser` 15 and
+                    # `boolean` 27, while the cost line printed before the
+                    # traffic said 1.
+                    #
+                    # What the budget may do about it depends on where the
+                    # method's answer lives, which the class already knows.
+                    # Where each probe answers, spending the last of the budget
+                    # simply stops the series. Where only the series answers,
+                    # a part of one is not a weaker answer but a wrong one, so
+                    # the whole method is declined by name.
+                    budget = None if not max_payloads else max(
+                        0, max_payloads - (self.delivered_probes - started_requests))
+                    fired = 0
+                    abandoned: Optional[str] = None
                     for _round in range(self.MAX_PROBE_ROUNDS):
-                        for probe in self._apply_target_profile(meth, built):
+                        batch = self._apply_target_profile(meth, built)
+                        if budget is not None and fired + len(batch) > budget:
+                            if not meth.decides_per_probe():
+                                # All or nothing, per wave. `time` answers
+                                # `negative` from a screen with no regression
+                                # behind it and from a regression short of four
+                                # samples -- honest answers to "no separator
+                                # delayed", and false cleans when the real
+                                # reason was that the budget ran out. So a wave
+                                # that does not fit abandons the method for this
+                                # carrier and emits no row, rather than letting
+                                # a partial series be judged.
+                                abandoned = (
+                                    f"{meth.name}/{record.context} could not finish its "
+                                    f"series within --max-payloads (needed "
+                                    f"{fired + len(batch)} requests, budget {budget})")
+                                break
+                            # Where each probe carries its own verdict, the
+                            # ones that went out keep theirs and the rest are
+                            # simply not sent.
+                            batch = batch[:max(0, budget - fired)]
+                        for probe in batch:
+                            fired += 1
                             req_timeout = timeout + (probe.delay_s or 0.0) + 2.0
                             status, body, chans, elapsed = self._fire_channels(
                                 probe.payload, url, method, data, headers, url_location,
@@ -3027,12 +3108,54 @@ class RCEKit:
                                 time.sleep(delay)
                         if not built:
                             break
+                        if (budget is not None and fired >= budget
+                                and meth.decides_per_probe()):
+                            # Only where each probe answers. Breaking here for a
+                            # method that answers from the series was a false
+                            # clean of my own making: the screen wave fit the
+                            # budget, the regression did not, and the loop fell
+                            # through to a verdict built from screen probes
+                            # alone -- `negative`, "no command separator
+                            # produced a delay", against a target that really
+                            # did delay. Measured at `--max-payloads 4` and 12
+                            # on a sink that honours an injected sleep. A
+                            # series the budget cut short is abandoned by the
+                            # wave check below, not judged.
+                            break
                         # A screening wave's follow-up probes go through the same
                         # gate: a method that answers with a second round of
                         # separators must not smuggle a denied one back in. The
                         # round cap still bounds this, so a method whose every
                         # wave is filtered cannot spin the engine.
                         built = meth.next_probes(series)
+                    if abandoned is not None:
+                        self.budget_held_series += 1
+                        self.budget_held_reasons[abandoned] = (
+                            self.budget_held_reasons.get(abandoned, 0) + 1)
+                        # A row, not a silent drop. Emitting nothing left the
+                        # run to be described by whatever the *other* carriers
+                        # said, and the other carriers are the ones with
+                        # nothing to find: measured at `--max-payloads 12`
+                        # against a sink that honours an injected sleep, the
+                        # unix carrier's regression was abandoned and a windows
+                        # carrier's honest "no separator delayed" became the
+                        # run's verdict -- `negative`, for a target that was
+                        # vulnerable.
+                        #
+                        # `inconclusive` is what this is, in the word the tool
+                        # already uses: evidence that could not be attributed,
+                        # because the run never gathered it. It outranks
+                        # `negative` in the run verdict, so one held-back
+                        # measurement is enough to stop the whole run reading
+                        # clean.
+                        results.append({
+                            "verdict": "inconclusive", "detail": abandoned,
+                            "status": None, "payload": "",
+                            "method": meth.name, "tier": meth.tier,
+                            "environment": record.environment, "context": record.context,
+                            "category": "detection", "expected": "",
+                        })
+                        continue
                     if not series:
                         # The method built no probes for this carrier, so there
                         # is nothing to judge. Falling through would ask an
@@ -3064,7 +3187,7 @@ class RCEKit:
                                 "environment": record.environment, "context": record.context,
                                 "category": "detection", "expected": probe.expected,
                             })
-                        if max_payloads and len(results) >= max_payloads:
+                        if self._budget_spent(started_requests, max_payloads):
                             return results
                         continue
                     verdict = meth.confirm_series(series)
@@ -3097,7 +3220,7 @@ class RCEKit:
                     if cleanups:
                         series_result["cleanup"] = "; ".join(dict.fromkeys(cleanups))
                     results.append(series_result)
-                    if max_payloads and len(results) >= max_payloads:
+                    if self._budget_spent(started_requests, max_payloads):
                         return results
                     continue
                 # One carrier is one (method, environment, context). Once it
@@ -3121,6 +3244,13 @@ class RCEKit:
                         continue
                     if probe.payload in seen:
                         continue
+                    # Before firing, not only after: requests an aggregate
+                    # method already spent in this call are part of the same
+                    # budget, and a check that only runs after the first probe
+                    # cannot notice a budget that was gone before it started.
+                    if self._budget_spent(started_requests, max_payloads):
+                        return self._resolve_observed(
+                            results, observe, observe_control, observe_reached, timeout)
                     seen.add(probe.payload)
                     status, body, chans, elapsed = self._fire_channels(
                         probe.payload, url, method, data, headers, url_location,
@@ -3234,7 +3364,7 @@ class RCEKit:
                         self.settled_carriers[label] = self.settled_carriers.get(label, 0) + 1
                     if delay:
                         time.sleep(delay)
-                    if max_payloads and len(results) >= max_payloads:
+                    if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout)
         return self._resolve_observed(
@@ -3924,6 +4054,23 @@ class DetectionMethod:
     # the series is complete -- so the wording follows what the driver uses it
     # for rather than what happened to be equivalent.
     costly = False
+    @classmethod
+    def decides_per_probe(cls) -> bool:
+        """Whether each probe carries its own verdict, or only the series does.
+
+        Asked of the class rather than kept as a list of names, because the
+        answer already lives in the class: a method that overrides
+        :meth:`confirm_each` has a per-probe answer to give, and one that does
+        not can only speak once the batch is complete. Every hand-written list
+        naming methods in this repository has gone stale.
+
+        It decides what a budget may do to a series. Where each probe answers,
+        stopping early costs the probes not sent and nothing else. Where only
+        the series answers, stopping early does not produce a weaker verdict --
+        it produces a wrong one: a timing regression fitted to half its levels,
+        or a boolean series whose anchors never went out, which reads as
+        `negative` and is a false clean."""
+        return cls.confirm_each is not DetectionMethod.confirm_each
 
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
         self.gen = gen
@@ -8490,6 +8637,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"{generator.safety_held_probes} probe shape(s) that could have "
                       "reached the sink:")
                 for reason, count in sorted(generator.safety_held_reasons.items(),
+                                            key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {count} x {reason}")
+            if generator.budget_held_series:
+                # Same reasoning as the risk-tier block above, one meter over:
+                # these could have reached the sink and the run had the budget
+                # for part of a measurement that only means anything whole. A
+                # run that quietly tested less than it said reads exactly like
+                # a target with less to find.
+                print(f"[detect] --max-payloads held back "
+                      f"{generator.budget_held_series} measurement(s) that could not "
+                      "have reached a verdict within the budget:")
+                for reason, count in sorted(generator.budget_held_reasons.items(),
                                             key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {reason}")
             if generator.escalated_probes:

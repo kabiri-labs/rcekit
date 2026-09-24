@@ -18,6 +18,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -9614,3 +9615,286 @@ class BooleanCarrierScopeTestCase(unittest.TestCase):
                                   config=dict(config), timeout=15)
             with self.subTest(config=tuple(sorted(config.items()))):
                 self.assertEqual(estimate, run.delivered_probes)
+
+
+class PayloadBudgetTestCase(unittest.TestCase):
+    """`--max-payloads` bounds requests, and it used to be checked after they
+    had been sent.
+
+    The cap was measured against the number of result *rows*. For a per-probe
+    method those are the same number, so nothing showed. An aggregate method is
+    one row however many probes it costs, so the whole series went out first
+    and the cap noticed afterwards: at `--max-payloads 1`, `time` sent 12,
+    `deser` 15 and `boolean` 27, while the cost line printed before any traffic
+    said 1. That line is the only thing an operator bounding a monitored
+    engagement has to go on, and it was wrong in the direction that matters.
+    """
+
+    @staticmethod
+    def _still(method, path, params, headers, body):
+        return (200, "<html><body><ul><li>a</li></ul></body></html>")
+
+    def _record(self, **overrides):
+        overrides.setdefault("context", "raw")
+        return make_record(**overrides)
+
+    def _run(self, methods, cap, config=None):
+        gen = RCEKit()
+        config = dict(config or {})
+        config.setdefault("time_base", 0.2)
+        with local_target(self._still) as base:
+            results = gen.run_detection(
+                [self._record()], url=f"{base}/s?q=FUZZ", methods=list(methods),
+                config=config, max_payloads=cap, timeout=10)
+        return gen, results
+
+    def _estimate(self, methods, cap, config=None):
+        config = dict(config or {})
+        config.setdefault("time_base", 0.2)
+        return RCEKit().estimate_detection_probes(
+            [self._record()], list(methods), config, max_payloads=cap)
+
+    def test_no_method_sends_more_requests_than_the_cap(self):
+        """The whole claim, swept rather than sampled: every method this
+        environment can run without a callback host or a write path, alone and
+        mixed, at caps above and below what each one needs."""
+        runnable = [name for name, cls in rcekit.DETECTION_METHODS.items()
+                    if not cls.needs_oob_host and not cls.gated_by_config]
+        self.assertGreaterEqual(len(runnable), 5, runnable)
+        combinations = [[name] for name in sorted(runnable)] + [sorted(runnable)]
+        for methods in combinations:
+            for cap in (1, 3, 5, 12, 30):
+                with self.subTest(methods=",".join(methods), cap=cap):
+                    gen, _results = self._run(methods, cap)
+                    self.assertLessEqual(
+                        gen.delivered_probes, cap,
+                        f"{','.join(methods)} sent {gen.delivered_probes} requests "
+                        f"under --max-payloads {cap}")
+
+    def test_an_aggregate_method_alone_is_bounded(self):
+        # The three that overran, named so a regression says which one came
+        # back rather than only that something did.
+        for method, sent_before in (("time", 12), ("deser", 15), ("boolean", 27)):
+            with self.subTest(method=method):
+                gen, _results = self._run([method], 1)
+                self.assertLessEqual(gen.delivered_probes, 1,
+                                     f"{method} used to send {sent_before} here")
+
+    def test_requests_an_aggregate_method_spent_are_charged_to_the_budget(self):
+        """Rows were the wrong meter in a second way.
+
+        A series the budget abandons costs requests and produces no row at all,
+        so a cap counted in rows left the next carrier the same allowance and
+        it fired again -- `time` at `--max-payloads 5` sent 4 requests per
+        carrier with the cap never moving. And in a mixed run the per-probe
+        method never saw what the aggregate one had already spent."""
+        gen, _results = self._run(["time", "reflected"], 5)
+        self.assertLessEqual(gen.delivered_probes, 5)
+        gen, _results = self._run(["boolean", "eval"], 30)
+        self.assertLessEqual(gen.delivered_probes, 30)
+
+    def test_the_cost_line_matches_the_traffic_under_a_cap(self):
+        """The estimate and the run make the same decision, or the audit is
+        noise. Uncapped it stays a floor by documented design -- a wave a
+        method picks after seeing its own timings cannot be predicted from
+        here -- so this is asserted exactly where the operator reached for a
+        bound."""
+        for methods in (["boolean"], ["deser"], ["reflected"], ["boolean", "eval"]):
+            for cap in (1, 5, 30):
+                with self.subTest(methods=",".join(methods), cap=cap):
+                    gen, _results = self._run(methods, cap)
+                    self.assertEqual(self._estimate(methods, cap), gen.delivered_probes)
+
+
+class WholeSeriesBudgetTestCase(unittest.TestCase):
+    """A budget may stop a series; it may never cut one in half.
+
+    Where each probe carries its own verdict, the probes that went out keep
+    theirs and the rest are simply not sent. Where only the series answers,
+    part of one is not a weaker answer but a wrong one -- and wrong in the
+    direction this tool exists to prevent, because `time` reports `negative`
+    from a screen with no regression behind it and from a regression short of
+    four samples, and a truncated `boolean` series reaches `negative` once its
+    connectives fall under the pair floor.
+    """
+
+    @staticmethod
+    def _still(method, path, params, headers, body):
+        return (200, "<html><body><ul><li>a</li></ul></body></html>")
+
+    def _run(self, methods, cap):
+        gen = RCEKit()
+        with local_target(self._still) as base:
+            results = gen.run_detection(
+                [make_record(context="raw")], url=f"{base}/s?q=FUZZ",
+                methods=list(methods), config={"time_base": 0.2},
+                max_payloads=cap, timeout=10)
+        return gen, results
+
+    def test_a_budget_too_small_for_a_verdict_never_reports_negative(self):
+        for method in ("time", "boolean"):
+            with self.subTest(method=method):
+                gen, results = self._run([method], 1)
+                self.assertGreater(gen.budget_held_series, 0)
+                self.assertNotIn("negative", {r["verdict"] for r in results},
+                                 f"{method} judged a series it could not afford to fire")
+
+    def test_an_abandoned_measurement_leaves_a_row_rather_than_a_silence(self):
+        """Dropping it silently let the *other* carriers describe the run, and
+        the other carriers are the ones with nothing to find.
+
+        Measured at `--max-payloads 12` against a sink that honours an injected
+        sleep: the unix carrier's regression was abandoned for budget, a
+        windows carrier's honest "no separator delayed" was the only row left,
+        and the run reported `negative` for a target that was vulnerable.
+        `inconclusive` is what an abandoned measurement is in the word the tool
+        already uses, and it outranks `negative` in the run verdict, so one
+        held-back measurement stops the whole run reading clean."""
+        gen, results = self._run(["boolean"], 3)
+        self.assertGreater(gen.budget_held_series, 0)
+        self.assertTrue(results, "a measurement was dropped without a trace")
+        self.assertEqual({r["verdict"] for r in results}, {"inconclusive"})
+        self.assertNotEqual(rcekit.overall_detection_verdict(results), "negative")
+        self.assertIn("--max-payloads", results[0]["detail"])
+
+    def test_the_run_says_which_measurement_it_declined_and_why(self):
+        # A ladder that shrinks quietly is indistinguishable from a target with
+        # nothing to find, which is why the risk tier names what it holds back
+        # too.
+        gen, _results = self._run(["boolean"], 3)
+        named = " ".join(gen.budget_held_reasons)
+        self.assertIn("boolean", named)
+        self.assertIn("--max-payloads", named)
+
+    def test_one_declined_measurement_is_counted_once(self):
+        """`boolean` measures a context once however many environments share
+        it, so the carriers after the first build nothing. Counting those as
+        held back reported one declined measurement three times."""
+        gen = RCEKit()
+        records = [make_record(context="raw", environment=env)
+                   for env in ("unix", "windows", "powershell")]
+        with local_target(self._still) as base:
+            gen.run_detection(records, url=f"{base}/s?q=FUZZ", methods=["boolean"],
+                              config={}, max_payloads=3, timeout=10)
+        self.assertEqual(gen.budget_held_series, 1)
+
+    def test_a_per_probe_method_is_truncated_rather_than_declined(self):
+        """The other half. `deser` decides per probe, so a budget that stops it
+        early costs the probes not sent and nothing else -- declining it
+        outright would throw away answers it had already earned.
+
+        What makes that safe is `deser`'s own guard rather than luck: its shape
+        oracle is a differential across three forms, and a carrier left holding
+        fewer than three says so instead of reading the ones it has. So a cap
+        that cuts a carrier in half produces an `inconclusive` for that carrier
+        and leaves the complete ones alone -- never a `negative` inferred from
+        evidence that was not gathered."""
+        gen, results = self._run(["deser"], 5)
+        self.assertEqual(gen.delivered_probes, 5)
+        self.assertEqual(gen.budget_held_series, 0)
+        self.assertTrue(results, "the budget declined a method that answers per probe")
+        self.assertIn("inconclusive", {r["verdict"] for r in results},
+                      "a carrier the cap cut short answered from partial evidence")
+        # And the complete carriers still answer, so truncation costs coverage
+        # rather than the whole method.
+        self.assertIn("negative", {r["verdict"] for r in results})
+
+    @staticmethod
+    def _sleeping_sink():
+        """A real command-injection sink: it runs what is chained onto it, and
+        counts how often it was made to sleep.
+
+        A still fixture cannot show the bug this guards. `time` answers
+        `negative` there whatever the budget does, because no separator delayed
+        and that is the truth -- so a partial series and a complete one agree,
+        and a test built on it passes while the tool reports a vulnerable
+        target as clean."""
+        slept = []
+
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            match = re.search(r"sleep\s+([0-9.]+)", value)
+            # No separator required. A unix carrier also probes the shape where
+            # the value *is* the command, and a sink that honours only a
+            # chained one leaves those probes legitimately undelayed -- so the
+            # sweep below would have been asserting against honest negatives
+            # rather than against the bug.
+            if match:
+                slept.append(1)
+                time.sleep(min(float(match.group(1)), 2.0))
+            return (200, "<html><body>ok</body></html>")
+
+        return route, slept
+
+    def _sleep_run(self, cap):
+        gen = RCEKit()
+        route, slept = self._sleeping_sink()
+        with local_target(route) as base:
+            results = gen.run_detection(
+                [make_record(context="raw")], url=f"{base}/s?q=FUZZ",
+                methods=["time"], config={"time_base": 0.3},
+                max_payloads=cap, timeout=15)
+        return gen, results, len(slept)
+
+    # What `time` says when its screen found nothing to regress on. True of a
+    # `cmd.exe` carrier against a POSIX sink; a lie about a unix carrier here,
+    # where the sink demonstrably sleeps.
+    NO_DELAY = "no command separator produced a delay"
+
+    def test_a_budget_never_makes_a_delaying_target_look_like_a_still_one(self):
+        """The bug this rule exists for, and one I put there myself.
+
+        The screen wave fit the budget and the regression did not, so the loop
+        broke out and built a verdict from screen probes alone -- `negative`,
+        "no command separator produced a delay", against a sink that really did
+        delay. At `--max-payloads` 4 and 12.
+
+        Asserted on that sentence rather than on the run's verdict, because the
+        verdict depends on a slope fitted to real timings and would make this
+        flaky on a loaded machine. Whether the *screen* saw a 0.3s sleep is not
+        a close call. Swept rather than sampled: the window opens only where
+        the budget lands between one wave and the next."""
+        for cap in (2, 4, 6, 8, 10, 11, 12, 13, 14, 16, 20):
+            gen, results, slept = self._sleep_run(cap)
+            with self.subTest(cap=cap):
+                self.assertLessEqual(gen.delivered_probes, cap)
+                for result in results:
+                    if result["environment"] != "unix":
+                        continue
+                    self.assertNotIn(
+                        self.NO_DELAY, result["detail"],
+                        f"--max-payloads {cap} left a unix carrier reporting that nothing "
+                        f"delayed, against a sink that slept {slept} time(s)")
+
+    def test_the_sink_those_caps_ran_against_really_does_delay(self):
+        """Non-vacuity, and the shape that hid the bug in the first place: on a
+        fixture that never delays, the sweep above passes while proving
+        nothing."""
+        gen, results, slept = self._sleep_run(None)
+        self.assertGreater(slept, 0, "the fixture was never made to sleep")
+        self.assertTrue([r for r in results if r["environment"] == "unix"],
+                        "no unix carrier ran, so the sweep asserted nothing")
+        self.assertEqual(gen.budget_held_series, 0,
+                         "an uncapped run held a measurement back")
+
+    def test_which_methods_answer_per_probe_is_read_from_the_class(self):
+        """Not from a list of names. The answer already lives in the class: a
+        method that overrides `confirm_each` has a per-probe answer to give."""
+        per_probe = {name for name, cls in rcekit.DETECTION_METHODS.items()
+                     if cls.decides_per_probe()}
+        self.assertEqual(per_probe, {"deser", "lookup", "oob"})
+        for name in ("time", "boolean"):
+            with self.subTest(method=name):
+                self.assertFalse(rcekit.DETECTION_METHODS[name].decides_per_probe())
+
+    def test_one_rule_decides_a_budget_for_a_whole_series_method(self):
+        """There were two: a floor checked before the first wave, and the wave
+        check itself. They agreed on every outcome, so the floor was dead
+        weight -- and it was the path that still dropped an abandoned
+        measurement without a row, because the fix had gone into the other one.
+        Two paths for one decision is how that happens."""
+        source = (REPO_ROOT / "rcekit.py").read_text(encoding="utf-8")
+        self.assertNotIn("min_series_probes", source,
+                         "a second budget rule is back; one of the two will drift")
+        self.assertEqual(source.count("abandoned = ("), 1,
+                         "a series is abandoned from more than one place")
