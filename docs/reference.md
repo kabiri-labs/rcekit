@@ -716,6 +716,45 @@ every method asking about execution shares one allowance, each different
 property gets its own, and the cost line says how many questions are being
 asked.
 
+**It is spent in requests, and it used to be counted in findings.** For a
+method that answers from each probe those are the same number, so nothing
+showed. An aggregate method reports one row however many probes it cost, so the
+whole series went out and the cap noticed afterwards — at `--max-payloads 1`,
+`time` sent 12 requests, `deser` 15 and `boolean` 27, while the cost line
+printed before any traffic said 1.
+
+What the budget may do about a series depends on where the method's answer
+lives, which the class already knows:
+
+| The method answers | Example | A budget that runs out |
+|---|---|---|
+| from each probe | `deser`, `lookup`, `oob` | stops the series; the probes already sent keep their verdicts |
+| only from the whole series | `time`, `boolean` | declines the measurement **by name** and reports nothing for it |
+
+The second row is not caution. `time` reports `negative` from a screen with no
+regression behind it, and from a regression short of four samples — honest
+answers to "no separator delayed", and false cleans when the real reason was
+that the budget ran out. A `boolean` series whose anchors never went out reads
+the same way. So a wave that does not fit abandons the measurement, and the run
+names it and the flag that bounded it:
+
+```
+[detect] --max-payloads held back 1 measurement(s) that could not have reached a
+         verdict within the budget:
+[detect]   1 x boolean/raw could not finish its series within --max-payloads
+           (needed 27 requests, budget 3)
+```
+
+**An abandoned measurement leaves a row, not a silence.** Dropping it quietly
+let the *other* carriers describe the run, and the other carriers are the ones
+with nothing to find: measured at `--max-payloads 12` against a sink that
+honours an injected sleep, the unix carrier's regression was abandoned and a
+windows carrier's honest "no separator delayed" became the run's verdict —
+`negative`, for a target that was vulnerable. The row is `inconclusive`, which
+is what an abandoned measurement is in the word the tool already uses, and it
+outranks `negative`, so one held-back measurement stops the whole run reading
+clean.
+
 Single-point runs (`-p NAME`, or a `FUZZ` marker) get the per-carrier stop too;
 the method skip is enumeration-only, because there is no next candidate to
 spend the budget on.
@@ -1006,7 +1045,7 @@ and needs `--verify-active-risk intrusive` as well as `--oob-host`.
 | `--categories` | Restrict generation to these categories | All |
 | `--contexts` | Restrict generation to these contexts | All compatible |
 | `--encodings` | Restrict generation to these encodings | mode-specific |
-| `--max-payloads` | Cap payloads (balanced round-robin sample) | Unlimited |
+| `--max-payloads` | Cap payloads (balanced round-robin sample). With `--methods` it bounds **requests** per question, and a measurement that cannot finish inside it is declined by name rather than cut short | Unlimited |
 | `--detection-only` | Benign canary/timing probes for safe validation (no consent needed) | Off |
 | `--include-metadata` | Write a `.meta.jsonl` sidecar (indicators, tiers, notes) | Off |
 | `--template-file` | Custom JSON payload corpus; authoritative — never falls back | `templates/payloads.json`, else the built-in copy |
