@@ -4958,6 +4958,16 @@ class OobChannelWarningTestCase(unittest.TestCase):
             self.oob_host = oob_host
             self.listen_dns_port = listen_dns_port
 
+    @staticmethod
+    def _methods(*names, formats=None):
+        """Configured instances, because whether a method calls back can depend
+        on its own flags rather than only on its class."""
+        gen = RCEKit()
+        config = {"oob_host": "10.0.0.9"}
+        if formats is not None:
+            config["deser_formats"] = formats
+        return [rcekit.DETECTION_METHODS[n](gen, dict(config)) for n in names]
+
     def test_a_non_standard_dns_port_is_called_out(self):
         lines = rcekit.oob_channel_warnings(self._Args(), dns_up=True)
         self.assertTrue(lines)
@@ -4991,7 +5001,8 @@ class OobChannelWarningTestCase(unittest.TestCase):
         failure this whole function exists to prevent -- the operator reads a
         capped verdict as a result rather than as a channel that was never
         live."""
-        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["lookup", "deser"])
+        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"),
+                                           self._methods("lookup", "deser"))
         self.assertTrue(lines, "an address stranded two methods and nothing was said")
         self.assertIn("lookup/deser", lines[0])
         self.assertIn("10.0.0.9", lines[0])
@@ -5004,21 +5015,45 @@ class OobChannelWarningTestCase(unittest.TestCase):
         # The negative that keeps the notice honest: `oob` is fine with an
         # address, so a run selecting it alongside a stranded method must not
         # see `oob` blamed, and a run without a stranded method sees nothing.
-        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["oob", "deser"])
+        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"),
+                                           self._methods("oob", "deser"))
         self.assertTrue(lines)
         self.assertNotIn("oob/", lines[0])
         self.assertNotIn("/oob", lines[0])
         self.assertEqual(
-            rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["oob", "reflected"]), [])
+            rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"),
+                                       self._methods("oob", "reflected")), [])
 
     def test_a_delegated_name_strands_nobody(self):
         # The guard against over-correcting: the notice is about an address,
         # so a name must leave a correctly configured run silent.
         self.assertEqual(
-            rcekit.oob_address_strands(self._Args(), ["lookup", "deser"]), [])
+            rcekit.oob_address_strands(self._Args(), self._methods("lookup", "deser")), [])
         # And a run that named no host at all has nothing to say either.
         self.assertEqual(
-            rcekit.oob_address_strands(self._Args(oob_host=""), ["lookup", "deser"]), [])
+            rcekit.oob_address_strands(self._Args(oob_host=""),
+                                       self._methods("lookup", "deser")), [])
+
+    def test_a_format_with_no_gadget_was_not_stranded_by_the_address(self):
+        """Three of the five deserialization ecosystems ship no DNS gadget.
+
+        With `--deser-formats php` there is no callback probe to lose, so the
+        address took nothing away -- and the notice used to blame it anyway and
+        send the operator after a delegated domain that could not have helped.
+        The limit there belongs to the format, not to the host."""
+        args = self._Args(oob_host="10.0.0.9")
+        for formats in (["php"], ["php", "dotnet", "python_pickle"]):
+            with self.subTest(formats=formats):
+                self.assertEqual(
+                    rcekit.oob_address_strands(args, self._methods("deser", formats=formats)), [])
+        # One ecosystem that does ship a gadget is enough to be stranded again,
+        # which is the guard against silencing the notice altogether.
+        for formats in (["java"], ["php", "java"], None):
+            with self.subTest(formats=formats):
+                lines = rcekit.oob_address_strands(
+                    args, self._methods("deser", formats=formats))
+                self.assertTrue(lines, f"{formats} has a gadget and lost it to the address")
+                self.assertIn("deser", lines[0])
 
     def test_the_warning_reaches_the_operator(self):
         result = subprocess.run(
@@ -5045,6 +5080,73 @@ class OobChannelWarningTestCase(unittest.TestCase):
             capture_output=True, text=True, timeout=300)
         self.assertIn("cannot carry a token in an address", result.stdout)
         self.assertIn("deser", result.stdout)
+
+
+class ListenerGateTestCase(unittest.TestCase):
+    """A listener is needed by whoever calls back, not by whoever cannot run
+    without a host.
+
+    `needs_oob_host` was answering both questions. `deser` is where they come
+    apart -- its shape oracle proves something with no listener at all, so the
+    run must not stop when no host is named, but its DNS gadget does call back
+    and needs one. Reading the gate off `needs_oob_host` started no listener
+    for a `deser`-only run: the gadgets went to the target and nothing existed
+    to receive the callback, with a delegated host configured perfectly."""
+
+    def _run(self, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "--acknowledge-consent",
+             "--verify-url", "http://127.0.0.1:9/x?q=FUZZ", "--environments", "java",
+             "--contexts", "raw", "--categories", "basic_enum", "--max-payloads", "1",
+             "--listen-http-port", "0", *extra],
+            capture_output=True, text=True, timeout=300).stdout
+
+    def test_the_two_attributes_disagree_only_where_they_must(self):
+        # Requiring a host implies using one; the reverse does not hold, and
+        # `deser` is the method that makes the distinction worth having. A
+        # method added later that got this backwards would start no listener
+        # and report a clean negative about a channel that was never open.
+        for name, cls in rcekit.DETECTION_METHODS.items():
+            with self.subTest(method=name):
+                if cls.needs_oob_host:
+                    self.assertTrue(cls.uses_oob_host,
+                                    f"{name} requires a callback host but claims not to use one")
+        self.assertTrue(rcekit.DeserSink.uses_oob_host)
+        self.assertFalse(rcekit.DeserSink.needs_oob_host)
+
+    def test_deser_alone_with_a_host_gets_a_listener(self):
+        """The defect: the gadget probes were built and sent either way, so
+        with no listener they were requests the target answered and nothing
+        could follow."""
+        out = self._run("--methods", "deser", "--oob-host", "oob.example.com")
+        self.assertIn("OOB listener up", out)
+
+    def test_deser_with_no_host_starts_nothing(self):
+        # The other half of why this is two attributes: no host named is not an
+        # error for `deser`, it just means the shape oracle runs alone.
+        out = self._run("--methods", "deser")
+        self.assertNotIn("OOB listener up", out)
+
+    def test_a_method_that_never_calls_back_starts_nothing(self):
+        # The negative that keeps the gate from becoming "a host was named".
+        out = self._run("--methods", "reflected", "--oob-host", "oob.example.com")
+        self.assertNotIn("OOB listener up", out)
+
+    def test_a_format_with_no_gadget_starts_no_listener(self):
+        """Whether `deser` calls back is a property of the run, not the class.
+
+        `--deser-formats php` builds no callback probe at all, so a listener
+        started for it would wait on something that is never sent. The gate
+        asks the configured method rather than its class for that reason."""
+        out = self._run("--methods", "deser", "--deser-formats", "php",
+                        "--oob-host", "oob.example.com")
+        self.assertNotIn("OOB listener up", out)
+
+    def test_a_format_that_has_a_gadget_still_starts_one(self):
+        # The guard against the above silencing the gate altogether.
+        out = self._run("--methods", "deser", "--deser-formats", "java",
+                        "--oob-host", "oob.example.com")
+        self.assertIn("OOB listener up", out)
 
 
 class TimingScreenDepthTestCase(unittest.TestCase):
