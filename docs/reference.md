@@ -994,6 +994,14 @@ delegated here. With a bare IP the token rides in the URL path instead of a DNS
 label, and the DNS shapes are skipped rather than sent as probes that could
 never call back.
 
+That second channel is `oob`'s alone. `lookup` resolves an expression and
+`deser` reconstructs an object graph; neither has anywhere but a DNS label to
+put a token, so a bare IP strands them — `lookup` builds nothing at all and
+`deser` is left with its listener-free shape oracle. Both skip the probes
+rather than send ones that cannot call back, and the run says which methods an
+address stranded and which tier that puts out of reach, so a capped verdict is
+not read as a result.
+
 **The DNS shapes need port 53.** A DNS callback travels the real resolver
 hierarchy, so it only arrives if this listener *is* the authority for the OOB
 domain — `--listen-dns-port 53` (needs root) plus NS records delegating the

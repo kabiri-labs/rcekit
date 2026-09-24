@@ -191,6 +191,51 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.45.2] — 2026-09-24
+
+### Fixed
+
+- **`deser` fired DNS gadgets at a host that could not resolve, and the warning
+  built for exactly that stayed quiet.** `--oob-host` takes a delegated name or
+  an address. `oob` uses either: given an address it drops its DNS shapes and
+  carries the token in a URL path instead. `lookup` refuses an address
+  outright, because a lookup expression has nowhere else to put one.
+  `DeserSink` had neither behaviour -- it built `<token>.10.0.0.9` and sent it,
+  a real request the target answered from which no callback could follow by
+  construction, and then capped at `needs-review` without saying why.
+
+  `oob_channel_warnings` is the function that exists to say a DNS channel is
+  structurally dead. It returned early on an address literal, reasoning that
+  such a run "never builds DNS probes and has nothing to warn about" -- true of
+  `oob`, and written when `oob` was the only method taking the flag. So the one
+  mechanism that could have reported this was the one place it was ruled out.
+
+  Both halves are fixed together, because either alone still ships the problem.
+  `deser` treats an address as no host and sends its shape oracle alone, which
+  is what it can prove without a listener anyway. The notice moves into
+  `oob_address_strands`, which names the methods an address stranded and the
+  tier that puts out of reach, read off each class.
+
+  It is a separate function rather than another branch of
+  `oob_channel_warnings` because the two answer different questions at
+  different times. "Can the DNS shapes reach this listener" is only worth
+  asking once a listener exists, and that block runs only for a method that
+  *requires* a callback host. `deser` does not require one, so it never
+  reaches that block -- a notice left there could not have fired for the
+  method that prompted it. The new check runs on every verification run that
+  names a host.
+
+  Which methods those are is a class attribute now, `oob_needs_dns_label`,
+  declared beside `needs_oob_host`. Deciding it at the one place that asked is
+  how the two drifted apart to begin with.
+
+  The test that pinned the old silence asserted "no DNS shape is ever built" --
+  a claim about `oob` wearing the shape of a claim about the flag. Its scope
+  narrows to `oob`, and the stranded case gets tests of its own.
+
+  Found while verifying an automated review finding on #93; reported as #94 and
+  deliberately kept out of that documentation-only PR.
+
 ## [2.45.1] — 2026-09-24
 
 ### Fixed
@@ -2146,6 +2191,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.2]: https://github.com/kabiri-labs/rcekit/compare/v2.45.1...v2.45.2
 [2.45.1]: https://github.com/kabiri-labs/rcekit/compare/v2.45.0...v2.45.1
 [2.45.0]: https://github.com/kabiri-labs/rcekit/compare/v2.44.0...v2.45.0
 [2.44.0]: https://github.com/kabiri-labs/rcekit/compare/v2.43.0...v2.44.0

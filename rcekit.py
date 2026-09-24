@@ -12,7 +12,7 @@ import urllib.parse
 from dataclasses import asdict, dataclass, field as dataclass_field, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.1"
+__version__ = "2.45.2"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4054,6 +4054,15 @@ class DetectionMethod:
     # Whether the method needs somewhere for the target to call back to. Another
     # list that was written out by hand at the one place that checked it.
     needs_oob_host = False
+    # Whether the token can only ride in a DNS label, which decides what an
+    # address literal for `--oob-host` is worth to this method. `oob` has a
+    # second channel -- it puts the token in a URL path and drops its DNS
+    # shapes -- so an address serves it. A lookup expression and a serialized
+    # gadget have no such channel: they resolve a name or nothing. Declared
+    # here rather than tested at the one place that cared, because that is how
+    # `deser` came to send a gadget aimed at `<token>.10.0.0.9` while the
+    # warning that exists for a dead DNS channel stayed silent.
+    oob_needs_dns_label = False
     # Whether the operator's own configuration is this method's gate, in place
     # of the rung. `file` and `write` change the target and say so in `safety`,
     # but they do nothing at all until a directory to write into and a URL to
@@ -5707,6 +5716,7 @@ class LookupCallback(DetectionMethod):
     ``nothing-tested`` -- never ``negative``."""
     name = "lookup"
     costly = True          # waits for a callback to arrive
+    oob_needs_dns_label = True
     # Resolving a name is intrusive; fetching from an address RCEKit did not
     # choose is not, and rides at `stateful` on the probes that do it.
     safety = "intrusive"
@@ -6107,6 +6117,7 @@ class DeserSink(DetectionMethod):
     name = "deser"
     tier = "deserialization-sink"
     costly = True          # its DNS gadget waits for a callback
+    oob_needs_dns_label = True
     # The shape oracle needs no listener and changes nothing, so the method
     # itself sits at `safe`.
     #
@@ -6221,6 +6232,15 @@ class DeserSink(DetectionMethod):
         probes: List[Probe] = []
         listener = self.config.get("oob_listener")
         host = str(self.config.get("oob_host") or "").strip().rstrip(".")
+        # A gadget carries its token as a DNS label and has nowhere else to put
+        # one, so an address literal leaves `<token>.10.0.0.9` -- a name that
+        # resolves nowhere. The probes were built and sent anyway: real
+        # requests the target answered, from which no callback could follow by
+        # construction. `lookup` already refuses an address for this reason;
+        # treating the host as absent here sends the shape oracle alone, which
+        # is exactly what this method can still prove without a listener.
+        if host and OobCallback._is_ip_literal(host):
+            host = ""
         for name, spec in self._ecosystems():
             magic = str(spec.get("magic") or "")
             wellformed = str(spec.get("wellformed") or "")
@@ -6561,8 +6581,11 @@ def oob_channel_warnings(args: Any, dns_up: bool) -> List[str]:
     Most of the shapes are DNS ones, precisely because a resolver is often the
     only egress a hardened target has, which makes the silence expensive.
 
-    An address literal for ``--oob-host`` carries its token in the URL path
-    instead, so it never builds DNS probes and has nothing to warn about."""
+    An address literal for ``--oob-host`` carries ``oob``'s token in the URL
+    path instead, so ``oob`` builds no DNS probes and there is nothing here to
+    warn it about. What an address costs a method that has no second channel
+    is a different question, asked of every run that names a host rather than
+    only of one that started a listener -- see :func:`oob_address_strands`."""
     if OobCallback._is_ip_literal(str(args.oob_host).strip().rstrip(".")):
         return []
     if not dns_up:
@@ -6574,6 +6597,40 @@ def oob_channel_warnings(args: Any, dns_up: bool) -> List[str]:
                 "--listen-dns-port 53 (needs root) and NS records delegating that domain here, "
                 "or the DNS shapes are sent and silently never fire — only the HTTP ones are live."]
     return []
+
+
+def oob_address_strands(args: Any, method_names: Sequence[str]) -> List[str]:
+    """Methods that an address for ``--oob-host`` leaves with nothing to send.
+
+    ``oob`` takes either form: given an address it drops its DNS shapes and
+    puts the token in a URL path instead. A method with no second channel
+    cannot. ``lookup`` resolves an expression and ``deser`` reconstructs an
+    object graph; both carry their token as a DNS label or not at all, so an
+    address leaves ``lookup`` building nothing and ``deser`` holding its
+    listener-free shape oracle alone.
+
+    Neither is a failure the run should stop for -- ``deser`` still proves what
+    it can, and the operator may have meant exactly that. It is a failure to
+    say nothing, because a verdict capped by a channel that was never live
+    reads exactly like a verdict about the target. This is asked outside the
+    listener block on purpose: ``deser`` does not require a callback host, so
+    it never reaches that block, and a notice placed there could not fire for
+    the method that prompted it."""
+    host = str(getattr(args, "oob_host", "") or "").strip().rstrip(".")
+    if not host or not OobCallback._is_ip_literal(host):
+        return []
+    stranded = [name for name in method_names
+                if name in DETECTION_METHODS
+                and DETECTION_METHODS[name].oob_needs_dns_label]
+    if not stranded:
+        return []
+    # The tier comes off the class. Written out by hand it would say `lookup`
+    # confirms, which is the drift this repository keeps finding.
+    out_of_reach = sorted({DETECTION_METHODS[name].tier for name in stranded})
+    return [f"[!] --methods {'/'.join(stranded)} cannot carry a token in an address: "
+            f"{host} is not a name, so the DNS probes are not sent, which puts "
+            f"{' / '.join(out_of_reach)} out of reach. Use a domain delegated to this "
+            "listener, or read the result as untested rather than clean."]
 
 
 def method_claim(name: str) -> str:
@@ -8298,6 +8355,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # method meant remembering to come back and add it -- and a probe
             # shape with nowhere to declare its rung was deleted instead.
             selected_methods = [DETECTION_METHODS[m] for m in method_names]
+            for line in oob_address_strands(args, method_names):
+                print(line)
             callback_methods = [m.name for m in selected_methods if m.needs_oob_host]
             if callback_methods and not args.oob_host:
                 print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
