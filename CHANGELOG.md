@@ -191,6 +191,54 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.45.3] — 2026-09-24
+
+### Fixed
+
+- **A `deser`-only run started no listener, so its gadgets went out with
+  nothing to receive them.** `--methods deser --oob-host <delegated-name>`,
+  with neither `oob` nor `lookup` selected, built its two DNS-gadget probes and
+  sent them to a target while no listener was running -- with the host
+  configured perfectly. `deser` reached `deserialization-sink` only when it
+  happened to be selected beside a method that required a host; run on its own,
+  the way the docs present it, its strongest oracle was structurally dead and
+  it capped at `needs-review` without saying so.
+
+  The gate read `needs_oob_host`, which was answering two questions at once:
+  "should the run stop when no host is named" and "does this run need a
+  listener". Every other method answers both the same way. `deser` is where
+  they come apart -- its shape oracle proves something with no listener at all,
+  so a missing host must not stop the run, while its DNS gadget does call back
+  and needs one.
+
+  So the second question gets its own attribute, `uses_oob_host`, and the
+  listener starts for any selected method that calls back once a host is named.
+  It is declared rather than derived: `needs_oob_host or oob_needs_dns_label`
+  gives the right answer for every method shipping today and would miss one
+  that called back over HTTP without requiring a host -- which is the shape
+  `oob` itself would have if its host were optional.
+
+  Two notices could now reach a run with no HTTP shape in it, and said "only
+  the HTTP shapes are live" as though `oob`'s channel were the only one. They
+  say "only the shapes that need no DNS are live", which is true of `oob`'s
+  HTTP probes and of `deser`'s shape oracle alike. The message for an
+  unbindable HTTP port no longer names `lookup` as the reason a run continues.
+
+  `uses_oob_host` is the default answer rather than the answer. Whether a
+  method calls back can depend on its own flags: `--deser-formats` selects the
+  ecosystems, and three of the five -- `php`, `dotnet`, `python_pickle` --
+  ship no DNS gadget at all. So both callers ask `builds_callback_probes()` on
+  a configured instance instead of reading the class. `--deser-formats php`
+  with an address no longer draws a notice blaming the address, because there
+  was no callback probe to lose and a delegated domain could not have helped;
+  and it no longer starts a listener that nothing would reach.
+
+  This is the second half of #94, found while fixing the first and reported as
+  #98 rather than folded into #97: same defect -- probes sent that no callback
+  could follow -- reached by a different route. The format-dependent part came
+  from an automated review of #97, verified against the corpus before being
+  accepted.
+
 ## [2.45.2] — 2026-09-24
 
 ### Fixed
@@ -2191,6 +2239,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.3]: https://github.com/kabiri-labs/rcekit/compare/v2.45.2...v2.45.3
 [2.45.2]: https://github.com/kabiri-labs/rcekit/compare/v2.45.1...v2.45.2
 [2.45.1]: https://github.com/kabiri-labs/rcekit/compare/v2.45.0...v2.45.1
 [2.45.0]: https://github.com/kabiri-labs/rcekit/compare/v2.44.0...v2.45.0

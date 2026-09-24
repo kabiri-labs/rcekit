@@ -1002,6 +1002,18 @@ rather than send ones that cannot call back, and the run says which methods an
 address stranded and which tier that puts out of reach, so a capped verdict is
 not read as a result.
 
+Naming a host is also what starts the listener for them. `deser` does not
+*require* `--oob-host` — its shape oracle proves something without one — so a
+`deser`-only run used to start no listener at all and send its gadgets to a
+target with nothing to receive the callback, however well the host was
+delegated. The listener now starts for any selected method that calls back when
+a host is named, which `oob`, `lookup` and `deser` all do.
+
+For `deser` that depends on `--deser-formats`: only `java` and `fastjson` ship
+a DNS gadget, so a run narrowed to `php`, `dotnet` or `python_pickle` builds no
+callback probe, starts no listener, and is not reported as stranded by an
+address — the limit there belongs to the format, not to the host.
+
 **The DNS shapes need port 53.** A DNS callback travels the real resolver
 hierarchy, so it only arrives if this listener *is* the authority for the OOB
 domain — `--listen-dns-port 53` (needs root) plus NS records delegating the

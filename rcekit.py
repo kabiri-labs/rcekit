@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.2"
+__version__ = "2.45.3"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4051,9 +4051,25 @@ class DetectionMethod:
     # by hand in ``main()``. A new method meant remembering to add a branch
     # there, and a probe shape with no rung to sit at was simply deleted.
     safety = "safe"
-    # Whether the method needs somewhere for the target to call back to. Another
-    # list that was written out by hand at the one place that checked it.
+    # Whether the method needs somewhere for the target to call back to --
+    # that is, whether the run should stop when no `--oob-host` is named.
+    # Another list that was written out by hand at the one place that checked
+    # it.
     needs_oob_host = False
+    # Whether the method builds probes that call back *when* a host is named,
+    # which is what decides that a listener has to be running. The two were one
+    # attribute, and `deser` is where they come apart: it is the only method
+    # that answers no to the first and yes to the second, because its shape
+    # oracle proves something without any listener at all. Reading the gate off
+    # `needs_oob_host` therefore started no listener for a `deser`-only run and
+    # sent its gadgets to a target with nothing to receive the callback.
+    # Declared rather than derived: `needs_oob_host or oob_needs_dns_label`
+    # happens to give the right answer today and would miss a method that calls
+    # back over HTTP without requiring a host, which is exactly the shape `oob`
+    # would have if its host were optional.
+    #
+    # This is the default answer, not the answer. Ask `builds_callback_probes`.
+    uses_oob_host = False
     # Whether the token can only ride in a DNS label, which decides what an
     # address literal for `--oob-host` is worth to this method. `oob` has a
     # second channel -- it puts the token in a URL path and drops its DNS
@@ -4063,6 +4079,25 @@ class DetectionMethod:
     # `deser` came to send a gadget aimed at `<token>.10.0.0.9` while the
     # warning that exists for a dead DNS channel stayed silent.
     oob_needs_dns_label = False
+    def builds_callback_probes(self) -> bool:
+        """Whether this method, configured *this* way, builds probes that rest
+        on a callback -- given a host it can actually use.
+
+        Deliberately not a question about the host's form. Two callers need
+        different things from it: the listener gate asks whether anything in
+        this run will call back, and the stranded notice asks whether an
+        address took away something the method would otherwise have had. Both
+        want capability-as-configured, and folding the address test in here
+        would make the second one answer no for exactly the case it exists to
+        report.
+
+        A class attribute cannot answer this for every method. `deser` selects
+        ecosystems with `--deser-formats`, and three of the five ship no DNS
+        gadget at all -- so whether it calls back is a property of the run, not
+        of the class, and the attribute was blaming an address for a limit that
+        belonged to the format."""
+        return self.uses_oob_host
+
     # Whether the operator's own configuration is this method's gate, in place
     # of the rung. `file` and `write` change the target and say so in `safety`,
     # but they do nothing at all until a directory to write into and a URL to
@@ -5449,6 +5484,7 @@ class OobCallback(DetectionMethod):
     # It makes the target open outbound connections.
     safety = "intrusive"
     needs_oob_host = True
+    uses_oob_host = True
     # The callbacks are asynchronous -- one can land well after the response
     # that triggered it -- so no probe can be judged until the whole batch has
     # been fired and the listener has been given time to collect.
@@ -5717,6 +5753,7 @@ class LookupCallback(DetectionMethod):
     name = "lookup"
     costly = True          # waits for a callback to arrive
     oob_needs_dns_label = True
+    uses_oob_host = True
     # Resolving a name is intrusive; fetching from an address RCEKit did not
     # choose is not, and rides at `stateful` on the probes that do it.
     safety = "intrusive"
@@ -6118,6 +6155,10 @@ class DeserSink(DetectionMethod):
     tier = "deserialization-sink"
     costly = True          # its DNS gadget waits for a callback
     oob_needs_dns_label = True
+    # Its DNS gadget calls back, so a listener has to be up for it -- but the
+    # shape oracle proves something without one, so the run must not stop when
+    # no host is named. That is the whole reason these are two attributes.
+    uses_oob_host = True
     # The shape oracle needs no listener and changes nothing, so the method
     # itself sits at `safe`.
     #
@@ -6227,6 +6268,24 @@ class DeserSink(DetectionMethod):
             raise ValueError(f"unknown deserialization format(s): {', '.join(unknown)}; "
                              f"choose from auto, {', '.join(sorted(declared))}")
         return [(name, declared[name]) for name in wanted]
+
+    def builds_callback_probes(self) -> bool:
+        """Only when a selected ecosystem actually ships a DNS gadget.
+
+        Three of the five -- ``php``, ``dotnet``, ``python_pickle`` -- have no
+        ``dns`` entry, so ``--deser-formats php`` builds no callback probe with
+        the best-delegated domain in the world. Answering from the class made
+        the stranded notice blame the address for that and prescribe a domain,
+        which could not have helped, and made the listener gate start a
+        listener nothing would ever reach."""
+        try:
+            ecosystems = self._ecosystems()
+        except ValueError:
+            # An unknown format name is the run's own error, raised where the
+            # run reports it. Assume a callback rather than pre-empt that with
+            # a different message from a different place.
+            return True
+        return any(spec.get("dns") for _, spec in ecosystems)
 
     def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
         probes: List[Probe] = []
@@ -6590,16 +6649,17 @@ def oob_channel_warnings(args: Any, dns_up: bool) -> List[str]:
         return []
     if not dns_up:
         return ["[!] The DNS probes cannot call back: the DNS port could not be bound. "
-                "Only the HTTP shapes are live."]
+                "Only the shapes that need no DNS are live."]
     if args.listen_dns_port != 53:
         return [f"[!] The DNS probes cannot call back on port {args.listen_dns_port}: a resolver "
                 f"reaches the authority for {args.oob_host} on port 53 only. Run with "
                 "--listen-dns-port 53 (needs root) and NS records delegating that domain here, "
-                "or the DNS shapes are sent and silently never fire — only the HTTP ones are live."]
+                "or the DNS shapes are sent and silently never fire — only the shapes that need "
+                "no DNS are live."]
     return []
 
 
-def oob_address_strands(args: Any, method_names: Sequence[str]) -> List[str]:
+def oob_address_strands(args: Any, methods: "Sequence[DetectionMethod]") -> List[str]:
     """Methods that an address for ``--oob-host`` leaves with nothing to send.
 
     ``oob`` takes either form: given an address it drops its DNS shapes and
@@ -6615,18 +6675,24 @@ def oob_address_strands(args: Any, method_names: Sequence[str]) -> List[str]:
     reads exactly like a verdict about the target. This is asked outside the
     listener block on purpose: ``deser`` does not require a callback host, so
     it never reaches that block, and a notice placed there could not fire for
-    the method that prompted it."""
+    the method that prompted it.
+
+    Takes configured methods rather than their names, because an address only
+    strands a method that would have had a callback probe to lose.
+    ``--deser-formats php`` has none to begin with, and blaming the address
+    there sent the operator after a delegated domain that could not have
+    helped."""
     host = str(getattr(args, "oob_host", "") or "").strip().rstrip(".")
     if not host or not OobCallback._is_ip_literal(host):
         return []
-    stranded = [name for name in method_names
-                if name in DETECTION_METHODS
-                and DETECTION_METHODS[name].oob_needs_dns_label]
+    stranded = [m for m in methods
+                if m.oob_needs_dns_label and m.builds_callback_probes()]
     if not stranded:
         return []
     # The tier comes off the class. Written out by hand it would say `lookup`
     # confirms, which is the drift this repository keeps finding.
-    out_of_reach = sorted({DETECTION_METHODS[name].tier for name in stranded})
+    out_of_reach = sorted({m.tier for m in stranded})
+    stranded = [m.name for m in stranded]
     return [f"[!] --methods {'/'.join(stranded)} cannot carry a token in an address: "
             f"{host} is not a name, so the DNS probes are not sent, which puts "
             f"{' / '.join(out_of_reach)} out of reach. Use a domain delegated to this "
@@ -8355,7 +8421,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             # method meant remembering to come back and add it -- and a probe
             # shape with nowhere to declare its rung was deleted instead.
             selected_methods = [DETECTION_METHODS[m] for m in method_names]
-            for line in oob_address_strands(args, method_names):
+            # Configured instances, because whether a method calls back can
+            # depend on its own flags -- `--deser-formats` decides it for
+            # `deser`. Same shape as the `file` channel check below.
+            configured_methods = [cls(generator, detection_config) for cls in selected_methods]
+            for line in oob_address_strands(args, configured_methods):
                 print(line)
             callback_methods = [m.name for m in selected_methods if m.needs_oob_host]
             if callback_methods and not args.oob_host:
@@ -8389,7 +8459,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"payloads of that kind. Pass --verify-active-risk {cls.safety} to allow "
                       "it.")
                 return 1
-            if callback_methods:
+            if args.oob_host and any(m.builds_callback_probes() for m in configured_methods):
                 listener = OOBListener(answer_ip=args.listen_answer_ip, log_path=args.listen_log)
                 # HTTP is `oob`'s channel, not `lookup`'s. A JNDI lookup reaches
                 # this listener through DNS and nothing else, so a bound port
@@ -8406,7 +8476,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         listener.start_http(args.listen_http_port)
                     except OSError as exc:
                         print(f"[detect] HTTP port {args.listen_http_port} is unavailable ({exc}); "
-                              "continuing, because lookup probes call back over DNS.")
+                              "continuing, because the selected methods call back over DNS.")
                 dns_up = listener.start_dns(args.listen_dns_port)
                 if LookupCallback.name in callback_methods and not dns_up:
                     # Every lookup probe resolves its callback host before doing
