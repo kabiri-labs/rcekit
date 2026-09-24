@@ -321,10 +321,10 @@ exactly that sink:
 
 ```
 [detect] methods: reflected, eval, time
-[detect] sent 2426 probes: negative=2426
+[detect] sent 2883 probes (2426 result(s)): negative=2426
 ```
 
-2426 requests and a clean negative on a target that evaluates whatever it is
+2883 requests and a clean negative on a target that evaluates whatever it is
 handed. `--methods boolean` reads the one channel that is left — whether the
 *shape* of the response changed:
 
@@ -406,7 +406,7 @@ against a real command injection sitting behind a filter that 403s a space or a
 separator, RCEKit used to report:
 
 ```
-[detect] sent 10 probes: negative=10
+[detect] sent 10 probes (10 result(s)): negative=10
 [detect] No execution confirmed. The target may be patched...
 ```
 
@@ -415,7 +415,7 @@ filter. That is the same false clean `nothing-tested` exists to prevent, one
 level further in — so a refused probe gets its own verdict:
 
 ```
-[detect] sent 10 probes: blocked=10
+[detect] sent 10 probes (10 result(s)): blocked=10
 [detect] 10 of 10 probe(s) WERE REFUSED BY A FILTER (HTTP 403 x10) — the
          payload-free control got through and these did not, so what was
          rejected is the payload and the sink never saw it.
@@ -739,11 +739,19 @@ the same way. So a wave that does not fit abandons the measurement, and the run
 names it and the flag that bounded it:
 
 ```
+[detect] sent 0 probes (1 result(s)): inconclusive=1
 [detect] --max-payloads held back 1 measurement(s) that could not have reached a
          verdict within the budget:
 [detect]   1 x boolean/raw could not finish its series within --max-payloads
            (needed 27 requests, budget 3)
 ```
+
+The summary counts what the target received, not how many rows came back. They
+are the same number only while every method answers from each probe: an
+aggregate method reports one row for a whole series, so a `time` run that put 20
+requests on a target used to announce 5. An evasion retry is a request too, and
+is charged to the same budget -- checked per rung, because one refused probe can
+be retried at `low` and again at `high`.
 
 **An abandoned measurement leaves a row, not a silence.** Dropping it quietly
 let the *other* carriers describe the run, and the other carriers are the ones

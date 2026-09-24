@@ -220,6 +220,33 @@ formats, or the template schema.
   wave a method picks after seeing its own timings cannot be predicted from
   there.
 
+- **`sent N probes` is a claim about what the target received**, and it was
+  counting result rows. Those are the same number for a method that answers
+  from each probe, which is why it read true for so long -- but an aggregate
+  method reports one row for a whole series, so a `time` run that put 20
+  requests on a target announced 5, and a measurement this release declines
+  would have announced one probe for traffic that never left. Both the run
+  summary and the per-point line report deliveries now, with the result count
+  beside them.
+
+  One figure in the 2.45.0 entry below came from that line and was mislabelled
+  with it. Re-measured against the same sink: `--methods reflected,eval,time`
+  put **2883** requests on the target, not 2426, which was the number of
+  results. Every one of them was still `negative`, so the claim stands; the
+  number did not.
+
+- **An evasion retry is a request, and the meter could not see it.** `_escalate`
+  fired without incrementing `delivered_probes`, so retries were traffic
+  outside the bound this release makes real: measured at `--max-payloads 5
+  --evade high` against a filter that refuses whitespace, the target received
+  12 requests and the run recorded 5. Counting them was half the fix. The other
+  half is that the budget is checked *per rung* rather than once before the
+  ladder -- one refused probe is retried at `low` and again at `high`, so it
+  can cost three requests, and a check at the call site alone still overshot by
+  one at `--max-payloads 10 --evade high`. Swept over caps 1 to 25 at all three
+  evasion settings: 75 combinations, no overrun, and the counter equal to the
+  requests the target actually received in every one.
+
 ### Security
 
 No authorization, deny-by-default or matrix-evaluation boundary moves, and

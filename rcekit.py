@@ -2796,7 +2796,9 @@ class RCEKit:
                   record: "PayloadRecord", url: str,
                   method: str, data: Optional[str], headers: Optional[List[str]],
                   url_location: str, body_location: str, timeout: float,
-                  control_status: Optional[int]
+                  control_status: Optional[int],
+                  started_requests: int = 0,
+                  max_payloads: Optional[int] = None
                   ) -> Optional[Tuple[str, Any, Any, Any, float]]:
         """Re-send a refused probe, climbing the rungs to the run's ceiling.
 
@@ -2845,12 +2847,26 @@ class RCEKit:
         prefix = (self.contexts.get(record.context) or {}).get("prefix") or ""
         opens_closed = prefix[-1:] in ("'", '"')
         for rung in EVASION_RUNGS[1:]:
+            # Per rung, not once before the ladder. One refused probe can be
+            # retried at `low` and again at `high`, so a budget checked only at
+            # the call site let a single probe spend three requests -- measured
+            # as 11 requests against `--max-payloads 10 --evade high`.
+            if self._budget_spent(started_requests, max_payloads):
+                return None
             climbed = evade_body(probe.payload, rung, opens_closed=opens_closed)
             if climbed == probe.payload:
                 continue
             status, body, chans, elapsed = self._fire_channels(
                 climbed, url, method, data, headers, url_location, body_location,
                 timeout)
+            # A retry is a request the target receives, so it is charged to the
+            # same meter as the probe that prompted it. `escalated_probes`
+            # counts these too, but that number describes the ladder rather
+            # than the traffic -- and `--max-payloads` is spent against
+            # `delivered_probes`. Measured before this line existed: a
+            # `--max-payloads 5 --evade high` run against a filter that refuses
+            # whitespace put 12 requests on the target and recorded 5.
+            self.delivered_probes += 1
             self.escalated_probes += 1
             if not payload_refused(status, control_status):
                 self.escalation_wins[rung] = self.escalation_wins.get(rung, 0) + 1
@@ -3092,11 +3108,18 @@ class RCEKit:
                             # did nothing for four of the eight methods -- the
                             # same branch, and the same omission, as the
                             # refusal check itself a change ago.
-                            if payload_refused(status, control_status):
+                            # The retry is a request too, so it only goes out
+                            # while the budget still covers one. Without this
+                            # the bound overshot by one on the last probe of a
+                            # capped run: a probe cannot be known to be refused
+                            # until it has been sent.
+                            if (payload_refused(status, control_status)
+                                    and not self._budget_spent(started_requests,
+                                                               max_payloads)):
                                 climbed = self._escalate(
                                     meth, probe, record, url, method, data, headers,
                                     url_location, resolved_body_location, req_timeout,
-                                    control_status)
+                                    control_status, started_requests, max_payloads)
                                 if climbed is not None:
                                     sent, status, body, chans, elapsed = climbed
                                     probe = dataclass_replace(probe, payload=sent)
@@ -3275,11 +3298,12 @@ class RCEKit:
                     # not had its say yet. Only a refused one -- applying a rung
                     # to every probe was measured to break 8 shapes and improve
                     # none.
-                    if payload_refused(status, control_status):
+                    if (payload_refused(status, control_status)
+                            and not self._budget_spent(started_requests, max_payloads)):
                         climbed = self._escalate(
                             meth, probe, record, url, method, data, headers,
                             url_location, resolved_body_location, timeout,
-                            control_status)
+                            control_status, started_requests, max_payloads)
                         if climbed is not None:
                             sent, status, body, chans, elapsed = climbed
                             probe = dataclass_replace(probe, payload=sent)
@@ -5825,7 +5849,8 @@ class BooleanDifferential(DetectionMethod):
     shipped oracle is structurally blind to it -- ``reflected`` and ``eval``
     need the computed value rendered, ``time`` needs a sleep, ``oob`` needs
     egress. Measured against exactly that sink, ``--methods reflected,eval,time``
-    sent 2426 probes and reported ``negative`` for every one of them.
+    put 2883 requests on the target and reported ``negative`` for every one of
+    the 2426 results.
 
     So the channel here is the *shape of the response*, and the answer it
     carries is one bit. That makes this the weakest oracle in the tool, and
@@ -8534,6 +8559,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 results = []
                 for point, point_url, point_method, point_data, point_headers, label in injection_runs:
                     point_results: List[Dict[str, Any]] = []
+                    # Deliveries for this point alone, for the same reason the
+                    # run-wide summary counts them: rows and requests are the
+                    # same number only while every method answers from each
+                    # probe.
+                    point_started = generator.delivered_probes
                     confirmed_here = False
                     # `--max-payloads` is spent per question, not per wave and
                     # not per candidate. Per wave, splitting the methods in two
@@ -8576,7 +8606,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     verdict = overall_detection_verdict(point_results)
                     marker = "  <-- CONFIRMED" if verdict == "confirmed" else ""
                     print(f"[detect]   {label}: {verdict} "
-                          f"({len(point_results)} probes){marker}")
+                          f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
             else:
                 results = generator.run_detection(
@@ -8601,7 +8631,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             for result in results:
                 by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
             print(f"[detect] methods: {', '.join(method_names)}")
-            print(f"[detect] sent {len(results)} probes: " +
+            # Deliveries, not rows. They are the same number for a method
+            # that answers from each probe, which is why this read true for so
+            # long -- but an aggregate method reports one row for a whole
+            # series, so a `time` run that put 20 requests on the target
+            # announced 5, and a measurement the budget declined announced one
+            # probe for traffic that never left. "sent N probes" is a claim
+            # about what the target received.
+            print(f"[detect] sent {generator.delivered_probes} probes "
+                  f"({len(results)} result(s)): " +
                   (", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())) or "none"))
             if generator.profile_dropped_probes:
                 # A ladder that shrinks quietly is the one way this filter could
