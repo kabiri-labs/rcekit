@@ -233,11 +233,36 @@ formats, or the template schema.
   was no callback probe to lose and a delegated domain could not have helped;
   and it no longer starts a listener that nothing would reach.
 
+  Whether the host's *form* is one a method can use is a second question,
+  `can_use_oob_host()`, and only the gate asks it. A listener bound for
+  `--methods deser --oob-host 10.0.0.9` receives nothing -- `build_probes`
+  drops an address and sends no gadget -- and the run announced "the target
+  will open outbound connections" directly beneath the notice saying those
+  probes are not sent. It stays out of `builds_callback_probes()`, because the
+  stranded notice is *about* the address and an address test there would
+  silence it for the one case it exists to report.
+
+  `lookup` with an address stops getting a listener too. It built no probes
+  with one either way, so nothing is lost, and the stranded notice says more
+  about that run than the port-53 warnings it no longer reaches.
+
+  A flaky test met on the way, fixed here because it would have bitten CI
+  sooner or later: the fake parsing endpoint behind the `deser` shape
+  differential sniffed one byte (`raw[4:5] not in (b"t", b"s")`) to decide
+  whether a stream was well-formed. The `noise` form is the format's magic
+  followed by random characters, so it passed that check about once in 500
+  runs -- measured at 398 in 200,000 -- all three forms answered alike, and
+  the oracle's correct `negative` failed a test that wanted `needs-review`.
+  The endpoint now reads TC_STRING the way a parser does, a two-byte length
+  followed by exactly that many bytes: 0 collisions in 500,000 seeds. Seeding
+  the test's RNG would have hidden it instead, and would have gone on hiding a
+  real regression in how the noise form is built.
+
   This is the second half of #94, found while fixing the first and reported as
   #98 rather than folded into #97: same defect -- probes sent that no callback
   could follow -- reached by a different route. The format-dependent part came
-  from an automated review of #97, verified against the corpus before being
-  accepted.
+  from an automated review of #97 and the host-form part from one of this
+  change, both verified before being accepted.
 
 ## [2.45.2] — 2026-09-24
 

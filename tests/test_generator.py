@@ -5148,6 +5148,32 @@ class ListenerGateTestCase(unittest.TestCase):
                         "--oob-host", "oob.example.com")
         self.assertIn("OOB listener up", out)
 
+    def test_an_address_a_method_cannot_use_starts_no_listener(self):
+        """A listener bound for a method that cannot use the host receives
+        nothing, and the run said so twice over in opposite directions.
+
+        `deser` and `lookup` carry a token as a DNS label or not at all, so
+        `build_probes` drops the host and sends no callback probe. Binding the
+        ports anyway printed "the target will open outbound connections"
+        directly beneath the notice saying those probes are not sent."""
+        for method in ("deser", "lookup"):
+            with self.subTest(method=method):
+                out = self._run("--methods", method, "--oob-host", "10.0.0.9",
+                                "--verify-active-risk", "intrusive")
+                self.assertNotIn("OOB listener up", out)
+                self.assertNotIn("will open outbound connections", out)
+                self.assertIn("cannot carry a token in an address", out)
+
+    def test_an_address_oob_can_use_still_starts_one(self):
+        """The negative that keeps the above from over-reaching.
+
+        `oob` has a second channel: with an address it drops the DNS shapes and
+        puts the token in a URL path, so the listener is exactly what it needs.
+        Refusing one here would take away the only method an address serves."""
+        out = self._run("--methods", "oob", "--oob-host", "10.0.0.9",
+                        "--verify-active-risk", "intrusive")
+        self.assertIn("OOB listener up", out)
+
 
 class TimingScreenDepthTestCase(unittest.TestCase):
     """`--probe-depth quick` trades probe *shapes* for requests. Narrowing the
@@ -8954,7 +8980,22 @@ class DeserializationSinkTestCase(unittest.TestCase):
                 return 400, "bad base64"
             if not raw.startswith(b"\xac\xed\x00\x05"):
                 return 400, "not a serialization stream"
-            if len(raw) < 8 or raw[4:5] not in (b"t", b"s"):
+            # Read the stream the way a parser does instead of sniffing one
+            # byte. The `noise` form is the format's magic followed by random
+            # characters, so `raw[4:5] not in (b"t", b"s")` let one through as
+            # a well-formed object about once in 500 runs. All three forms then
+            # answered alike, the differential correctly reported `negative`,
+            # and this test -- which wants `needs-review` -- failed for a
+            # reason that had nothing to do with the code under test.
+            #
+            # TC_STRING is what the corpus ships: 0x74, a two-byte big-endian
+            # length, then exactly that many bytes. `wellformed` satisfies it,
+            # `truncated` declares four bytes and supplies none, and noise
+            # would have to guess its own length to get through.
+            stream = raw[4:]
+            if stream[0:1] != b"t" or len(stream) < 3:
+                return 500, "StreamCorruptedException"
+            if len(stream) - 3 != int.from_bytes(stream[1:3], "big"):
                 return 500, "StreamCorruptedException"
             return 200, "object accepted"
         return route
