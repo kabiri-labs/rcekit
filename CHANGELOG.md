@@ -169,6 +169,19 @@ formats, or the template schema.
   carried the word `write` inside `file`'s "write+read-back" and a looser
   match would have counted that as documentation.
 
+  A second pass corrected what `--oob-host` promises those two methods. Its
+  help offered "an IP it can reach or a domain delegated to this listener" and
+  was scoped `(--methods oob)`, which was true when `oob` was the only caller.
+  It is not true now: `LookupCallback.build_probes` returns no probes at all
+  for an address literal, so `lookup` reports `nothing-tested`, and `DeserSink`
+  builds `<token>.<IP>`, which resolves nowhere, so its DNS gadget can never
+  reach `deserialization-sink`. An operator who satisfied the stated
+  prerequisite got silence from one method and a capped tier from the other.
+  The flag's help, the `--methods` entries for `lookup` and `deser`, the
+  message printed when a callback method is selected without a host, and the
+  `deser` oracle table in `docs/reference.md` now all say the same thing: an IP
+  serves `oob` alone, because only `oob` can put its token in a URL path.
+
   No version bump -- this is documentation and tests only.
 
 ## [Unreleased]
