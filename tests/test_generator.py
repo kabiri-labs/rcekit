@@ -4973,13 +4973,52 @@ class OobChannelWarningTestCase(unittest.TestCase):
         self.assertTrue(lines)
         self.assertIn("cannot call back", lines[0])
 
-    def test_an_ip_host_has_no_dns_probes_to_warn_about(self):
-        # With an address literal the token rides in the URL path and no DNS
-        # shape is ever built, so there is nothing to warn about.
+    def test_an_ip_host_has_no_dns_probes_to_warn_oob_about(self):
+        # With an address literal `oob` puts the token in the URL path and
+        # builds no DNS shape, so there is nothing to warn it about. This once
+        # read as a statement about the flag rather than about `oob`, and the
+        # silence it pinned is what let `deser` send a dead gadget unremarked.
         for host in ("10.0.0.1", "127.0.0.1"):
             with self.subTest(host=host):
                 self.assertEqual(
                     rcekit.oob_channel_warnings(self._Args(oob_host=host), dns_up=False), [])
+
+    def test_a_method_that_needs_a_dns_label_is_named_when_given_an_address(self):
+        """`lookup` and `deser` have nowhere but a DNS label to put a token.
+
+        An address strands them: `lookup` builds no probes at all and `deser`
+        loses the half that reaches its own tier. Saying nothing there is the
+        failure this whole function exists to prevent -- the operator reads a
+        capped verdict as a result rather than as a channel that was never
+        live."""
+        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["lookup", "deser"])
+        self.assertTrue(lines, "an address stranded two methods and nothing was said")
+        self.assertIn("lookup/deser", lines[0])
+        self.assertIn("10.0.0.9", lines[0])
+        # The tier each one can no longer reach, read off the class rather than
+        # spelled out here, so a retier moves the message with it.
+        for name in ("lookup", "deser"):
+            self.assertIn(rcekit.DETECTION_METHODS[name].tier, lines[0])
+
+    def test_a_method_with_a_second_channel_is_not_named(self):
+        # The negative that keeps the notice honest: `oob` is fine with an
+        # address, so a run selecting it alongside a stranded method must not
+        # see `oob` blamed, and a run without a stranded method sees nothing.
+        lines = rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["oob", "deser"])
+        self.assertTrue(lines)
+        self.assertNotIn("oob/", lines[0])
+        self.assertNotIn("/oob", lines[0])
+        self.assertEqual(
+            rcekit.oob_address_strands(self._Args(oob_host="10.0.0.9"), ["oob", "reflected"]), [])
+
+    def test_a_delegated_name_strands_nobody(self):
+        # The guard against over-correcting: the notice is about an address,
+        # so a name must leave a correctly configured run silent.
+        self.assertEqual(
+            rcekit.oob_address_strands(self._Args(), ["lookup", "deser"]), [])
+        # And a run that named no host at all has nothing to say either.
+        self.assertEqual(
+            rcekit.oob_address_strands(self._Args(oob_host=""), ["lookup", "deser"]), [])
 
     def test_the_warning_reaches_the_operator(self):
         result = subprocess.run(
@@ -4990,6 +5029,22 @@ class OobChannelWarningTestCase(unittest.TestCase):
              "--listen-http-port", "0"],
             capture_output=True, text=True, timeout=300)
         self.assertIn("DNS probes cannot call back", result.stdout)
+
+    def test_the_stranded_notice_reaches_an_operator_running_deser_alone(self):
+        """`deser` never reaches the block the other OOB notices are printed in.
+
+        It does not *require* a callback host, so it is not in
+        `callback_methods` and no listener is started for it -- which is
+        exactly the run this notice exists for, and exactly the run a notice
+        placed with the others could not reach."""
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--acknowledge-consent",
+             "--verify-url", "http://127.0.0.1:9/x?q=FUZZ", "--environments", "java",
+             "--contexts", "raw", "--categories", "basic_enum", "--methods", "deser",
+             "--oob-host", "10.0.0.9", "--max-payloads", "1"],
+            capture_output=True, text=True, timeout=300)
+        self.assertIn("cannot carry a token in an address", result.stdout)
+        self.assertIn("deser", result.stdout)
 
 
 class TimingScreenDepthTestCase(unittest.TestCase):
@@ -8712,6 +8767,30 @@ class DeserializationSinkTestCase(unittest.TestCase):
         self.assertEqual(raw[marker + 2:marker + 6], b"\xff\xff\xff\xff")
 
     # -- probe construction --------------------------------------------------
+
+    def test_an_address_for_the_callback_host_builds_no_gadget(self):
+        """A gadget carries its token as a DNS label and has nowhere else.
+
+        Given `10.0.0.9` the callback host was `<token>.10.0.0.9`, a name that
+        resolves nowhere -- so the gadget went to the target as a real request
+        from which no callback could follow by construction. `lookup` already
+        refused an address for this reason; this method had no such test."""
+        probes = self._probes({"oob_host": "10.0.0.9"})
+        self.assertFalse([p for p in probes if p.phase == "dns"],
+                         "a gadget was built for a host that cannot resolve")
+        # The shape oracle needs no listener, so it is untouched: the method
+        # still reports, it just cannot reach its own tier.
+        self.assertTrue([p for p in probes if p.phase.startswith("shape/")])
+        self.assertEqual(len(probes), len(self._probes()))
+
+    def test_a_delegated_name_still_builds_the_gadget(self):
+        # The guard against over-correcting the above: the skip is about an
+        # address, and a name must still get the probe that reaches the tier.
+        probes = self._probes({"oob_host": "oob.example.test"})
+        dns = [p for p in probes if p.phase == "dns"]
+        self.assertTrue(dns, "a delegated name lost the gadget it depends on")
+        for probe in dns:
+            self.assertTrue(probe.expected, "a gadget probe carries a token")
 
     def test_each_ecosystem_gets_all_three_shape_forms(self):
         probes = self._probes()
