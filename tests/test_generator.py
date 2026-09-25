@@ -5113,7 +5113,8 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
     ACCEPTED = '{"age":20,"name":"rk"}'
 
     def setUp(self):
-        self.method = rcekit.DETECTION_METHODS["deser"](RCEKit(), {})
+        self.gen = RCEKit()
+        self.method = rcekit.DETECTION_METHODS["deser"](self.gen, {})
 
     # The payloads the corpus actually sends for this ecosystem, so a test about
     # what comes back can be written against what went out.
@@ -5253,6 +5254,16 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         for name, spec in probes.items():
             magic, well = str(spec.get("magic") or ""), str(spec.get("wellformed") or "")
             sentinels = [s for s in method._reflection_sentinels(magic, well) if s]
+            # base64 maps three bytes to four characters, so a prefix's
+            # encoding is a prefix of the encoding only on a three-byte
+            # boundary. Reaching an echo of exactly the magic would mean
+            # building the sentinel from fewer bytes than the magic -- which a
+            # wrapper-only echo matches, and that false positive is the whole
+            # reason the sentinels are anchored on the magic at all. So base64
+            # is recognised from the first boundary at or past the magic's end,
+            # and the floor is asserted rather than left to be discovered.
+            floors = {"raw": len(magic), "hex": len(magic), "HEX": len(magic),
+                      "base64": -(-len(magic) // 3) * 3}
             for length in (len(magic), len(magic) + 1, len(magic) + 5, len(well)):
                 echo = well[:length]
                 for label, body in (
@@ -5260,11 +5271,21 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                         ("base64", base64.b64encode(echo.encode()).decode()),
                         ("hex", echo.encode().hex()),
                         ("HEX", echo.encode().hex().upper())):
+                    if length < floors[label]:
+                        continue
                     with self.subTest(ecosystem=name, echo=length, wrapping=label):
                         self.assertTrue(
                             any(method._search(s, body) for s in sentinels),
                             f"{name}: a {label} echo of {length} characters is not "
                             f"recognised as reflection")
+            # And the floor is a floor, not a coincidence: one byte under it,
+            # a base64 echo must NOT be recognised, or the sentinel is shorter
+            # than the magic and the wrapper can supply the match on its own.
+            below = floors["base64"] - 3
+            if below >= len(magic):
+                body = base64.b64encode(well[:below].encode()).decode()
+                with self.subTest(ecosystem=name, echo=below, wrapping="base64-below-floor"):
+                    self.assertFalse(any(method._search(s, body) for s in sentinels))
 
     def test_the_sentinels_do_not_fire_on_a_parser_that_names_the_class(self):
         # The other direction, on the bodies the live target returned. A parser
@@ -5364,6 +5385,61 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
             "no payload was delivered twice — the aggregate path now de-duplicates, "
             "and the shape bracket is one request pretending to be two")
         self.assertTrue(all(n == 2 for n in repeated.values()), repeated)
+
+    def test_a_sentinel_the_control_carries_too_is_not_reflection(self):
+        # The guard judged the probe's response alone, which is the one mistake
+        # this tool is built to avoid -- made by the guard against it. A page
+        # whose ordinary content spells a short magic (`gASV` is four
+        # characters) answers identically with and without the payload, so the
+        # text provably did not come from the probe, and the carrier was thrown
+        # away as reflection anyway.
+        page = "<html><body>build id gASV-1140 nightly</body></html>"
+        well = self.gen.deser_probes["python_pickle"]["wellformed"]
+        forms = {name: (Probe(payload=well, expected=""),
+                        Observation(200, page, control_body=page))
+                 for name in ("wellformed", "truncated", "noise", "noise_again")}
+        self.assertFalse(self.method._reflects_its_input("python_pickle", forms))
+        self.assertEqual(self.method._shape_verdict("python_pickle", forms)[1].status,
+                         "negative")
+
+    def test_a_sentinel_absent_from_the_control_is_still_reflection(self):
+        # The guard against over-correcting the above: differencing must not
+        # cost the echo it exists to catch.
+        well = self.gen.deser_probes["python_pickle"]["wellformed"]
+        forms = {name: (Probe(payload=well, expected=""),
+                        Observation(200, f"you sent {well[:12]}", control_body="you sent "))
+                 for name in ("wellformed", "truncated", "noise", "noise_again")}
+        self.assertTrue(self.method._reflects_its_input("python_pickle", forms))
+
+    def test_sentinels_are_anchored_on_the_magic_not_the_payload_start(self):
+        # A probe is wrapped for its injection context before it goes out, and
+        # some wrappers are longer than the magic: an xml_cdata pickle probe
+        # begins `<![CDATA[gASV`, so a slice from the front captures `<![CD`
+        # and never reaches the format bytes. A sentinel made of the wrapper is
+        # one every echoing endpoint matches while echoing less than the magic.
+        import random as _random
+        magic = self.gen.deser_probes["python_pickle"]["magic"]
+        for context in ("raw", "xml_cdata", "shell_double_quoted", "attribute"):
+            probes = self.method.build_probes(
+                make_record(environment="unix", context=context), _random.Random(2))
+            probe = next(p for p in probes
+                         if p.carrier == "python_pickle" and p.phase == "shape/wellformed")
+            sentinels = [s for s in self.method._reflection_sentinels(magic, probe.payload) if s]
+            with self.subTest(context=context):
+                self.assertTrue(any(magic in s for s in sentinels),
+                                f"no raw sentinel reaches the magic: {sentinels}")
+
+    def test_an_echo_shorter_than_the_magic_is_not_reflection_through_a_wrapper(self):
+        # The same floor as the unwrapped case, stated where the wrapper could
+        # otherwise supply the match on its own.
+        import random as _random
+        probes = self.method.build_probes(
+            make_record(environment="unix", context="xml_cdata"), _random.Random(2))
+        shape = {p.phase.split("/", 1)[1]: p for p in probes
+                 if p.carrier == "python_pickle" and (p.phase or "").startswith("shape/")}
+        forms = {name: (probe, Observation(200, "<![CD", control_body="ok"))
+                 for name, probe in shape.items()}
+        self.assertFalse(self.method._reflects_its_input("python_pickle", forms))
 
     def test_base64_sentinels_align_on_bytes_not_characters(self):
         # base64 encodes bytes. Rounding the character count agrees with the

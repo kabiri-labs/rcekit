@@ -6563,9 +6563,18 @@ class DeserSink(DetectionMethod):
         if not magic:
             return False
         for probe, obs in forms.values():
-            body = obs.body or ""
+            body, control = obs.body or "", obs.control_body or ""
             for sentinel in self._reflection_sentinels(magic, probe.payload or ""):
-                if sentinel and self._search(sentinel, body):
+                # Differenced against the payload-free control, like every
+                # other oracle here. A sentinel the control carries too is one
+                # the probe cannot have put there -- a build id, a script tag,
+                # any four characters of ordinary page content that happen to
+                # spell a short magic such as pickle's `gASV`. Reading the
+                # probe's response alone called that reflection and threw the
+                # carrier away, which is the one mistake this whole tool is
+                # built to avoid, made by the guard against it.
+                if (sentinel and self._search(sentinel, body)
+                        and not self._search(sentinel, control)):
                     return True
         return False
 
@@ -6595,28 +6604,56 @@ class DeserSink(DetectionMethod):
         bare number: a body would have to contain the exact encoding of the
         format's own magic bytes, which is the thing being tested for.
 
-        Both the magic and one character past it are encoded. The longer one is
-        the more precise sentinel, and the shorter is what an endpoint echoing
-        exactly the magic produces -- which the longer one cannot match, since
-        it is not a prefix of anything that short."""
+        The sentinels are anchored on the magic's position in the payload, not
+        on the payload's start. A probe is wrapped for its injection context
+        before it goes out, and some wrappers are longer than the magic: an
+        `xml_cdata` pickle probe begins ``<![CDATA[gASV``, so a slice taken from
+        the front captures ``<![CD`` and never reaches the format bytes at all.
+        A sentinel made of the wrapper is a sentinel every echoing endpoint
+        matches while echoing less than the magic.
+
+        The encoded forms still start at the payload's *first* byte, because
+        that is where an endpoint encoding what it echoed starts, and a prefix
+        of the encoding is only a prefix if it begins where the encoding does.
+        They run up to the first three-byte boundary at or past the end of the
+        magic, so they always carry it: rounding down instead would hand back a
+        sentinel proving only that the wrapper came back."""
         sentinels = [magic]
-        slice_ = payload[:len(magic) + 1]
-        for text in (magic, slice_ if len(slice_) > len(magic) else ""):
-            if not text:
-                continue
-            raw = text.encode()
-            # Aligned on *bytes*, which is what base64 encodes. Rounding the
-            # character count instead agrees with the byte count only while the
-            # magic is ASCII -- true of every ecosystem the shipped corpus
-            # declares, and not something a `--template-file` has to honour. A
-            # magic of `éAB` is three characters and four bytes, and the
-            # character-aligned sentinel is not a prefix of the encoded echo at
-            # all.
-            aligned = len(raw) - len(raw) % 3
-            if aligned:
-                sentinels.append(base64.b64encode(raw[:aligned]).decode())
-            hexed = raw.hex()
+        start = payload.find(magic)
+        if start < 0:
+            # The wrapper encoded or split the magic, so there is no run of the
+            # payload to anchor on. The bare magic above is what remains, and
+            # the control differential is what keeps it honest.
+            return sentinels
+        through = payload[:start + len(magic) + 1]
+        sentinels.append(through[start:])
+        raw = payload.encode()
+        # Hex first, because it has no alignment to satisfy: two characters per
+        # byte, so the encoding of any prefix is a prefix of the encoding. It
+        # therefore reaches an echo of exactly the magic, which base64 below
+        # cannot.
+        for text in (payload[:start + len(magic)], through):
+            hexed = text.encode().hex()
             sentinels.extend((hexed, hexed.upper()))
+        # Aligned on *bytes*, which is what base64 encodes. Rounding the
+        # character count instead agrees with the byte count only while the
+        # magic is ASCII -- true of every ecosystem the shipped corpus
+        # declares, and not something a `--template-file` has to honour. A
+        # magic of `éAB` is three characters and four bytes, and the
+        # character-aligned sentinel is not a prefix of the encoded echo at all.
+        # base64 cannot do the same, and the reason is worth stating rather than
+        # working around. It maps three bytes to four characters, so a prefix's
+        # encoding is a prefix of the encoding only on a three-byte boundary.
+        # Rounding down to reach an echo of exactly the magic would build the
+        # sentinel from fewer bytes than the magic -- a sentinel a wrapper-only
+        # echo matches, which is the false positive this anchoring exists to
+        # remove. So it rounds up, and a base64-wrapped echo is recognised from
+        # the first boundary at or past the magic's end and not before. Clamped
+        # to the payload, which has nothing longer to be a prefix of.
+        need = len(payload[:start + len(magic)].encode())
+        aligned = min(-(-need // 3) * 3, len(raw))
+        if aligned >= need > 0:
+            sentinels.append(base64.b64encode(raw[:aligned]).decode())
         return sentinels
 
     def _shape_verdict(self, carrier, forms):
