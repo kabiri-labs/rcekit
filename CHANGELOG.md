@@ -191,6 +191,52 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.45.4] — 2026-09-25
+
+### Fixed
+
+- **A compressed response body is a body the oracles cannot read, so a target
+  that executed the probe was reported `negative`.** Every in-band oracle --
+  `reflected`, `eval`, `file`, `write`, `boolean` -- confirms by finding a
+  value the target computed in the response. Nothing in the delivery layer
+  undid `Content-Encoding`, so a gzipped body arrived as bytes that *contain*
+  the computed value and do not spell it, and the search for a decimal number
+  came back empty. The verdict was `negative`: not "could not read this", but
+  "the probes reached the target and it is not vulnerable".
+
+  Measured against Apache HugeGraph 1.2.0 under vulhub. The probe
+  `echo RKPDSWY$((258675+956113))RKIEMTB$(echo RKLUQKL)RKPDSWY`, delivered
+  through the Gremlin API, came back HTTP 200 carrying
+  `RKPDSWY1214788RKIEMTBRKLUQKLRKPDSWY` -- the sum and the substitution
+  collapse, both of `ReflectedMath`'s proofs. Present after gunzip, absent in
+  the raw bytes, and the run reported `negative` across 620 probes.
+
+  What made it survive this long is that the same target confirmed on the same
+  run's *other* probes: HugeGraph gzips its 200s and leaves its 4xx errors
+  plain, so `eval` confirmed through a 400 that carried a Groovy exception
+  message while the 200 that carried real command execution was invisible. A
+  run that finds something is a run nobody rereads.
+
+  Both HTTP entry points decode now -- the verification/detection path and the
+  `--verify-chain` path -- through one helper, on the success body and the
+  `HTTPError` body alike, since an evaluator surfacing its value in a 500 is
+  the case that path exists for. The header is honoured whether or not RCEKit
+  asked for it, because HugeGraph compresses a response to a request that sent
+  no `Accept-Encoding` at all.
+
+  `gzip` and `deflate` only, both from the standard library, and `deflate`
+  tries the zlib wrapper before the raw stream because servers disagree about
+  which one that name means. `br` and `zstd` need a third-party module and this
+  tool has none to add; a body in either is returned as its raw bytes. Nothing
+  here raises: a body that claims an encoding it is not in comes back
+  undecompressed rather than ending a run that has already spent hundreds of
+  probes.
+
+  This does not widen what `confirmed` means. The oracle is unchanged -- a
+  computed value present in the response and absent from a payload-free
+  control -- and nothing is promoted into it. What changes is that the response
+  the oracle reads is the response the target sent.
+
 ## [2.45.3] — 2026-09-24
 
 ### Fixed
@@ -2264,6 +2310,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.4]: https://github.com/kabiri-labs/rcekit/compare/v2.45.3...v2.45.4
 [2.45.3]: https://github.com/kabiri-labs/rcekit/compare/v2.45.2...v2.45.3
 [2.45.2]: https://github.com/kabiri-labs/rcekit/compare/v2.45.1...v2.45.2
 [2.45.1]: https://github.com/kabiri-labs/rcekit/compare/v2.45.0...v2.45.1
