@@ -303,17 +303,37 @@ formats, or the template schema.
   contiguous run from the start of the payload, structural characters included;
   a parser that resolves the type name returns the name and not the syntax
   around it. Measured on fastjson 1.2.83: the error body carries
-  `java.lang.String` and never `{"@type":"`. The test is one slice -- the magic
-  plus one character -- because noise is built to share exactly the magic, so a
-  shorter echo produces no differential at all and a longer one contains that
-  slice. Encoding-aware, so a body that base64-wraps what it echoes is caught.
+  `java.lang.String` and never `{"@type":"`.
+
+  The sentinel is the format's magic, which all three forms carry by
+  construction, and it is looked for encoded as well as raw. The general
+  encoded search cannot carry this one: it decodes base64 runs of 16 characters
+  and hex runs of 16, the right floor when the thing being looked for is a
+  short decimal that a spurious decode could match by accident, but these
+  sentinels encode shorter than that. A six-byte Java sentinel is eight base64
+  characters, and fastjson's sixteen are fourteen once the `==` padding is
+  discounted -- so a base64-wrapped echo walked past in three of the five
+  ecosystems, including the one the route was built for.
+
+  So the sentinel is encoded rather than the body decoded, which needs no
+  threshold at all. Base64 maps three bytes to four characters, so a prefix's
+  encoding is a prefix of the encoding only on a three-byte boundary, hence the
+  rounding; hex has no such alignment. A spurious decode cannot answer for one
+  of these the way it could for a bare number -- a body would have to contain
+  the exact encoding of the format's own magic bytes.
 
   `inconclusive` rather than `negative`, because a reflecting endpoint means the
   shape channel could not be read, not that nothing is there -- and this run
   reaches the same target's `deserialization-sink` through the DNS gadget
-  regardless. The guard covers both routes: a long enough echo makes all three
-  answers differ and would otherwise produce the same false fingerprint through
-  the original one.
+  regardless. That now includes an echo of exactly the magic, where all three
+  answers are identical and the old verdict was `negative`: the differential is
+  empty either way, but the endpoint plainly did something with the input, and
+  what it did was hand it back. `negative` is a claim about the target;
+  this is a statement about the channel.
+
+  The guard covers both routes: a long enough echo makes all three answers
+  differ and would otherwise produce the same false fingerprint through the
+  original one.
 
   The new route uses noise as the control rather than the well-formed stream.
   Noise carries the same magic bytes and the same length with no valid
