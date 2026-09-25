@@ -282,6 +282,47 @@ class ComparisonSectionTestCase(unittest.TestCase):
                 f"'{rival}' appears in the comparison but is not in PROJECTS",
             )
 
+    def test_every_registered_method_has_a_row(self):
+        """The table's claim is coverage — "every class, one run" — so a method
+        missing from it is the claim understating itself, silently.
+
+        This is how `lookup` and `boolean` drifted out. Both were in the
+        README's own methods table and in `docs/reference.md`, both were pinned
+        there by tests, and the comparison table was pinned by nothing: it named
+        seven of the nine registered methods for two releases. `lookup` is the
+        Log4Shell row the CVE table above it already carries.
+
+        Rows that are not methods stay unnamed on purpose -- second-order
+        execution, the query-language bridges and the per-dialect Windows
+        probes are things the methods run *through*, not entries in
+        `--methods` -- so this asks only that every registered method appear,
+        never that every row name one."""
+        rows = [line for line in self.section.splitlines()
+                if line.startswith("|") and "---" not in line]
+        self.assertTrue(rows, "the comparison table was not found")
+        named = {name for row in rows for name in re.findall(r"`([^`]+)`", row)}
+        missing = sorted(set(rcekit.DETECTION_METHODS) - named)
+        self.assertEqual(
+            missing, [],
+            f"registered methods with no row in the comparison table: {missing}")
+
+    def test_the_table_names_no_method_the_cli_rejects(self):
+        """The other direction, so the check cannot rot one-way. A method
+        removed from `DETECTION_METHODS` would otherwise leave its row behind,
+        advertising a `--methods` value the CLI refuses, and the test above
+        would still pass."""
+        rows = [line for line in self.section.splitlines()
+                if line.startswith("|") and "---" not in line]
+        # Only the leading cell names a method; the rest carry prose and tiers.
+        labels = {name for row in rows
+                  for name in re.findall(r"`([^`]+)`", row.split("|")[1])}
+        phantom = sorted(name for name in labels
+                         if name.islower() and name.isalpha()
+                         and name not in rcekit.DETECTION_METHODS)
+        self.assertEqual(
+            phantom, [],
+            f"the comparison table names methods that are not registered: {phantom}")
+
 
 class DemoTierTestCase(unittest.TestCase):
     """The README states each demo's tier three times, and they have to agree.

@@ -334,16 +334,18 @@ one:
 
 | Can confirm | RCEKit | [commix](https://github.com/commixproject/commix) | [SSTImap](https://github.com/vladko312/SSTImap) | [Nuclei](https://github.com/projectdiscovery/nuclei) |
 |---|---|---|---|---|
-| OS command injection | ✅ | ✅ *(its whole scope)* | — | per template |
-| Expression injection / SSTI | ✅ | via its eval-based technique | ✅ *(its whole scope)* | per template |
-| Blind — timing | ✅ *as a separate tier* | ✅ | ✅ | — |
-| Blind — out-of-band | ✅ *built-in listener* | — | — | via [interactsh](https://github.com/projectdiscovery/interactsh) |
-| No-egress — write &amp; fetch back | ✅ *any read-back path* | ✅ *(web root)* | — | — |
+| OS command injection — `reflected` | ✅ | ✅ *(its whole scope)* | — | per template |
+| Expression injection / SSTI — `eval` | ✅ | via its eval-based technique | ✅ *(its whole scope)* | per template |
+| Blind — timing — `time` | ✅ *as a separate tier* | ✅ | ✅ | — |
+| Blind — out-of-band — `oob` | ✅ *built-in listener* | — | — | via [interactsh](https://github.com/projectdiscovery/interactsh) |
+| Expression-lookup — Log4Shell/JNDI — `lookup` | ✅ *own tier, never called RCE* | — | — | per template |
+| No-egress — write &amp; fetch back — `file` | ✅ *any read-back path* | ✅ *(web root)* | — | — |
 | `cmd.exe` and PowerShell sinks | ✅ *per-dialect probes* | ✅ *(cmd)* | — | per template |
-| Upload → write-then-execute | ✅ *write vs. execute, separate tiers* | — | — | per template |
+| Upload → write-then-execute — `write` | ✅ *write vs. execute, separate tiers* | — | — | per template |
+| Predicate sink, nothing rendered — `boolean` | ✅ *response-shape differential, `needs-review` only* | — | — | — |
 | Second-order — lands here, runs there | ✅ | — | — | — |
 | Query-language bridge to the OS | ✅ | — | — | per template |
-| Deserialization sink | ✅ *own tier, never called RCE* | — | — | per template |
+| Deserialization sink — `deser` | ✅ *own tier, never called RCE* | — | — | per template |
 | **All of the above, one CLI, one run** | **✅** | — | — | — |
 
 <sub>Coverage per each project's own documented technique list. SSTImap is the
