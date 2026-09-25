@@ -5114,12 +5114,32 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
     def setUp(self):
         self.method = rcekit.DETECTION_METHODS["deser"](RCEKit(), {})
 
-    def _verdict(self, wellformed, truncated, noise):
-        forms = {name: (Probe(payload="x", expected=""), Observation(status, body))
+    # The payloads the corpus actually sends for this ecosystem, so a test about
+    # what comes back can be written against what went out.
+    WELL = '{"@type":"java.lang.String","val":"rk"}'
+    TRUNC = '{"@type":"java.lang.String","val":'
+    MAGIC = '{"@type":'
+    NOISE = MAGIC + "k7Qpm2xRz8vTn4LbYc1Wd6Hj0Ag5Ue"
+
+    def _verdict(self, wellformed, truncated, noise, payloads=None):
+        sent = payloads or {}
+        forms = {name: (Probe(payload=sent.get(name, "x"), expected=""),
+                        Observation(status, body))
                  for name, (status, body) in (("wellformed", wellformed),
                                               ("truncated", truncated),
                                               ("noise", noise))}
         return self.method._shape_verdict("fastjson", forms)[1]
+
+    def _echo(self, length, wrap=None):
+        """The three forms as an endpoint that echoes `length` characters of
+        whatever it was sent would answer them."""
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC, "noise": self.NOISE}
+        bodies = {name: (wrap(p[:length]) if wrap else p[:length])
+                  for name, p in sent.items()}
+        return (dict(sent),
+                (200, bodies["wellformed"]),
+                (200, bodies["truncated"]),
+                (200, bodies["noise"]))
 
     def test_a_type_resolved_before_the_parse_finishes_is_read_as_a_parser(self):
         # The regression, measured on fastjson 1.2.83: the well-formed and the
@@ -5169,6 +5189,55 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                                 (200, self.ACCEPTED))
         self.assertEqual(verdict.status, "negative")
         self.assertIn("all three forms", verdict.evidence)
+
+    def test_a_fixed_prefix_echo_is_inconclusive_not_a_fingerprint(self):
+        # An endpoint returning a fixed-length preview of its input answers the
+        # well-formed and truncated forms alike -- they share a long prefix --
+        # and noise differently, because noise diverges right after the magic.
+        # Nothing parsed anything. Without the guard this is the new route's
+        # false positive, and the three signatures alone cannot tell it from a
+        # parser that resolves the type name early.
+        sent, well, trunc, noise = self._echo(20)
+        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        self.assertEqual(verdict.status, "inconclusive")
+        self.assertIn("carries the probe back", verdict.evidence)
+
+    def test_a_full_echo_is_caught_on_the_original_route_too(self):
+        # The same confound reaches the original route when the echo is long
+        # enough to make all three answers differ. Guarding one route and not
+        # the other would leave the fingerprint available by the other door.
+        sent, well, trunc, noise = self._echo(len(self.WELL))
+        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        self.assertEqual(verdict.status, "inconclusive")
+
+    def test_an_echo_no_longer_than_the_magic_needs_no_guard(self):
+        # Noise shares exactly the magic with the well-formed form, so an echo
+        # of that much or less returns the same bytes for all three and the
+        # differential is empty on its own. The guard has nothing to do here,
+        # and the verdict must still be the honest one.
+        sent, well, trunc, noise = self._echo(len(self.MAGIC))
+        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        self.assertEqual(verdict.status, "negative")
+        self.assertIn("all three forms", verdict.evidence)
+
+    def test_a_base64_wrapped_echo_is_caught(self):
+        # The guard searches the way every other oracle here searches. A body
+        # that base64-wraps what it echoes is the same endpoint wearing a coat.
+        sent, well, trunc, noise = self._echo(
+            20, wrap=lambda s: base64.b64encode(s.encode()).decode())
+        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        self.assertEqual(verdict.status, "inconclusive")
+
+    def test_the_real_fastjson_bodies_do_not_trip_the_guard(self):
+        # The guard must not cost the case it was added around. Measured on the
+        # live target: the error body carries `java.lang.String` -- the class
+        # the target resolved -- and never `{"@type":"`, the syntax around it.
+        # That is the whole distinction the guard rests on.
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC, "noise": self.NOISE}
+        verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
+                                (400, self.SYNTAX_ERROR), payloads=sent)
+        self.assertEqual(verdict.status, "needs-review")
+        self.assertIn("before the parse finishes", verdict.evidence)
 
     def test_the_negative_says_which_comparison_collapsed(self):
         # "answers all three forms alike" was asserted rather than observed, and
