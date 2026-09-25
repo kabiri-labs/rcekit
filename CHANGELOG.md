@@ -333,9 +333,34 @@ formats, or the template schema.
 
   The guard covers both routes: a long enough echo makes all three answers
   differ and would otherwise produce the same false fingerprint through the
-  original one. Its base64 sentinel aligns on bytes, not characters, which
-  agree only while the magic is ASCII -- true of every ecosystem the shipped
-  corpus declares, and not something a `--template-file` has to honour.
+  original one.
+
+  It is differenced against the payload-free control, like every other oracle
+  here. Reading the probe's response alone called it reflection whenever the
+  sentinel appeared, including when the control carried the same text and the
+  probe therefore cannot have put it there -- a build id, a script tag, any
+  four characters of ordinary page content spelling a short magic such as
+  pickle's `gASV`. That threw the carrier away as reflection, which is the one
+  mistake this tool is built to avoid, made by the guard against it.
+
+  Its sentinels are anchored on the magic's position in the payload rather than
+  on the payload's start. A probe is wrapped for its injection context before
+  it goes out, and some wrappers are longer than the magic: an `xml_cdata`
+  pickle probe begins `<![CDATA[gASV`, so a slice from the front captured
+  `<![CD` and never reached the format bytes -- a sentinel made of the wrapper,
+  which every echoing endpoint matches while echoing less than the magic.
+
+  The encoded forms still begin at the payload's first byte, because that is
+  where an endpoint encoding what it echoed begins, and they align on bytes
+  rather than characters, which agree only while the magic is ASCII -- true of
+  every ecosystem the shipped corpus declares, and not something a
+  `--template-file` has to honour. Hex reaches an echo of exactly the magic;
+  base64 cannot, and the limit is stated rather than worked around. It maps
+  three bytes to four characters, so a prefix's encoding is a prefix only on a
+  three-byte boundary, and rounding down to reach that echo would build the
+  sentinel from fewer bytes than the magic -- the wrapper false positive again.
+  So base64 is recognised from the first boundary at or past the magic's end,
+  and the tests assert that floor from both sides.
 
 - **The differential is read across requests, so the last form carried every
   drift.** Anything that changes with the request *index* rather than with the
