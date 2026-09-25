@@ -5441,6 +5441,52 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                  for name, probe in shape.items()}
         self.assertFalse(self.method._reflects_its_input("python_pickle", forms))
 
+    def test_a_lowercased_echo_is_still_an_echo(self):
+        # `_signature` lowercases the bodies before comparing them, so an
+        # endpoint that lowercases what it echoes answers the structured pair
+        # alike -- which is exactly what sends the noise route looking. A
+        # case-sensitive search for `rO0AB` in `ro0abx` finds nothing, so the
+        # guard was blind in the one place the route fires. Two halves of one
+        # oracle, folding case two different ways.
+        well = self.gen.deser_probes["java"]["wellformed"]
+        magic = self.gen.deser_probes["java"]["magic"]
+        forms = {}
+        for name in ("wellformed", "truncated", "noise", "noise_again"):
+            echoed = well[:6] if name in ("wellformed", "truncated") else (magic + "Q")[:6]
+            forms[name] = (Probe(payload=well, expected=""),
+                           Observation(200, echoed.lower()))
+        self.assertTrue(self.method._reflects_its_input("java", forms))
+        self.assertEqual(self.method._shape_verdict("java", forms)[1].status, "inconclusive")
+
+    def test_case_folding_does_not_answer_for_the_control(self):
+        # The guard against over-correcting: folding case must not lose the
+        # control differential with it.
+        well = self.gen.deser_probes["java"]["wellformed"]
+        page = "nightly build ro0abx"
+        forms = {name: (Probe(payload=well, expected=""),
+                        Observation(200, page, control_body=page))
+                 for name in ("wellformed", "truncated", "noise", "noise_again")}
+        self.assertFalse(self.method._reflects_its_input("java", forms))
+
+    def test_a_format_with_no_magic_has_no_control_to_rest_on(self):
+        # Without a magic there is no reflection sentinel, so an endpoint that
+        # echoes cannot be told from one that parses -- and the differential
+        # answers anyway, because the noise form is random where a structured
+        # pair is not. Every shipped format declares one; a --template-file
+        # need not, and reading a control that cannot be validated is the thing
+        # this tool refuses everywhere else.
+        gen = RCEKit()
+        gen.deser_probes = {"custom": {"wellformed": "ABCDEF", "truncated": "ABCDE",
+                                       "magic": ""}}
+        method = rcekit.DETECTION_METHODS["deser"](gen, {})
+        echoing = {name: (Probe(payload="ABCDEF", expected=""), Observation(200, "ABC"))
+                   for name in ("wellformed", "truncated")}
+        echoing["noise"] = echoing["noise_again"] = (
+            Probe(payload="ZQWERTY", expected=""), Observation(200, "ZQW"))
+        verdict = method._shape_verdict("custom", echoing)[1]
+        self.assertEqual(verdict.status, "inconclusive")
+        self.assertIn("no magic bytes", verdict.evidence)
+
     def test_base64_sentinels_align_on_bytes_not_characters(self):
         # base64 encodes bytes. Rounding the character count agrees with the
         # byte count only while the magic is ASCII -- true of every ecosystem

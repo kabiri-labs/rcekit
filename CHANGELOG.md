@@ -362,6 +362,21 @@ formats, or the template schema.
   So base64 is recognised from the first boundary at or past the magic's end,
   and the tests assert that floor from both sides.
 
+  Sentinels are matched with case folded as well as raw, because `_signature`
+  lowercases the bodies before comparing them. An endpoint that lowercases what
+  it echoes answers the structured pair alike -- which is what sends the noise
+  route looking -- while a case-sensitive search for `rO0AB` in `ro0abx` finds
+  nothing, so the guard was blind in the one place the route fires. The raw
+  search stays and runs first: it is the one that peels base64 and hex, and
+  base64 does not survive lowercasing.
+
+  A format declaring no magic gets `inconclusive` rather than a verdict. There
+  is no reflection sentinel without one, so an endpoint that echoes cannot be
+  told from one that parses -- and the differential answers anyway, because the
+  noise form is random where a structured pair is not. Every shipped format
+  declares a magic; a `--template-file` need not, and reading a control that
+  cannot be validated is what this tool refuses everywhere else.
+
 - **The differential is read across requests, so the last form carried every
   drift.** Anything that changes with the request *index* rather than with the
   payload -- a rate limiter backing off, a filling log, a warming cache --
