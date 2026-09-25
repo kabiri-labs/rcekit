@@ -45,7 +45,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.3"
+__version__ = "2.45.4"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -503,6 +503,57 @@ def parse_sink_shapes(value: Optional[str]) -> Optional[Tuple[str, ...]]:
     if not rungs:
         return None
     return rungs
+
+
+def decode_response_body(raw: bytes, content_encoding: Optional[str]) -> str:
+    """A response body as text, decompressed first when the server encoded it.
+
+    Every in-band oracle -- ``reflected``, ``eval``, ``file``, ``write``,
+    ``boolean`` -- reads the body looking for a value the target computed. A
+    compressed body is bytes that contain that value and do not *spell* it, so
+    without this the oracle searches gzip's output for a decimal number and
+    reports ``negative`` on a target that executed the probe. Measured against
+    Apache HugeGraph 1.2.0, which returns ``Content-Encoding: gzip`` on its 200s
+    (its error responses are plain, which is why the same run confirmed through
+    a 400 and missed the 200 that carried the real execution).
+
+    The header is honoured whether or not RCEKit asked for it: a server may
+    compress unprompted, and this one does -- it gzips a response to a request
+    that sent no ``Accept-Encoding`` at all.
+
+    Only what the standard library can undo. ``br`` and ``zstd`` need a
+    third-party module, and this tool has no dependencies to add one to; a body
+    in either comes back as its raw bytes rather than as an exception, so the
+    run continues and reports ``negative`` for that probe alone.
+
+    Never raises. A body that claims an encoding and is not in it -- truncated,
+    mislabelled, or already decoded by something upstream -- is returned
+    undecompressed, because one malformed response must not end a run that has
+    already spent hundreds of probes."""
+    import gzip
+    import zlib
+    name = (content_encoding or "").strip().lower()
+    # A proxy chain may stack them ("gzip, gzip"); the last applied is undone
+    # first, which is the order this walks.
+    for step in reversed([part.strip() for part in name.split(",") if part.strip()]):
+        try:
+            if step == "gzip" or step == "x-gzip":
+                raw = gzip.decompress(raw)
+            elif step == "deflate":
+                # Two things ship under this name: a raw deflate stream and a
+                # zlib-wrapped one. Servers disagree, so try the wrapper first
+                # and fall back rather than guess from the header.
+                try:
+                    raw = zlib.decompress(raw)
+                except zlib.error:
+                    raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+            elif step in ("identity", ""):
+                continue
+            else:
+                break
+        except Exception:
+            break
+    return raw.decode(errors="replace")
 
 
 @dataclass(frozen=True)
@@ -2270,7 +2321,8 @@ class RCEKit:
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
                 # A redirect may have taken this to TLS after all.
                 self._announce_insecure(getattr(response, "url", None))
-                text = response.read().decode(errors="replace")
+                text = decode_response_body(
+                    response.read(), response.headers.get("Content-Encoding"))
                 return (response.status, text, self._channels_from_response(response, text, target),
                         time.time() - start)
         except urllib.error.HTTPError as exc:
@@ -2286,7 +2338,8 @@ class RCEKit:
             # is what the caller needs most; an unreadable body is a body we
             # report as empty, exactly as a delivery failure would.
             try:
-                text = exc.read().decode(errors="replace")
+                text = decode_response_body(
+                    exc.read(), exc.headers.get("Content-Encoding"))
             except Exception:
                 text = ""
             return (exc.code, text, self._channels_from_response(exc, text, target),
@@ -3606,9 +3659,11 @@ class RCEKit:
                                              method=step.get("method", "GET" if data is None else "POST"))
                 try:
                     with opener.open(req, timeout=timeout) as resp:
-                        text = resp.read().decode(errors="replace")
+                        text = decode_response_body(
+                            resp.read(), resp.headers.get("Content-Encoding"))
                 except urllib.error.HTTPError as exc:
-                    text = exc.read().decode(errors="replace")
+                    text = decode_response_body(
+                        exc.read(), exc.headers.get("Content-Encoding"))
                 except Exception as exc:
                     text = str(exc)
                 for var, rgx in (step.get("extract") or {}).items():

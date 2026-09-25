@@ -37,6 +37,7 @@ from rcekit import (  # noqa: E402
     ReflectedMath,
     Verdict,
     build_request_inputs,
+    decode_response_body,
     parse_raw_request,
     partition_destructive,
 )
@@ -124,7 +125,12 @@ def local_target(route):
 
     A route may return a third element, ``[(name, value), ...]``, to set response
     headers — that is how a sink whose output surfaces outside the body (a debug
-    header, a Set-Cookie) is modelled."""
+    header, a Set-Cookie) is modelled.
+
+    The body may be ``bytes`` instead of ``str``, and is then written verbatim.
+    A compressed response is the case that needs it: the point of such a fixture
+    is that the body does not *spell* the value it carries, which a str body
+    encoded on the way out can never model."""
     import http.server
     import socketserver
     import threading
@@ -147,7 +153,8 @@ def local_target(route):
                 self.send_header(name, value)
             self.end_headers()
             try:
-                self.wfile.write(text.encode(errors="replace"))
+                self.wfile.write(text if isinstance(text, bytes)
+                                 else text.encode(errors="replace"))
             except BrokenPipeError:
                 pass
 
@@ -2772,6 +2779,110 @@ class ReflectionControlTestCase(unittest.TestCase):
             echoed = query.split("echo ", 1)[1] if query.startswith("; echo ") else ""
             out = f"command output follows: {echoed}" if echoed else "nothing executed here"
             return 200, base64.b64encode(out.encode()).decode()
+
+        with local_target(route) as base:
+            results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+
+
+class CompressedResponseTestCase(unittest.TestCase):
+    """A gzipped body carries the computed value without spelling it, so an
+    oracle reading the raw bytes reports `negative` on a target that executed.
+
+    Measured on Apache HugeGraph 1.2.0, which gzips its 200s and leaves its 4xx
+    plain: the same run confirmed through a 400 carrying a Groovy exception and
+    missed the 200 carrying real command execution. These hold the decode in
+    place and hold the oracle to the same standard through it — a compressed
+    response must not become a cheaper route to `confirmed`."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.token = "AB12CD"
+        self.record = make_record(
+            payload="; echo " + self.token, mode="detection", category="detection",
+            safety="safe", token=self.token, match=re.escape(self.token))
+
+    @staticmethod
+    def _gzip(text):
+        import gzip
+        return gzip.compress(text.encode())
+
+    def test_gzip_body_is_decoded(self):
+        self.assertEqual(decode_response_body(self._gzip("computed 1214788"), "gzip"),
+                         "computed 1214788")
+
+    def test_header_casing_and_whitespace_do_not_matter(self):
+        self.assertEqual(decode_response_body(self._gzip("ok"), "  GZip "), "ok")
+
+    def test_deflate_is_decoded_in_both_forms_that_ship_under_that_name(self):
+        import zlib
+        wrapped = zlib.compress(b"zlib-wrapped")
+        raw = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+        bare = raw.compress(b"raw-deflate") + raw.flush()
+        self.assertEqual(decode_response_body(wrapped, "deflate"), "zlib-wrapped")
+        self.assertEqual(decode_response_body(bare, "deflate"), "raw-deflate")
+
+    def test_stacked_encodings_are_undone_last_applied_first(self):
+        import gzip
+        doubled = gzip.compress(self._gzip("twice"))
+        self.assertEqual(decode_response_body(doubled, "gzip, gzip"), "twice")
+
+    def test_absent_or_identity_encoding_passes_the_body_through(self):
+        for header in (None, "", "identity"):
+            self.assertEqual(decode_response_body(b"plain body", header), "plain body")
+
+    def test_an_encoding_the_stdlib_cannot_undo_returns_the_raw_body(self):
+        # `br` and `zstd` need a third-party module and this tool has none to
+        # add. The probe is lost either way; ending the run is the outcome
+        # worth avoiding, since hundreds of probes may already have been spent.
+        self.assertEqual(decode_response_body(b"\x1b\x07\x00brotli", "br"), "\x1b\x07\x00brotli")
+
+    def test_a_body_that_lies_about_its_encoding_does_not_raise(self):
+        self.assertEqual(decode_response_body(b"not actually gzip", "gzip"),
+                         "not actually gzip")
+        truncated = self._gzip("cut short")[:12]
+        self.assertIsInstance(decode_response_body(truncated, "gzip"), str)
+
+    def test_execution_confirms_through_a_gzipped_response(self):
+        # The regression. This sink executes -- only a command break-out yields
+        # output -- and returns it gzipped, exactly as HugeGraph does. Before
+        # the decode this came back `negative`: not "unreadable", but "the
+        # probes reached the target and it is not vulnerable".
+        def route(method, path, params, headers, body):
+            query = params.get("q", "")
+            echoed = query.split("echo ", 1)[1] if query.startswith("; echo ") else ""
+            out = f"command output follows: {echoed}" if echoed else "nothing executed here"
+            return 200, self._gzip(out), [("Content-Encoding", "gzip")]
+
+        with local_target(route) as base:
+            results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+
+    def test_reflection_through_a_gzipped_response_still_does_not_confirm(self):
+        # The fix widens what the oracle can read, not what counts as proof. A
+        # target that only echoes must stay unconfirmed through the decode, or
+        # decompression has become a route to `confirmed` that execution is not.
+        def route(method, path, params, headers, body):
+            return 200, self._gzip("you sent " + params.get("q", "")), \
+                [("Content-Encoding", "gzip")]
+
+        with local_target(route) as base:
+            results = self.gen.run_verification([self.record], url=f"{base}/echo?q=FUZZ")
+        self.assertEqual(len(results), 1)
+        self.assertNotEqual(results[0]["verdict"], "confirmed", results[0])
+
+    def test_an_error_body_is_decoded_too(self):
+        # The evaluator that surfaces its value only in a 500 or a 400 is the
+        # case the non-2xx read exists for, and it reaches the oracle through a
+        # different branch -- the HTTPError one -- which the success path's
+        # decode does not cover.
+        def route(method, path, params, headers, body):
+            query = params.get("q", "")
+            echoed = query.split("echo ", 1)[1] if query.startswith("; echo ") else ""
+            out = f"stack trace: {echoed}" if echoed else "nothing executed here"
+            return 500, self._gzip(out), [("Content-Encoding", "gzip")]
 
         with local_target(route) as base:
             results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
