@@ -290,6 +290,31 @@ formats, or the template schema.
   carrier: `java`, `php`, `dotnet` and `python_pickle` stay negative against an
   endpoint that parses JSON and nothing else.
 
+  An endpoint that carries the probe back into its own response is held at
+  `inconclusive` before either route runs. The three forms alone cannot rule
+  that out, and that is a property of the comparison rather than a gap in it:
+  the original route covers every case where the well-formed and truncated
+  answers differ, so the only region left is where they agree, and there the
+  single remaining comparison is the well-formed answer against noise. Any rule
+  reaching into that region collapses the pair to `wellformed != noise`, which
+  a fixed-length preview of the input satisfies without parsing anything.
+
+  The fourth input is *which* part of the probe comes back. An echo returns a
+  contiguous run from the start of the payload, structural characters included;
+  a parser that resolves the type name returns the name and not the syntax
+  around it. Measured on fastjson 1.2.83: the error body carries
+  `java.lang.String` and never `{"@type":"`. The test is one slice -- the magic
+  plus one character -- because noise is built to share exactly the magic, so a
+  shorter echo produces no differential at all and a longer one contains that
+  slice. Encoding-aware, so a body that base64-wraps what it echoes is caught.
+
+  `inconclusive` rather than `negative`, because a reflecting endpoint means the
+  shape channel could not be read, not that nothing is there -- and this run
+  reaches the same target's `deserialization-sink` through the DNS gadget
+  regardless. The guard covers both routes: a long enough echo makes all three
+  answers differ and would otherwise produce the same false fingerprint through
+  the original one.
+
   The new route uses noise as the control rather than the well-formed stream.
   Noise carries the same magic bytes and the same length with no valid
   structure, so answering *both* structured forms differently from it is the

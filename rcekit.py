@@ -6494,6 +6494,47 @@ class DeserSink(DetectionMethod):
         out.extend(self._dns_verdicts(dns_probes))
         return out or None
 
+    def _reflects_its_input(self, carrier, forms) -> bool:
+        """Whether the endpoint carries the probe back into its own response.
+
+        The shape differential reads three answers and asks what distinguishes
+        them. On an endpoint that echoes the input -- a fixed-length preview, a
+        "you sent:" error, a debug envelope -- what distinguishes them is the
+        input, and the oracle would be reading its own payloads back as though
+        the target had said something.
+
+        The three forms alone cannot rule this out, and that is not a gap in
+        the comparison but a property of it: the original route covers every
+        case where the well-formed and truncated answers differ, so the only
+        region left is where they agree, and there the single remaining
+        comparison is the well-formed answer against noise. Any rule reaching
+        into that region collapses the pair to ``wellformed != noise``. A
+        fourth input is needed, and this is it.
+
+        What separates the two is *which* part of the probe comes back. An echo
+        returns a contiguous run from the start of the payload, structural
+        characters included. A parser that resolves the type name returns the
+        name and not the syntax around it: measured on fastjson 1.2.83, the
+        error body carries ``java.lang.String`` and never ``{"@type":"``.
+
+        So the test is one short slice -- the magic plus one character. Noise is
+        built to share exactly the magic with the well-formed form, so an echo
+        of the magic or less produces no differential to begin with, and any
+        echo longer than that contains this slice. Encoding-aware, through
+        :meth:`_search`, so a body that base64-wraps what it echoes is caught
+        too."""
+        spec = (getattr(self.gen, "deser_probes", None) or {}).get(carrier) or {}
+        magic = str(spec.get("magic") or "")
+        if not magic:
+            return False
+        for probe, obs in forms.values():
+            slice_ = (probe.payload or "")[:len(magic) + 1]
+            if len(slice_) <= len(magic):
+                continue
+            if self._search(slice_, obs.body or ""):
+                return True
+        return False
+
     def _shape_verdict(self, carrier, forms):
         anchor = (forms.get("wellformed") or next(iter(forms.values())))[0]
         if len(forms) < len(self.SHAPE_FORMS):
@@ -6503,6 +6544,12 @@ class DeserSink(DetectionMethod):
         if any(obs.status is None for _probe, obs in forms.values()):
             return anchor, Verdict("error",
                                    carrier + ": a shape probe never reached the target")
+        if self._reflects_its_input(carrier, forms):
+            return anchor, Verdict(
+                "inconclusive",
+                carrier + ": the response carries the probe back, so the three forms differ "
+                "because the input did and not because anything parsed it -- the shape channel "
+                "cannot answer here")
         signatures = {form: self._signature(obs) for form, (_p, obs) in forms.items()}
         well, trunc, noise = (signatures["wellformed"], signatures["truncated"],
                               signatures["noise"])
