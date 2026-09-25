@@ -31,9 +31,21 @@ formats, or the template schema.
   Each row now names its method in backticks, which is what makes the check
   possible and also answers the question the table used to leave hanging: a
   reader who wants the row they just read has the flag in front of them. Rows
-  that are not methods stay unnamed on purpose -- second-order execution, the
+  that are not methods name none on purpose -- second-order execution, the
   query-language bridges and the per-dialect Windows probes are things the
   methods run *through*, not entries in `--methods`.
+
+  Both checks read the capability table alone, and identify a method label
+  structurally: the last backtick in the leading cell, after an em-dash. The
+  first attempt did neither, and both shortcuts cost it the guarantee it stated.
+  Reading every table in the section meant a deleted capability row kept passing
+  on a mention elsewhere -- the engagement-controls table names `file` and
+  `write` under "Cleanup commands" -- which was confirmed by deleting the `file`
+  row and watching the check stay green. And filtering labels on lowercase
+  letters exempted exactly the spellings a typo or a rename produces:
+  `boolean2`, `second-order`, `reflected_v2` all walked past the phantom check,
+  while `cmd.exe` is the legitimate backtick in that column that the filter had
+  been reaching for. Structure separates them; a character class does not.
 
   No version bump -- this is documentation and tests only.
 
