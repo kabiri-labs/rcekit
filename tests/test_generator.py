@@ -9,6 +9,7 @@ detection mode must behave as documented.
 """
 
 import base64
+import collections
 import inspect
 import json
 import os
@@ -5327,8 +5328,42 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                  if p.carrier == "fastjson" and (p.phase or "").startswith("shape/")]
         self.assertEqual([p.phase.split("/", 1)[1] for p in shape],
                          ["noise", "wellformed", "truncated", "noise_again"])
-        self.assertNotEqual(shape[0].payload, shape[-1].payload,
-                            "identical payloads would be de-duplicated to one request")
+        self.assertEqual(shape[0].payload, shape[-1].payload,
+                         "the bracket is the same probe twice, or a difference in the "
+                         "answers cannot be attributed to the endpoint moving")
+
+    def test_identical_aggregate_probes_are_both_delivered(self):
+        """The bracket is one probe sent twice, which only works because the
+        aggregate path fires every entry of its batch.
+
+        The per-probe path does de-duplicate by payload, and reading that one
+        is what sent this design down a detour: the two bracketing probes were
+        given differing suffixes to survive a de-duplication that was never
+        going to happen to them, and differing suffixes are exactly what the
+        bracket cannot have. This pins the property across the module boundary,
+        because if the aggregate path ever gained the same de-duplication the
+        bracket would quietly become a single request and the drift check would
+        compare an answer with itself -- passing, always, and proving
+        nothing."""
+        seen = collections.Counter()
+
+        def route(method, path, params, headers, body):
+            seen[body] += 1
+            return 200, "ok"
+
+        with local_target(route) as base:
+            RCEKit().run_detection(
+                [make_record(environment="unix", context="raw")],
+                url=f"{base}/", method="POST", data="FUZZ", headers=None,
+                url_location="query_value", body_location="raw",
+                methods=["deser"], config={}, timeout=10)
+
+        repeated = {body: n for body, n in seen.items() if n > 1}
+        self.assertTrue(
+            repeated,
+            "no payload was delivered twice — the aggregate path now de-duplicates, "
+            "and the shape bracket is one request pretending to be two")
+        self.assertTrue(all(n == 2 for n in repeated.values()), repeated)
 
     def test_base64_sentinels_align_on_bytes_not_characters(self):
         # base64 encodes bytes. Rounding the character count agrees with the
@@ -9343,9 +9378,15 @@ class DeserializationSinkTestCase(unittest.TestCase):
                     [p.phase for p in shape],
                     ["shape/noise", "shape/wellformed",
                      "shape/truncated", "shape/noise_again"])
-                self.assertNotEqual(
+                self.assertEqual(
                     shape[0].payload, shape[-1].payload,
-                    "the bracketing probes share a payload, so only one is sent")
+                    "the bracketing probes must be the same probe, byte for byte: "
+                    "the differential asks whether the endpoint answered it alike")
+                self.assertEqual(
+                    len(shape[0].payload),
+                    len(self.gen.deser_probes[name]["wellformed"]),
+                    "the noise control must match the well-formed length, or a "
+                    "size limit alone separates them")
 
     def test_the_noise_form_keeps_the_magic_and_matches_the_length(self):
         # Same magic, same length, random tail: an endpoint that merely stores
