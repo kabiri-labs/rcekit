@@ -5120,26 +5120,32 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
     TRUNC = '{"@type":"java.lang.String","val":'
     MAGIC = '{"@type":'
     NOISE = MAGIC + "k7Qpm2xRz8vTn4LbYc1Wd6Hj0Ag5Ue"
+    NOISE_AGAIN = MAGIC + "b3Xf9LpQw2ZmKd7Rt1Yv5Nc8Hj0Ae"
 
-    def _verdict(self, wellformed, truncated, noise, payloads=None):
+    def _verdict(self, wellformed, truncated, noise, payloads=None, noise_again=None):
+        """`noise_again` defaults to the same answer as `noise`, which is what a
+        target that held still gives. A test that wants drift says so."""
         sent = payloads or {}
         forms = {name: (Probe(payload=sent.get(name, "x"), expected=""),
                         Observation(status, body))
                  for name, (status, body) in (("wellformed", wellformed),
                                               ("truncated", truncated),
-                                              ("noise", noise))}
+                                              ("noise", noise),
+                                              ("noise_again", noise_again or noise))}
         return self.method._shape_verdict("fastjson", forms)[1]
 
     def _echo(self, length, wrap=None):
-        """The three forms as an endpoint that echoes `length` characters of
+        """The four forms as an endpoint that echoes `length` characters of
         whatever it was sent would answer them."""
-        sent = {"wellformed": self.WELL, "truncated": self.TRUNC, "noise": self.NOISE}
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC,
+                "noise": self.NOISE, "noise_again": self.NOISE_AGAIN}
         bodies = {name: (wrap(p[:length]) if wrap else p[:length])
                   for name, p in sent.items()}
         return (dict(sent),
                 (200, bodies["wellformed"]),
                 (200, bodies["truncated"]),
-                (200, bodies["noise"]))
+                (200, bodies["noise"]),
+                (200, bodies["noise_again"]))
 
     def test_a_type_resolved_before_the_parse_finishes_is_read_as_a_parser(self):
         # The regression, measured on fastjson 1.2.83: the well-formed and the
@@ -5188,7 +5194,7 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         verdict = self._verdict((200, self.ACCEPTED), (200, self.ACCEPTED),
                                 (200, self.ACCEPTED))
         self.assertEqual(verdict.status, "negative")
-        self.assertIn("all three forms", verdict.evidence)
+        self.assertIn("every form alike", verdict.evidence)
 
     def test_a_fixed_prefix_echo_is_inconclusive_not_a_fingerprint(self):
         # An endpoint returning a fixed-length preview of its input answers the
@@ -5197,8 +5203,8 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # Nothing parsed anything. Without the guard this is the new route's
         # false positive, and the three signatures alone cannot tell it from a
         # parser that resolves the type name early.
-        sent, well, trunc, noise = self._echo(20)
-        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        sent, well, trunc, noise, noise2 = self._echo(20)
+        verdict = self._verdict(well, trunc, noise, payloads=sent, noise_again=noise2)
         self.assertEqual(verdict.status, "inconclusive")
         self.assertIn("carries the probe back", verdict.evidence)
 
@@ -5206,8 +5212,8 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # The same confound reaches the original route when the echo is long
         # enough to make all three answers differ. Guarding one route and not
         # the other would leave the fingerprint available by the other door.
-        sent, well, trunc, noise = self._echo(len(self.WELL))
-        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        sent, well, trunc, noise, noise2 = self._echo(len(self.WELL))
+        verdict = self._verdict(well, trunc, noise, payloads=sent, noise_again=noise2)
         self.assertEqual(verdict.status, "inconclusive")
 
     def test_an_echo_of_exactly_the_magic_is_still_an_echo(self):
@@ -5216,8 +5222,8 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # format". But the endpoint plainly did something with the input, and
         # what it did was hand it back. `negative` is a claim about the target;
         # this is a statement about the channel.
-        sent, well, trunc, noise = self._echo(len(self.MAGIC))
-        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        sent, well, trunc, noise, noise2 = self._echo(len(self.MAGIC))
+        verdict = self._verdict(well, trunc, noise, payloads=sent, noise_again=noise2)
         self.assertEqual(verdict.status, "inconclusive")
 
     def test_an_echo_shorter_than_the_magic_is_not_read_as_reflection(self):
@@ -5225,8 +5231,8 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # there is no reflection to find and nothing to hold the verdict at
         # inconclusive. The floor has to be somewhere, and the magic is where
         # the payload stops being indistinguishable from any other body.
-        sent, well, trunc, noise = self._echo(len(self.MAGIC) - 1)
-        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        sent, well, trunc, noise, noise2 = self._echo(len(self.MAGIC) - 1)
+        verdict = self._verdict(well, trunc, noise, payloads=sent, noise_again=noise2)
         self.assertEqual(verdict.status, "negative")
 
     def test_a_wrapped_echo_is_caught_in_every_ecosystem(self):
@@ -5281,6 +5287,60 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         self.assertEqual(verdict.status, "needs-review")
         self.assertIn("before the parse finishes", verdict.evidence)
 
+    def test_an_endpoint_that_starts_throttling_is_not_read_as_a_parser(self):
+        # The differential is read across requests, so anything that changes
+        # with the request index rather than with the payload lands on whichever
+        # form goes last -- and noise went last, every time. An endpoint that
+        # begins throttling partway through answers 200, 200, 429 and satisfies
+        # the noise route without having looked at a single payload.
+        #
+        # The two noise probes bracket the batch and are the same probe twice,
+        # so a target that held still must answer them alike.
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC,
+                "noise": self.NOISE, "noise_again": self.NOISE_AGAIN}
+        verdict = self._verdict((200, self.ACCEPTED), (200, self.ACCEPTED),
+                                (200, self.ACCEPTED),
+                                payloads=sent,
+                                noise_again=(429, '{"error":"rate limited"}'))
+        self.assertEqual(verdict.status, "inconclusive")
+        self.assertIn("did not hold still", verdict.evidence)
+
+    def test_a_steady_target_is_unaffected_by_the_bracket(self):
+        # The guard costs nothing when the endpoint answers the same probe the
+        # same way twice, which is the ordinary case and the one the fastjson
+        # target is.
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC,
+                "noise": self.NOISE, "noise_again": self.NOISE_AGAIN}
+        verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
+                                (400, self.SYNTAX_ERROR), payloads=sent,
+                                noise_again=(400, self.SYNTAX_ERROR))
+        self.assertEqual(verdict.status, "needs-review")
+
+    def test_the_bracketing_probes_are_sent_first_and_last(self):
+        # A bracket placed anywhere else is not a bracket. Both ends, and two
+        # different random tails, because the engine de-duplicates by payload
+        # and would send one repeat of an identical probe.
+        import random as _random
+        probes = self.method.build_probes(make_record(environment="unix", context="raw"),
+                                          _random.Random(11))
+        shape = [p for p in probes
+                 if p.carrier == "fastjson" and (p.phase or "").startswith("shape/")]
+        self.assertEqual([p.phase.split("/", 1)[1] for p in shape],
+                         ["noise", "wellformed", "truncated", "noise_again"])
+        self.assertNotEqual(shape[0].payload, shape[-1].payload,
+                            "identical payloads would be de-duplicated to one request")
+
+    def test_base64_sentinels_align_on_bytes_not_characters(self):
+        # base64 encodes bytes. Rounding the character count agrees with the
+        # byte count only while the magic is ASCII -- true of every ecosystem
+        # the shipped corpus declares, and not something a --template-file has
+        # to honour.
+        magic, well = "éAB", "éABX"
+        sentinels = self.method._reflection_sentinels(magic, well)
+        body = base64.b64encode(well.encode()).decode()
+        self.assertTrue(any(s and body.startswith(s) for s in sentinels),
+                        f"no sentinel is a prefix of {body}: {sentinels}")
+
     def test_the_negative_says_which_comparison_collapsed(self):
         # "answers all three forms alike" was asserted rather than observed, and
         # on fastjson it was false in both halves: noise differed, and the
@@ -5289,7 +5349,7 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         verdict = self._verdict((400, self.TYPE_ERROR), (500, self.SYNTAX_ERROR),
                                 (400, self.TYPE_ERROR))
         self.assertEqual(verdict.status, "negative")
-        self.assertNotIn("all three forms", verdict.evidence)
+        self.assertNotIn("every form alike", verdict.evidence)
         self.assertIn("noise form", verdict.evidence)
 
 
@@ -9266,12 +9326,26 @@ class DeserializationSinkTestCase(unittest.TestCase):
         for probe in dns:
             self.assertTrue(probe.expected, "a gadget probe carries a token")
 
-    def test_each_ecosystem_gets_all_three_shape_forms(self):
+    def test_each_ecosystem_gets_every_shape_form_in_bracketing_order(self):
+        # The order is part of the oracle, not presentation. The differential is
+        # read across requests, so anything changing with the request index
+        # rather than with the payload lands on whichever form goes last -- and
+        # noise went last, every time, which is what made a throttling endpoint
+        # look like a parser. The two noise probes now bracket the structured
+        # pair, and they carry different payloads because the engine
+        # de-duplicates by payload and would send an identical repeat once.
         probes = self._probes()
         for name in self.gen.deser_probes:
-            forms = {p.phase for p in probes if p.carrier == name and p.phase.startswith("shape/")}
+            shape = [p for p in probes
+                     if p.carrier == name and p.phase.startswith("shape/")]
             with self.subTest(ecosystem=name):
-                self.assertEqual(forms, {"shape/wellformed", "shape/truncated", "shape/noise"})
+                self.assertEqual(
+                    [p.phase for p in shape],
+                    ["shape/noise", "shape/wellformed",
+                     "shape/truncated", "shape/noise_again"])
+                self.assertNotEqual(
+                    shape[0].payload, shape[-1].payload,
+                    "the bracketing probes share a payload, so only one is sent")
 
     def test_the_noise_form_keeps_the_magic_and_matches_the_length(self):
         # Same magic, same length, random tail: an endpoint that merely stores
@@ -10427,8 +10501,8 @@ class WholeSeriesBudgetTestCase(unittest.TestCase):
         outright would throw away answers it had already earned.
 
         What makes that safe is `deser`'s own guard rather than luck: its shape
-        oracle is a differential across three forms, and a carrier left holding
-        fewer than three says so instead of reading the ones it has. So a cap
+        oracle is a differential across four forms, and a carrier left holding
+        fewer than four says so instead of reading the ones it has. So a cap
         that cuts a carrier in half produces an `inconclusive` for that carrier
         and leaves the complete ones alone -- never a `negative` inferred from
         evidence that was not gathered."""
