@@ -282,6 +282,27 @@ class ComparisonSectionTestCase(unittest.TestCase):
                 f"'{rival}' appears in the comparison but is not in PROJECTS",
             )
 
+    # A method row names its method as the last thing in the leading cell, after
+    # an em-dash. Structural rather than a character class, and that matters in
+    # both directions: `cmd.exe` is a backtick in that column and not a method,
+    # while `boolean2` or `second-order` are not methods either and a rule about
+    # letters would wave both of them through.
+    METHOD_LABEL_RE = re.compile(r"—\s*`([^`]+)`\s*$")
+
+    def _capability_rows(self):
+        """The leading cell of every row of the *capability* table.
+
+        Scoped to that one table on purpose. The section carries others -- the
+        engagement-controls table names `file` and `write` under "Cleanup
+        commands" -- and reading every table let a deleted capability row keep
+        passing on a mention somewhere else entirely. Verified by deleting the
+        `file` row, which the earlier version of this check did not notice."""
+        start = self.section.index("| Can confirm | RCEKit")
+        end = self.section.index("<sub>Coverage per each", start)
+        return [line.split("|")[1].strip()
+                for line in self.section[start:end].splitlines()
+                if line.startswith("|") and "---" not in line]
+
     def test_every_registered_method_has_a_row(self):
         """The table's claim is coverage — "every class, one run" — so a method
         missing from it is the claim understating itself, silently.
@@ -292,36 +313,38 @@ class ComparisonSectionTestCase(unittest.TestCase):
         seven of the nine registered methods for two releases. `lookup` is the
         Log4Shell row the CVE table above it already carries.
 
-        Rows that are not methods stay unnamed on purpose -- second-order
-        execution, the query-language bridges and the per-dialect Windows
-        probes are things the methods run *through*, not entries in
-        `--methods` -- so this asks only that every registered method appear,
-        never that every row name one."""
-        rows = [line for line in self.section.splitlines()
-                if line.startswith("|") and "---" not in line]
-        self.assertTrue(rows, "the comparison table was not found")
-        named = {name for row in rows for name in re.findall(r"`([^`]+)`", row)}
+        Rows that are not methods name none on purpose -- second-order
+        execution, the query-language bridges and the per-dialect Windows probes
+        are things the methods run *through*, not entries in `--methods` -- so
+        this asks only that every registered method appear, never that every row
+        name one."""
+        cells = self._capability_rows()
+        self.assertTrue(cells, "the capability table was not found")
+        named = {m.group(1) for m in
+                 (self.METHOD_LABEL_RE.search(cell) for cell in cells) if m}
         missing = sorted(set(rcekit.DETECTION_METHODS) - named)
         self.assertEqual(
             missing, [],
-            f"registered methods with no row in the comparison table: {missing}")
+            f"registered methods with no row in the capability table: {missing}")
 
     def test_the_table_names_no_method_the_cli_rejects(self):
         """The other direction, so the check cannot rot one-way. A method
         removed from `DETECTION_METHODS` would otherwise leave its row behind,
         advertising a `--methods` value the CLI refuses, and the test above
-        would still pass."""
-        rows = [line for line in self.section.splitlines()
-                if line.startswith("|") and "---" not in line]
-        # Only the leading cell names a method; the rest carry prose and tiers.
-        labels = {name for row in rows
-                  for name in re.findall(r"`([^`]+)`", row.split("|")[1])}
+        would still pass.
+
+        Every label the structural rule picks out is compared whole. Filtering
+        on lowercase letters instead exempted exactly the spellings a typo or a
+        rename produces -- `boolean2`, `second-order`, `reflected_v2` -- which is
+        the half of the guarantee that would have been missing."""
+        labels = {m.group(1) for m in
+                  (self.METHOD_LABEL_RE.search(cell) for cell in self._capability_rows())
+                  if m}
         phantom = sorted(name for name in labels
-                         if name.islower() and name.isalpha()
-                         and name not in rcekit.DETECTION_METHODS)
+                         if name not in rcekit.DETECTION_METHODS)
         self.assertEqual(
             phantom, [],
-            f"the comparison table names methods that are not registered: {phantom}")
+            f"the capability table names methods that are not registered: {phantom}")
 
 
 class DemoTierTestCase(unittest.TestCase):
