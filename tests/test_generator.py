@@ -5089,6 +5089,99 @@ class OobSafetyGateTestCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
 
 
+class DeserShapeVerdictTestCase(unittest.TestCase):
+    """The shape differential, and the endpoint shape it used to read backwards.
+
+    The oracle was anchored entirely on the well-formed stream: it reported a
+    parser only when that stream was answered differently from *both* the
+    truncated form and the magic-plus-noise form. A format whose type name is
+    resolved before the parse finishes answers the truncated form exactly as it
+    answers the complete one, which collapses that comparison on the very
+    endpoints it exists to find.
+
+    The bodies below are the ones fastjson 1.2.83 actually returned under
+    vulhub, trimmed to the message that decides the signature."""
+
+    TYPE_ERROR = ('{"timestamp":1790326934057,"status":400,"error":"Bad Request",'
+                  '"message":"JSON parse error: type not match. java.lang.String -> '
+                  'org.vulhub.fastjsondemo.User; nested exception is '
+                  'com.alibaba.fastjson.JSONException: type not match","path":"/"}')
+    SYNTAX_ERROR = ('{"timestamp":1790326934325,"status":400,"error":"Bad Request",'
+                    '"message":"JSON parse error: syntax error; nested exception is '
+                    'com.alibaba.fastjson.JSONException: syntax error","path":"/"}')
+    ACCEPTED = '{"age":20,"name":"rk"}'
+
+    def setUp(self):
+        self.method = rcekit.DETECTION_METHODS["deser"](RCEKit(), {})
+
+    def _verdict(self, wellformed, truncated, noise):
+        forms = {name: (Probe(payload="x", expected=""), Observation(status, body))
+                 for name, (status, body) in (("wellformed", wellformed),
+                                              ("truncated", truncated),
+                                              ("noise", noise))}
+        return self.method._shape_verdict("fastjson", forms)[1]
+
+    def test_a_type_resolved_before_the_parse_finishes_is_read_as_a_parser(self):
+        # The regression, measured on fastjson 1.2.83: the well-formed and the
+        # truncated form both come back naming the class the target resolved,
+        # and noise gets a plain syntax error. That equality is the evidence,
+        # and it used to be the thing that threw the verdict away.
+        verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
+                                (400, self.SYNTAX_ERROR))
+        self.assertEqual(verdict.status, "needs-review")
+        self.assertIn("before the parse finishes", verdict.evidence)
+        self.assertIn("NOT proof of deserialization", verdict.evidence)
+
+    def test_noise_matching_a_structured_form_keeps_the_new_route_shut(self):
+        # The guard on the new route: noise answered as the well-formed stream
+        # is, so nothing here treats the magic bytes as a type to resolve. The
+        # old route does not fire either (it needs the well-formed form to
+        # differ from noise), which is what makes this a guard rather than a
+        # case the old rule would have caught anyway.
+        verdict = self._verdict((400, self.TYPE_ERROR), (500, self.SYNTAX_ERROR),
+                                (400, self.TYPE_ERROR))
+        self.assertEqual(verdict.status, "negative")
+
+    def test_a_plain_json_endpoint_reaches_needs_review_through_the_old_route(self):
+        # Pinning behaviour this change does NOT alter, so the record is honest
+        # about it. A plain JSON API accepts the well-formed form -- it is valid
+        # JSON -- and rejects the truncated and noise forms alike as syntax
+        # errors. The original rule reads that as a parser, although nothing
+        # deserialized anything. The new route does not fire here (noise
+        # matches the truncated form), so this verdict is the old one, arriving
+        # for the old reason.
+        verdict = self._verdict((200, self.ACCEPTED), (400, self.SYNTAX_ERROR),
+                                (400, self.SYNTAX_ERROR))
+        self.assertEqual(verdict.status, "needs-review")
+        self.assertIn("well-formed object stream differently", verdict.evidence)
+        self.assertNotIn("before the parse finishes", verdict.evidence)
+
+    def test_three_distinct_answers_still_report_a_parser(self):
+        # The original route, untouched: nothing that reached needs-review
+        # before may stop reaching it.
+        verdict = self._verdict((200, self.ACCEPTED), (400, self.TYPE_ERROR),
+                                (500, self.SYNTAX_ERROR))
+        self.assertEqual(verdict.status, "needs-review")
+        self.assertIn("well-formed object stream differently", verdict.evidence)
+
+    def test_an_endpoint_that_answers_everything_alike_stays_negative(self):
+        verdict = self._verdict((200, self.ACCEPTED), (200, self.ACCEPTED),
+                                (200, self.ACCEPTED))
+        self.assertEqual(verdict.status, "negative")
+        self.assertIn("all three forms", verdict.evidence)
+
+    def test_the_negative_says_which_comparison_collapsed(self):
+        # "answers all three forms alike" was asserted rather than observed, and
+        # on fastjson it was false in both halves: noise differed, and the
+        # endpoint plainly parsed the format. A verdict that misdescribes what
+        # it saw is worse than a terse one.
+        verdict = self._verdict((400, self.TYPE_ERROR), (500, self.SYNTAX_ERROR),
+                                (400, self.TYPE_ERROR))
+        self.assertEqual(verdict.status, "negative")
+        self.assertNotIn("all three forms", verdict.evidence)
+        self.assertIn("noise form", verdict.evidence)
+
+
 class OobChannelWarningTestCase(unittest.TestCase):
     """A DNS callback travels the real resolver hierarchy, so it only arrives if
     this listener is the authority for the OOB domain — port 53 plus NS

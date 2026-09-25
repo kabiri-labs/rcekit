@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.4"
+__version__ = "2.46.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -6504,17 +6504,40 @@ class DeserSink(DetectionMethod):
             return anchor, Verdict("error",
                                    carrier + ": a shape probe never reached the target")
         signatures = {form: self._signature(obs) for form, (_p, obs) in forms.items()}
-        if (signatures["wellformed"] != signatures["truncated"]
-                and signatures["wellformed"] != signatures["noise"]):
+        well, trunc, noise = (signatures["wellformed"], signatures["truncated"],
+                              signatures["noise"])
+        if well != trunc and well != noise:
             return anchor, Verdict(
                 "needs-review",
                 carrier + ": the endpoint answers a well-formed object stream differently from "
                 "both a truncated one and the format's magic bytes plus noise, which is what a "
                 "parser looks like -- a fingerprint, NOT proof of deserialization and not RCE")
+        # The second route, with noise as the control rather than the
+        # well-formed stream. A format whose type name is resolved *before* the
+        # parse finishes answers a truncated stream exactly as it answers a
+        # complete one, which collapses the comparison above on the very
+        # endpoints it exists to find. Measured on fastjson 1.2.83: both the
+        # well-formed and the truncated form come back "type not match.
+        # java.lang.String -> User" -- the target naming the class it resolved
+        # -- while noise gets a plain syntax error.
+        #
+        # Noise carries the same magic and the same length with no valid
+        # structure, so answering *both* structured forms differently from it
+        # is the discriminating comparison: a plain JSON endpoint rejects the
+        # truncated form and the noise form the same way, as syntax errors, and
+        # never reaches here.
+        if noise != well and noise != trunc:
+            return anchor, Verdict(
+                "needs-review",
+                carrier + ": the endpoint answers a truncated object stream as it answers a "
+                "complete one, and answers both differently from the same magic bytes followed "
+                "by noise -- a parser acting on the type name before the parse finishes. A "
+                "fingerprint, NOT proof of deserialization and not RCE")
+        alike = ("all three forms" if well == trunc == noise else
+                 "the noise form as it answers a structured one")
         return anchor, Verdict(
             "negative",
-            carrier + ": the endpoint answers all three forms alike, so nothing here parses "
-            "the format")
+            carrier + ": the endpoint answers " + alike + ", so nothing here parses the format")
 
     def _dns_verdicts(self, dns_probes):
         import time

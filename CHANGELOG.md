@@ -191,6 +191,53 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+## [2.46.0] — 2026-09-25
+
+### Added
+
+- **A second route through the `deser` shape differential, for a format that
+  resolves the type name before the parse finishes.** The oracle was anchored
+  entirely on the well-formed stream: it reported a parser only when that
+  stream was answered differently from *both* the truncated form and the
+  magic-bytes-plus-noise form. A format that acts on `@type` before it finishes
+  parsing answers a truncated stream exactly as it answers a complete one,
+  which collapses that comparison on the very endpoints it exists to find.
+
+  Measured against a Spring Boot application on fastjson 1.2.83 under vulhub:
+
+      wellformed  400  type not match. java.lang.String -> ...fastjsondemo.User
+      truncated   400  type not match. java.lang.String -> ...fastjsondemo.User
+      noise       400  syntax error
+
+  The endpoint names the class it resolved, and the run reported `negative`
+  across 65 results -- with the evidence line "the endpoint answers all three
+  forms alike, so nothing here parses the format", which was false in both
+  halves. Noise differed, and the endpoint plainly parsed the format. The same
+  run now reports `needs-review`, 13 of them, and only for the `fastjson`
+  carrier: `java`, `php`, `dotnet` and `python_pickle` stay negative against an
+  endpoint that parses JSON and nothing else.
+
+  The new route uses noise as the control rather than the well-formed stream.
+  Noise carries the same magic bytes and the same length with no valid
+  structure, so answering *both* structured forms differently from it is the
+  discriminating comparison -- a plain JSON endpoint rejects the truncated form
+  and the noise form the same way, as syntax errors, and never reaches it. The
+  original route is untouched, so nothing that reported `needs-review` before
+  stops doing so.
+
+  This cannot widen `confirmed`. `deser` never emits it, its ceiling is
+  `deserialization-sink` and that is reachable only through a callback. The
+  shape oracle's ceiling is `needs-review`, the tier the README already
+  describes as a fingerprint rather than proof of deserialization.
+
+### Fixed
+
+- **The `deser` shape oracle's `negative` described a comparison it had not
+  made.** "The endpoint answers all three forms alike" was asserted rather than
+  observed, and on the target above it was wrong twice over. The verdict now
+  says which comparison actually collapsed: all three alike, or noise answered
+  as a structured form.
+
 ## [2.45.4] — 2026-09-25
 
 ### Fixed
@@ -2329,6 +2376,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.46.0]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.46.0
 [2.45.4]: https://github.com/kabiri-labs/rcekit/compare/v2.45.3...v2.45.4
 [2.45.3]: https://github.com/kabiri-labs/rcekit/compare/v2.45.2...v2.45.3
 [2.45.2]: https://github.com/kabiri-labs/rcekit/compare/v2.45.1...v2.45.2
