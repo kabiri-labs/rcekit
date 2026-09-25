@@ -8,6 +8,35 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The comparison table named seven of the nine registered methods.** `lookup`
+  and `boolean` had no row in "How RCEKit compares", although `lookup` is the
+  Log4Shell row the CVE table directly above it already carries, and `boolean`
+  shipped two releases ago. The table's claim is coverage -- "every class, one
+  run" -- so a method missing from it is that claim understating itself.
+
+  The drift was structural, not an oversight anyone could have caught by
+  reading. `docs/reference.md`, the `--methods` help, the CVE rows and the demo
+  headings are each pinned to `DETECTION_METHODS` by a test. The comparison
+  table was pinned by nothing, so it was the one place a new method could fail
+  to appear without anything going red.
+
+  Two tests now hold it, in both directions: every registered method has a row,
+  and the table names no method the CLI would reject -- because a one-way check
+  rots. A method *removed* from the registry would otherwise leave its row
+  behind, advertising a `--methods` value that no longer exists, while the
+  completeness test went on passing.
+
+  Each row now names its method in backticks, which is what makes the check
+  possible and also answers the question the table used to leave hanging: a
+  reader who wants the row they just read has the flag in front of them. Rows
+  that are not methods stay unnamed on purpose -- second-order execution, the
+  query-language bridges and the per-dialect Windows probes are things the
+  methods run *through*, not entries in `--methods`.
+
+  No version bump -- this is documentation and tests only.
+
 ### Added
 
 - **A tier correction has to reach the prose, not only the class.** Four tests
