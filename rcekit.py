@@ -6431,24 +6431,24 @@ class DeserSink(DetectionMethod):
             # Same magic bytes, same length, random tail: an endpoint that
             # merely stores the value cannot tell this from the real thing,
             # while a parser rejects it where it rejects the truncated form.
-            # One random head, shared, and a differing pair of last characters.
-            # The two noise probes have to be the same probe as far as the
-            # target is concerned, and two independently random tails are not:
-            # what follows the magic decides which token the parser reaches for,
-            # so a tail beginning `n` made fastjson answer "error parse new"
-            # where every other tail answered "syntax error". Measured against
-            # the live 1.2.83 target, that split one batch in fourteen -- and
-            # the bracket below read it as the endpoint moving under us.
+            # One noise body, sent twice. The bracket below asks whether the
+            # endpoint answered the same probe the same way, so the two have to
+            # be the same probe -- byte for byte, not merely alike. Anything
+            # the target can see a difference in, it may answer a difference
+            # to: a tail beginning `n` made fastjson say "error parse new"
+            # where every other tail said "syntax error", and a parser that
+            # quotes the offending token in its diagnostic would differ on any
+            # varying suffix at all.
             #
-            # A shared head fixes the path both probes take, whatever path that
-            # turns out to be; the last two characters differ only so the
-            # engine, which de-duplicates by payload, sends both.
-            tail_len = max(3, len(wellformed) - len(magic))
-            head = "".join(rng.choice(string.ascii_letters + string.digits)
-                           for _ in range(tail_len - 2))
-
-            def _noise(suffix):
-                return magic + head + suffix
+            # The engine de-duplicates by payload on the per-probe path, which
+            # is what makes this look impossible. The aggregate path -- where
+            # `deser` lives -- does not: it fires every entry of the batch.
+            # Measured, not assumed; `test_identical_aggregate_probes_are_both_delivered`
+            # pins it, because the bracket silently becomes one request if that
+            # ever changes.
+            noise = magic + "".join(
+                rng.choice(string.ascii_letters + string.digits)
+                for _ in range(max(1, len(wellformed) - len(magic))))
 
             # Two noise forms, and they go first and last so they bracket the
             # structured pair. The differential is read across requests, so
@@ -6470,10 +6470,10 @@ class DeserSink(DetectionMethod):
             # ends shows up in the pair. A transient that starts and ends
             # between them is not caught, which is the honest limit of any
             # bracket.
-            for form, body in (("noise", _noise("Qa")),
+            for form, body in (("noise", noise),
                                ("wellformed", wellformed),
                                ("truncated", str(spec.get("truncated") or "")),
-                               ("noise_again", _noise("Zb"))):
+                               ("noise_again", noise)):
                 if not body:
                     continue
                 probes.append(Probe(payload=self._wrap_context(record, body), expected="",

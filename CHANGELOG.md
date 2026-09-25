@@ -278,14 +278,25 @@ formats, or the template schema.
   held at `inconclusive`. A transient that starts and ends between the two ends
   is not caught, which is the honest limit of any bracket.
 
-  Making them *actually* the same probe took a second pass. Two independently
-  random tails are not equivalent: what follows the magic decides which token
-  the parser reaches for, and against the live fastjson target a tail beginning
-  `n` answered "error parse new" where every other tail answered "syntax
-  error". That split one batch in fourteen, and the bracket read it as the
-  endpoint moving. Both probes now share one random head and differ only in
-  their last two characters -- enough to keep the engine, which de-duplicates
-  by payload, from sending the repeat once.
+  Making them *actually* the same probe took two passes. They are one noise
+  body sent twice, byte for byte, because anything the target can see a
+  difference in it may answer a difference to: against the live fastjson target
+  a tail beginning `n` answered "error parse new" where every other tail
+  answered "syntax error", splitting one batch in fourteen, and a parser that
+  quotes the offending token in its diagnostic would differ on any varying
+  suffix at all. Both were read as the endpoint moving.
+
+  The first attempt gave the two probes differing suffixes to survive the
+  engine's payload de-duplication -- which does not apply to them. That
+  de-duplication is on the per-probe path; the aggregate path, where `deser`
+  lives, fires every entry of its batch. Measured rather than read, and pinned
+  by a test, because the bracket silently becomes a single request if that ever
+  changes, and a drift check comparing an answer with itself passes forever.
+
+  With the suffix gone the noise control is back to the length of the
+  well-formed form, which the oracle depends on: a control that is longer is
+  one an endpoint can reject on size alone, answering the structured pair alike
+  and both noise probes differently, for no reason a parser was involved in.
 
   The new route uses noise as the control rather than the well-formed stream.
   Noise carries the same magic bytes and the same length with no valid
