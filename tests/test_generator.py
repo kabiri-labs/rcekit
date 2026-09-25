@@ -2844,6 +2844,37 @@ class CompressedResponseTestCase(unittest.TestCase):
         truncated = self._gzip("cut short")[:12]
         self.assertIsInstance(decode_response_body(truncated, "gzip"), str)
 
+    def test_a_decompression_bomb_is_bounded(self):
+        # A target chooses how much memory RCEKit allocates the moment it
+        # compresses, and one-shot decompression handed it a blank cheque:
+        # 203,860 bytes of gzip hold 200 MB of zeros. The ceiling has to hold
+        # for both names, and the call has to come back rather than allocate.
+        import gzip
+        import zlib
+        from rcekit import MAX_DECOMPRESSED_BODY
+        payload = b"\x00" * (MAX_DECOMPRESSED_BODY * 4)
+        for header, blob in (("gzip", gzip.compress(payload, 9)),
+                             ("deflate", zlib.compress(payload, 9))):
+            self.assertLess(len(blob), len(payload) // 100, header)
+            body = decode_response_body(blob, header)
+            self.assertEqual(len(body), MAX_DECOMPRESSED_BODY, header)
+
+    def test_a_body_just_under_the_ceiling_is_decoded_whole(self):
+        # The ceiling must bound a bomb without truncating an ordinary large
+        # response, or it has traded a crash for a silent false negative.
+        from rcekit import MAX_DECOMPRESSED_BODY
+        text = "x" * (MAX_DECOMPRESSED_BODY - 64) + "computed 1214788"
+        self.assertTrue(decode_response_body(self._gzip(text), "gzip")
+                        .endswith("computed 1214788"))
+
+    def test_a_multi_member_gzip_stream_is_followed(self):
+        # `gzip.decompress` followed concatenated members, so the bounded
+        # reader must too -- a ceiling that quietly became a truncation for a
+        # server that concatenates would be the same false negative in a new
+        # place.
+        both = self._gzip("computed ") + self._gzip("1214788")
+        self.assertEqual(decode_response_body(both, "gzip"), "computed 1214788")
+
     def test_execution_confirms_through_a_gzipped_response(self):
         # The regression. This sink executes -- only a command break-out yields
         # output -- and returns it gzipped, exactly as HugeGraph does. Before

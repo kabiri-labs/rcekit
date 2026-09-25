@@ -237,6 +237,25 @@ formats, or the template schema.
   control -- and nothing is promoted into it. What changes is that the response
   the oracle reads is the response the target sent.
 
+- **Decompression is bounded, because compression is where the target chooses
+  how much memory RCEKit allocates.** Reading a body at all is new here, and
+  one-shot decompression handed a blank cheque to the one party in the exchange
+  that is untrusted by definition -- the thing being tested. Measured: 130,478
+  bytes of gzip expand to 134,217,728, and 203,860 bytes hold 200 MB of zeros,
+  a ratio of 1:1028. This path runs once per probe.
+
+  The ceiling is 32 MiB per encoding step. Whatever was produced before it is
+  kept rather than discarded: the value the oracle wants is short, so searching
+  32 MB is a far better answer than searching nothing, and the only risk the
+  ceiling carries is a false negative -- never a false `confirmed`. A truncated
+  read is logged rather than passed off as a clean one, since a `negative`
+  decided on a partial body is not the same claim as a `negative` decided on
+  the whole of it.
+
+  Multi-member streams are still followed. `gzip.decompress` followed them, and
+  a ceiling that quietly became a truncation for a server that concatenates
+  members would be the same false negative in a new place.
+
 ## [2.45.3] — 2026-09-24
 
 ### Fixed

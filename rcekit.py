@@ -9,6 +9,7 @@ import string
 import struct
 import sys
 import urllib.parse
+import zlib
 from dataclasses import asdict, dataclass, field as dataclass_field, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -505,6 +506,44 @@ def parse_sink_shapes(value: Optional[str]) -> Optional[Tuple[str, ...]]:
     return rungs
 
 
+# The ceiling on a decompressed response body. A target is untrusted by
+# definition -- it is the thing being tested -- and compression is the one place
+# where it decides how much memory RCEKit allocates. Measured here: 203,860
+# bytes of gzip hold 200 MB of zeros, a ratio of 1:1028, and this path runs once
+# per probe. The oracle is looking for a short computed value, so a body past
+# this is not a detection channel that was missed; it is a small reply expanding
+# into the scanner.
+MAX_DECOMPRESSED_BODY = 32 * 1024 * 1024
+
+
+def _inflate_bounded(raw: bytes, wbits: int) -> Tuple[bytes, bool]:
+    """Decompress ``raw`` to at most :data:`MAX_DECOMPRESSED_BODY` bytes.
+
+    Returns ``(body, truncated)``. Whatever was produced before the ceiling is
+    kept rather than discarded: the value the oracle wants is short and near
+    where the target wrote it, so searching 32 MB is a far better answer than
+    searching nothing, and the only risk the ceiling carries is a false
+    negative -- never a false ``confirmed``.
+
+    Multi-member streams are followed, because ``gzip.decompress`` followed them
+    and a ceiling must not quietly become a truncation for a server that
+    concatenates members."""
+    out = bytearray()
+    data = raw
+    while data and len(out) < MAX_DECOMPRESSED_BODY:
+        obj = zlib.decompressobj(wbits=wbits)
+        out += obj.decompress(data, MAX_DECOMPRESSED_BODY - len(out))
+        if obj.unconsumed_tail:
+            return bytes(out), True      # the ceiling stopped us mid-member
+        if not obj.eof:
+            break                        # stream ended early; keep what parsed
+        nxt = obj.unused_data
+        if nxt == data:
+            break                        # no progress; never spin on it
+        data = nxt
+    return bytes(out), False
+
+
 def decode_response_body(raw: bytes, content_encoding: Optional[str]) -> str:
     """A response body as text, decompressed first when the server encoded it.
 
@@ -526,32 +565,44 @@ def decode_response_body(raw: bytes, content_encoding: Optional[str]) -> str:
     in either comes back as its raw bytes rather than as an exception, so the
     run continues and reports ``negative`` for that probe alone.
 
+    Bounded, at :data:`MAX_DECOMPRESSED_BODY` per step. Expansion is the one
+    resource the target gets to choose, and one-shot decompression handed it a
+    blank cheque.
+
     Never raises. A body that claims an encoding and is not in it -- truncated,
     mislabelled, or already decoded by something upstream -- is returned
     undecompressed, because one malformed response must not end a run that has
     already spent hundreds of probes."""
-    import gzip
-    import zlib
     name = (content_encoding or "").strip().lower()
+    truncated = False
     # A proxy chain may stack them ("gzip, gzip"); the last applied is undone
     # first, which is the order this walks.
     for step in reversed([part.strip() for part in name.split(",") if part.strip()]):
         try:
             if step == "gzip" or step == "x-gzip":
-                raw = gzip.decompress(raw)
+                raw, truncated = _inflate_bounded(raw, 16 + zlib.MAX_WBITS)
             elif step == "deflate":
                 # Two things ship under this name: a raw deflate stream and a
                 # zlib-wrapped one. Servers disagree, so try the wrapper first
                 # and fall back rather than guess from the header.
                 try:
-                    raw = zlib.decompress(raw)
+                    raw, truncated = _inflate_bounded(raw, zlib.MAX_WBITS)
                 except zlib.error:
-                    raw = zlib.decompress(raw, -zlib.MAX_WBITS)
+                    raw, truncated = _inflate_bounded(raw, -zlib.MAX_WBITS)
             elif step in ("identity", ""):
                 continue
             else:
                 break
         except Exception:
+            break
+        if truncated:
+            # Stop here rather than inflate the next layer of something already
+            # at the ceiling, and say so: a body cut short is a body the oracle
+            # searched only part of, and that must not pass for a clean read.
+            logging.warning(
+                "response body hit the %d-byte decompression ceiling and was truncated; "
+                "a negative verdict on this probe was decided on a partial body",
+                MAX_DECOMPRESSED_BODY)
             break
     return raw.decode(errors="replace")
 
