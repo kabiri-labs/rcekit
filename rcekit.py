@@ -6518,22 +6518,62 @@ class DeserSink(DetectionMethod):
         error body carries ``java.lang.String`` and never ``{"@type":"``.
 
         So the test is one short slice -- the magic plus one character. Noise is
-        built to share exactly the magic with the well-formed form, so an echo
-        of the magic or less produces no differential to begin with, and any
-        echo longer than that contains this slice. Encoding-aware, through
-        :meth:`_search`, so a body that base64-wraps what it echoes is caught
-        too."""
+        The sentinel is the format's magic, which every one of the three forms
+        carries by construction, so an echo reaching that far is caught whatever
+        it echoed."""
         spec = (getattr(self.gen, "deser_probes", None) or {}).get(carrier) or {}
         magic = str(spec.get("magic") or "")
         if not magic:
             return False
         for probe, obs in forms.values():
-            slice_ = (probe.payload or "")[:len(magic) + 1]
-            if len(slice_) <= len(magic):
-                continue
-            if self._search(slice_, obs.body or ""):
-                return True
+            body = obs.body or ""
+            for sentinel in self._reflection_sentinels(magic, probe.payload or ""):
+                if sentinel and self._search(sentinel, body):
+                    return True
         return False
+
+    @staticmethod
+    def _reflection_sentinels(magic: str, payload: str) -> List[str]:
+        """What an echo of this payload would put in the response, in each
+        wrapping an endpoint might apply on the way out.
+
+        The general encoded search cannot carry this one. ``_encoded_search``
+        only decodes base64 runs of 16 characters or more and hex runs of 16,
+        which is the right floor when the thing being looked for is a short
+        decimal and a spurious decode could match it by accident. These
+        sentinels are structural strings the payload begins with -- ``rO0AB``,
+        ``{"@type":`` -- and they encode shorter than that floor: a six-byte
+        Java sentinel is eight base64 characters, and fastjson's sixteen are
+        fourteen once the ``==`` padding is discounted. So an endpoint that
+        base64-wraps a short echo slipped past the guard entirely.
+
+        Encoding what is being looked for, rather than decoding the body,
+        because that needs no threshold at all. Base64 maps three bytes to four
+        characters, so the encoding of a prefix is a prefix of the encoding only
+        where that prefix lands on a three-byte boundary -- hence the rounding.
+        Hex has no such alignment, so the whole slice goes in, in both cases a
+        body might spell it.
+
+        A spurious decode cannot answer for one of these the way it could for a
+        bare number: a body would have to contain the exact encoding of the
+        format's own magic bytes, which is the thing being tested for.
+
+        Both the magic and one character past it are encoded. The longer one is
+        the more precise sentinel, and the shorter is what an endpoint echoing
+        exactly the magic produces -- which the longer one cannot match, since
+        it is not a prefix of anything that short."""
+        sentinels = [magic]
+        slice_ = payload[:len(magic) + 1]
+        for text in (magic, slice_ if len(slice_) > len(magic) else ""):
+            if not text:
+                continue
+            aligned = len(text) - len(text) % 3
+            if aligned:
+                sentinels.append(
+                    base64.b64encode(text[:aligned].encode()).decode().rstrip("="))
+            hexed = text.encode().hex()
+            sentinels.extend((hexed, hexed.upper()))
+        return sentinels
 
     def _shape_verdict(self, carrier, forms):
         anchor = (forms.get("wellformed") or next(iter(forms.values())))[0]

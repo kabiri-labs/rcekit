@@ -5210,23 +5210,65 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         verdict = self._verdict(well, trunc, noise, payloads=sent)
         self.assertEqual(verdict.status, "inconclusive")
 
-    def test_an_echo_no_longer_than_the_magic_needs_no_guard(self):
-        # Noise shares exactly the magic with the well-formed form, so an echo
-        # of that much or less returns the same bytes for all three and the
-        # differential is empty on its own. The guard has nothing to do here,
-        # and the verdict must still be the honest one.
+    def test_an_echo_of_exactly_the_magic_is_still_an_echo(self):
+        # All three forms come back identical here, so the differential is
+        # empty and the old verdict was `negative` -- "nothing here parses the
+        # format". But the endpoint plainly did something with the input, and
+        # what it did was hand it back. `negative` is a claim about the target;
+        # this is a statement about the channel.
         sent, well, trunc, noise = self._echo(len(self.MAGIC))
         verdict = self._verdict(well, trunc, noise, payloads=sent)
-        self.assertEqual(verdict.status, "negative")
-        self.assertIn("all three forms", verdict.evidence)
-
-    def test_a_base64_wrapped_echo_is_caught(self):
-        # The guard searches the way every other oracle here searches. A body
-        # that base64-wraps what it echoes is the same endpoint wearing a coat.
-        sent, well, trunc, noise = self._echo(
-            20, wrap=lambda s: base64.b64encode(s.encode()).decode())
-        verdict = self._verdict(well, trunc, noise, payloads=sent)
         self.assertEqual(verdict.status, "inconclusive")
+
+    def test_an_echo_shorter_than_the_magic_is_not_read_as_reflection(self):
+        # Below the magic there is nothing of this format in what came back, so
+        # there is no reflection to find and nothing to hold the verdict at
+        # inconclusive. The floor has to be somewhere, and the magic is where
+        # the payload stops being indistinguishable from any other body.
+        sent, well, trunc, noise = self._echo(len(self.MAGIC) - 1)
+        verdict = self._verdict(well, trunc, noise, payloads=sent)
+        self.assertEqual(verdict.status, "negative")
+
+    def test_a_wrapped_echo_is_caught_in_every_ecosystem(self):
+        # The gap this closes. `_encoded_search` decodes base64 runs of 16
+        # characters and hex runs of 16, the right floor for a short decimal
+        # where a spurious decode could match by accident. These sentinels are
+        # shorter than that: a six-byte Java sentinel is eight base64
+        # characters, and fastjson's sixteen are fourteen once `==` is
+        # discounted -- so a base64-wrapped echo walked past the guard in three
+        # of the five ecosystems, including the one the route was built for.
+        #
+        # Every ecosystem, every wrapping, and the echo lengths either side of
+        # the magic, because the first version of this test checked one
+        # ecosystem at one length and passed while three others were open.
+        method = rcekit.DETECTION_METHODS["deser"](RCEKit(), {})
+        probes = RCEKit().deser_probes
+        for name, spec in probes.items():
+            magic, well = str(spec.get("magic") or ""), str(spec.get("wellformed") or "")
+            sentinels = [s for s in method._reflection_sentinels(magic, well) if s]
+            for length in (len(magic), len(magic) + 1, len(magic) + 5, len(well)):
+                echo = well[:length]
+                for label, body in (
+                        ("raw", echo),
+                        ("base64", base64.b64encode(echo.encode()).decode()),
+                        ("hex", echo.encode().hex()),
+                        ("HEX", echo.encode().hex().upper())):
+                    with self.subTest(ecosystem=name, echo=length, wrapping=label):
+                        self.assertTrue(
+                            any(method._search(s, body) for s in sentinels),
+                            f"{name}: a {label} echo of {length} characters is not "
+                            f"recognised as reflection")
+
+    def test_the_sentinels_do_not_fire_on_a_parser_that_names_the_class(self):
+        # The other direction, on the bodies the live target returned. A parser
+        # resolving the type name puts `java.lang.String` in its error and
+        # never `{"@type":"`, and no encoding of the magic appears either.
+        method = rcekit.DETECTION_METHODS["deser"](RCEKit(), {})
+        sentinels = [s for s in method._reflection_sentinels(self.MAGIC, self.WELL) if s]
+        for label, body in (("type error", self.TYPE_ERROR),
+                            ("syntax error", self.SYNTAX_ERROR)):
+            matched = [s for s in sentinels if method._search(s, body)]
+            self.assertEqual(matched, [], f"{label}: sentinel matched a parser's own answer")
 
     def test_the_real_fastjson_bodies_do_not_trip_the_guard(self):
         # The guard must not cost the case it was added around. Measured on the
