@@ -6554,17 +6554,28 @@ class DeserSink(DetectionMethod):
         name and not the syntax around it: measured on fastjson 1.2.83, the
         error body carries ``java.lang.String`` and never ``{"@type":"``.
 
-        So the test is one short slice -- the magic plus one character. Noise is
-        The sentinel is the format's magic, which every one of the three forms
-        carries by construction, so an echo reaching that far is caught whatever
-        it echoed."""
+        The sentinel is the format's magic, which every form carries by
+        construction, so an echo reaching that far is caught whatever it echoed.
+
+        Matched with case folded as well as raw, because :meth:`_signature`
+        lowercases the bodies before comparing them. An endpoint that lowercases
+        what it echoes therefore answers the structured pair alike -- which is
+        what sends the noise route looking -- while a case-sensitive search for
+        `rO0AB` in `ro0abx` finds nothing. The two halves of one oracle have to
+        fold case the same way or the guard is blind exactly where the route
+        fires. The raw search stays as well, and runs first: it is the one that
+        peels base64 and hex, and base64 does not survive lowercasing."""
         spec = (getattr(self.gen, "deser_probes", None) or {}).get(carrier) or {}
         magic = str(spec.get("magic") or "")
         if not magic:
             return False
         for probe, obs in forms.values():
             body, control = obs.body or "", obs.control_body or ""
+            low_body, low_control = body.lower(), control.lower()
             for sentinel in self._reflection_sentinels(magic, probe.payload or ""):
+                if sentinel and (sentinel.lower() in low_body
+                                 and sentinel.lower() not in low_control):
+                    return True
                 # Differenced against the payload-free control, like every
                 # other oracle here. A sentinel the control carries too is one
                 # the probe cannot have put there -- a build id, a script tag,
@@ -6660,15 +6671,29 @@ class DeserSink(DetectionMethod):
         anchor = (forms.get("wellformed") or next(iter(forms.values())))[0]
         if len(forms) < len(self.SHAPE_FORMS):
             return anchor, Verdict("inconclusive",
-                                   carrier + ": the shape differential needs all three forms "
+                                   carrier + ": the shape differential needs every form "
                                    "and did not get them")
         if any(obs.status is None for _probe, obs in forms.values()):
             return anchor, Verdict("error",
                                    carrier + ": a shape probe never reached the target")
+        spec = (getattr(self.gen, "deser_probes", None) or {}).get(carrier) or {}
+        if not str(spec.get("magic") or ""):
+            # Without a magic there is no reflection sentinel, so an endpoint
+            # that echoes its input cannot be told from one that parses it --
+            # and the differential answers anyway, because the noise form is
+            # random and a structured pair is not. The shipped corpus declares
+            # one for every format; a `--template-file` need not, and the
+            # honest answer to a control that cannot be validated is to say so
+            # rather than to read it.
+            return anchor, Verdict(
+                "inconclusive",
+                carrier + ": the format declares no magic bytes, so nothing distinguishes an "
+                "endpoint that parses this from one that hands the input back -- the shape "
+                "differential has no control to rest on")
         if self._reflects_its_input(carrier, forms):
             return anchor, Verdict(
                 "inconclusive",
-                carrier + ": the response carries the probe back, so the three forms differ "
+                carrier + ": the response carries the probe back, so the forms differ "
                 "because the input did and not because anything parsed it -- the shape channel "
                 "cannot answer here")
         signatures = {form: self._signature(obs) for form, (_p, obs) in forms.items()}
