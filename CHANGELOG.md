@@ -260,7 +260,32 @@ formats, or the template schema.
 
   The guard covers both routes: a long enough echo makes all three answers
   differ and would otherwise produce the same false fingerprint through the
-  original one.
+  original one. Its base64 sentinel aligns on bytes, not characters, which
+  agree only while the magic is ASCII -- true of every ecosystem the shipped
+  corpus declares, and not something a `--template-file` has to honour.
+
+- **The differential is read across requests, so the last form carried every
+  drift.** Anything that changes with the request *index* rather than with the
+  payload -- a rate limiter backing off, a filling log, a warming cache --
+  landed on whichever form went last, and noise went last every time. An
+  endpoint that begins throttling partway through answers 200, 200, 429 and
+  satisfies the noise route without having looked at a single payload.
+
+  There are two noise forms now, sent first and last so they bracket the
+  structured pair. They are the same probe as far as the target is concerned,
+  so an endpoint that held still must answer them alike; one that did not is an
+  endpoint whose answers cannot be compared across requests, and the carrier is
+  held at `inconclusive`. A transient that starts and ends between the two ends
+  is not caught, which is the honest limit of any bracket.
+
+  Making them *actually* the same probe took a second pass. Two independently
+  random tails are not equivalent: what follows the magic decides which token
+  the parser reaches for, and against the live fastjson target a tail beginning
+  `n` answered "error parse new" where every other tail answered "syntax
+  error". That split one batch in fourteen, and the bracket read it as the
+  endpoint moving. Both probes now share one random head and differ only in
+  their last two characters -- enough to keep the engine, which de-duplicates
+  by payload, from sending the repeat once.
 
   The new route uses noise as the control rather than the well-formed stream.
   Noise carries the same magic bytes and the same length with no valid

@@ -6295,7 +6295,7 @@ class DeserSink(DetectionMethod):
     also_reports = ("needs-review",)
     aggregate = True
 
-    SHAPE_FORMS = ("wellformed", "truncated", "noise")
+    SHAPE_FORMS = ("wellformed", "truncated", "noise", "noise_again")
 
     # --- Java serialization ------------------------------------------------
     #
@@ -6431,12 +6431,49 @@ class DeserSink(DetectionMethod):
             # Same magic bytes, same length, random tail: an endpoint that
             # merely stores the value cannot tell this from the real thing,
             # while a parser rejects it where it rejects the truncated form.
-            noise = magic + "".join(
-                rng.choice(string.ascii_letters + string.digits)
-                for _ in range(max(1, len(wellformed) - len(magic))))
-            for form, body in (("wellformed", wellformed),
+            # One random head, shared, and a differing pair of last characters.
+            # The two noise probes have to be the same probe as far as the
+            # target is concerned, and two independently random tails are not:
+            # what follows the magic decides which token the parser reaches for,
+            # so a tail beginning `n` made fastjson answer "error parse new"
+            # where every other tail answered "syntax error". Measured against
+            # the live 1.2.83 target, that split one batch in fourteen -- and
+            # the bracket below read it as the endpoint moving under us.
+            #
+            # A shared head fixes the path both probes take, whatever path that
+            # turns out to be; the last two characters differ only so the
+            # engine, which de-duplicates by payload, sends both.
+            tail_len = max(3, len(wellformed) - len(magic))
+            head = "".join(rng.choice(string.ascii_letters + string.digits)
+                           for _ in range(tail_len - 2))
+
+            def _noise(suffix):
+                return magic + head + suffix
+
+            # Two noise forms, and they go first and last so they bracket the
+            # structured pair. The differential is read across requests, so
+            # anything that changes with the request *index* rather than with
+            # the payload lands on whichever form is sent last -- and noise was
+            # always sent last. An endpoint that begins throttling partway
+            # through answers 200, 200, 429 and satisfies the noise route
+            # without having looked at a single payload.
+            #
+            # These two are semantically the same probe: the magic followed by
+            # a random tail, which no parser can read. So an endpoint that held
+            # still must answer them alike, and one that did not is an endpoint
+            # whose answers cannot be compared across requests at all. Their
+            # tails differ because the engine de-duplicates by payload and
+            # would otherwise send the repeat once.
+            #
+            # Bracketing rather than repeating every form: it costs one request
+            # per ecosystem instead of four, and drift anywhere between the two
+            # ends shows up in the pair. A transient that starts and ends
+            # between them is not caught, which is the honest limit of any
+            # bracket.
+            for form, body in (("noise", _noise("Qa")),
+                               ("wellformed", wellformed),
                                ("truncated", str(spec.get("truncated") or "")),
-                               ("noise", noise)):
+                               ("noise_again", _noise("Zb"))):
                 if not body:
                     continue
                 probes.append(Probe(payload=self._wrap_context(record, body), expected="",
@@ -6567,11 +6604,18 @@ class DeserSink(DetectionMethod):
         for text in (magic, slice_ if len(slice_) > len(magic) else ""):
             if not text:
                 continue
-            aligned = len(text) - len(text) % 3
+            raw = text.encode()
+            # Aligned on *bytes*, which is what base64 encodes. Rounding the
+            # character count instead agrees with the byte count only while the
+            # magic is ASCII -- true of every ecosystem the shipped corpus
+            # declares, and not something a `--template-file` has to honour. A
+            # magic of `éAB` is three characters and four bytes, and the
+            # character-aligned sentinel is not a prefix of the encoded echo at
+            # all.
+            aligned = len(raw) - len(raw) % 3
             if aligned:
-                sentinels.append(
-                    base64.b64encode(text[:aligned].encode()).decode().rstrip("="))
-            hexed = text.encode().hex()
+                sentinels.append(base64.b64encode(raw[:aligned]).decode())
+            hexed = raw.hex()
             sentinels.extend((hexed, hexed.upper()))
         return sentinels
 
@@ -6591,6 +6635,12 @@ class DeserSink(DetectionMethod):
                 "because the input did and not because anything parsed it -- the shape channel "
                 "cannot answer here")
         signatures = {form: self._signature(obs) for form, (_p, obs) in forms.items()}
+        if signatures["noise"] != signatures["noise_again"]:
+            return anchor, Verdict(
+                "inconclusive",
+                carrier + ": the same unreadable probe, sent at either end of the batch, came "
+                "back two different ways -- the endpoint did not hold still across these "
+                "requests, so a differential read across them is reading the drift")
         well, trunc, noise = (signatures["wellformed"], signatures["truncated"],
                               signatures["noise"])
         if well != trunc and well != noise:
@@ -6620,7 +6670,7 @@ class DeserSink(DetectionMethod):
                 "complete one, and answers both differently from the same magic bytes followed "
                 "by noise -- a parser acting on the type name before the parse finishes. A "
                 "fingerprint, NOT proof of deserialization and not RCE")
-        alike = ("all three forms" if well == trunc == noise else
+        alike = ("every form alike" if well == trunc == noise else
                  "the noise form as it answers a structured one")
         return anchor, Verdict(
             "negative",
