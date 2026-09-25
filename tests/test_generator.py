@@ -5149,16 +5149,24 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                 (200, bodies["noise"]),
                 (200, bodies["noise_again"]))
 
-    def test_a_type_resolved_before_the_parse_finishes_is_read_as_a_parser(self):
-        # The regression, measured on fastjson 1.2.83: the well-formed and the
-        # truncated form both come back naming the class the target resolved,
-        # and noise gets a plain syntax error. That equality is the evidence,
-        # and it used to be the thing that threw the verdict away.
+    def test_a_type_resolved_before_the_parse_finishes_stays_negative(self):
+        # Measured on fastjson 1.2.83: the well-formed and the truncated form
+        # both come back naming the class the target resolved, and noise gets a
+        # plain syntax error. A route reading noise as the control was tried
+        # here and withdrawn -- "noise differs from the structured pair" has
+        # explanations that are not a parser, and the one that decided it is a
+        # filter refusing the random payload while letting the structured ones
+        # through, which no repetition exposes and which this verdict cannot
+        # see: refusal is judged against the probe it is anchored to, and that
+        # is the well-formed one.
+        #
+        # So the shape oracle says `negative` on this target and the DNS gadget
+        # reaches `deserialization-sink` instead. This pins the outcome so the
+        # route is not reintroduced without the refusal problem being solved.
         verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
                                 (400, self.SYNTAX_ERROR))
-        self.assertEqual(verdict.status, "needs-review")
-        self.assertIn("before the parse finishes", verdict.evidence)
-        self.assertIn("NOT proof of deserialization", verdict.evidence)
+        self.assertEqual(verdict.status, "negative")
+        self.assertIn("a truncated stream as it answers a complete one", verdict.evidence)
 
     def test_noise_matching_a_structured_form_keeps_the_new_route_shut(self):
         # The guard on the new route: noise answered as the well-formed stream
@@ -5303,11 +5311,14 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # live target: the error body carries `java.lang.String` -- the class
         # the target resolved -- and never `{"@type":"`, the syntax around it.
         # That is the whole distinction the guard rests on.
-        sent = {"wellformed": self.WELL, "truncated": self.TRUNC, "noise": self.NOISE}
-        verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
-                                (400, self.SYNTAX_ERROR), payloads=sent)
-        self.assertEqual(verdict.status, "needs-review")
-        self.assertIn("before the parse finishes", verdict.evidence)
+        sent = {"wellformed": self.WELL, "truncated": self.TRUNC,
+                "noise": self.NOISE, "noise_again": self.NOISE}
+        self.assertFalse(self.method._reflects_its_input("fastjson", {
+            name: (Probe(payload=sent[name], expected=""), Observation(400, body))
+            for name, body in (("wellformed", self.TYPE_ERROR),
+                               ("truncated", self.TYPE_ERROR),
+                               ("noise", self.SYNTAX_ERROR),
+                               ("noise_again", self.SYNTAX_ERROR))}))
 
     def test_an_endpoint_that_starts_throttling_is_not_read_as_a_parser(self):
         # The differential is read across requests, so anything that changes
@@ -5333,10 +5344,12 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
         # target is.
         sent = {"wellformed": self.WELL, "truncated": self.TRUNC,
                 "noise": self.NOISE, "noise_again": self.NOISE_AGAIN}
-        verdict = self._verdict((400, self.TYPE_ERROR), (400, self.TYPE_ERROR),
-                                (400, self.SYNTAX_ERROR), payloads=sent,
-                                noise_again=(400, self.SYNTAX_ERROR))
-        self.assertEqual(verdict.status, "needs-review")
+        self.assertFalse(self.method._reflects_its_input("fastjson", {
+            name: (Probe(payload=sent[name], expected=""), Observation(400, body))
+            for name, body in (("wellformed", self.TYPE_ERROR),
+                               ("truncated", self.TYPE_ERROR),
+                               ("noise", self.SYNTAX_ERROR),
+                               ("noise_again", self.SYNTAX_ERROR))}))
 
     def test_the_bracketing_probes_are_sent_first_and_last(self):
         # A bracket placed anywhere else is not a bracket. Both ends, and two

@@ -191,173 +191,75 @@ formats, or the template schema.
 
 ## [Unreleased]
 
-## [2.46.0] — 2026-09-25
-
-### Added
-
-- **A second route through the `deser` shape differential, for a format that
-  resolves the type name before the parse finishes.** The oracle was anchored
-  entirely on the well-formed stream: it reported a parser only when that
-  stream was answered differently from *both* the truncated form and the
-  magic-bytes-plus-noise form. A format that acts on `@type` before it finishes
-  parsing answers a truncated stream exactly as it answers a complete one,
-  which collapses that comparison on the very endpoints it exists to find.
-
-  Measured against a Spring Boot application on fastjson 1.2.83 under vulhub:
-
-      wellformed  400  type not match. java.lang.String -> ...fastjsondemo.User
-      truncated   400  type not match. java.lang.String -> ...fastjsondemo.User
-      noise       400  syntax error
-
-  The endpoint names the class it resolved, and the run reported `negative`
-  across 65 results -- with the evidence line "the endpoint answers all three
-  forms alike, so nothing here parses the format", which was false in both
-  halves. Noise differed, and the endpoint plainly parsed the format. The same
-  run now reports `needs-review`, 13 of them, and only for the `fastjson`
-  carrier: `java`, `php`, `dotnet` and `python_pickle` stay negative against an
-  endpoint that parses JSON and nothing else.
-
-  An endpoint that carries the probe back into its own response is held at
-  `inconclusive` before either route runs. The three forms alone cannot rule
-  that out, and that is a property of the comparison rather than a gap in it:
-  the original route covers every case where the well-formed and truncated
-  answers differ, so the only region left is where they agree, and there the
-  single remaining comparison is the well-formed answer against noise. Any rule
-  reaching into that region collapses the pair to `wellformed != noise`, which
-  a fixed-length preview of the input satisfies without parsing anything.
-
-  The fourth input is *which* part of the probe comes back. An echo returns a
-  contiguous run from the start of the payload, structural characters included;
-  a parser that resolves the type name returns the name and not the syntax
-  around it. Measured on fastjson 1.2.83: the error body carries
-  `java.lang.String` and never `{"@type":"`.
-
-  The sentinel is the format's magic, which all three forms carry by
-  construction, and it is looked for encoded as well as raw. The general
-  encoded search cannot carry this one: it decodes base64 runs of 16 characters
-  and hex runs of 16, the right floor when the thing being looked for is a
-  short decimal that a spurious decode could match by accident, but these
-  sentinels encode shorter than that. A six-byte Java sentinel is eight base64
-  characters, and fastjson's sixteen are fourteen once the `==` padding is
-  discounted -- so a base64-wrapped echo walked past in three of the five
-  ecosystems, including the one the route was built for.
-
-  So the sentinel is encoded rather than the body decoded, which needs no
-  threshold at all. Base64 maps three bytes to four characters, so a prefix's
-  encoding is a prefix of the encoding only on a three-byte boundary, hence the
-  rounding; hex has no such alignment. A spurious decode cannot answer for one
-  of these the way it could for a bare number -- a body would have to contain
-  the exact encoding of the format's own magic bytes.
-
-  `inconclusive` rather than `negative`, because a reflecting endpoint means the
-  shape channel could not be read, not that nothing is there -- and this run
-  reaches the same target's `deserialization-sink` through the DNS gadget
-  regardless. That now includes an echo of exactly the magic, where all three
-  answers are identical and the old verdict was `negative`: the differential is
-  empty either way, but the endpoint plainly did something with the input, and
-  what it did was hand it back. `negative` is a claim about the target;
-  this is a statement about the channel.
-
-  The guard covers both routes: a long enough echo makes all three answers
-  differ and would otherwise produce the same false fingerprint through the
-  original one.
-
-  It is differenced against the payload-free control, like every other oracle
-  here. Reading the probe's response alone called it reflection whenever the
-  sentinel appeared, including when the control carried the same text and the
-  probe therefore cannot have put it there -- a build id, a script tag, any
-  four characters of ordinary page content spelling a short magic such as
-  pickle's `gASV`. That threw the carrier away as reflection, which is the one
-  mistake this tool is built to avoid, made by the guard against it.
-
-  Its sentinels are anchored on the magic's position in the payload rather than
-  on the payload's start. A probe is wrapped for its injection context before
-  it goes out, and some wrappers are longer than the magic: an `xml_cdata`
-  pickle probe begins `<![CDATA[gASV`, so a slice from the front captured
-  `<![CD` and never reached the format bytes -- a sentinel made of the wrapper,
-  which every echoing endpoint matches while echoing less than the magic.
-
-  The encoded forms still begin at the payload's first byte, because that is
-  where an endpoint encoding what it echoed begins, and they align on bytes
-  rather than characters, which agree only while the magic is ASCII -- true of
-  every ecosystem the shipped corpus declares, and not something a
-  `--template-file` has to honour. Hex reaches an echo of exactly the magic;
-  base64 cannot, and the limit is stated rather than worked around. It maps
-  three bytes to four characters, so a prefix's encoding is a prefix only on a
-  three-byte boundary, and rounding down to reach that echo would build the
-  sentinel from fewer bytes than the magic -- the wrapper false positive again.
-  So base64 is recognised from the first boundary at or past the magic's end,
-  and the tests assert that floor from both sides.
-
-  Sentinels are matched with case folded as well as raw, because `_signature`
-  lowercases the bodies before comparing them. An endpoint that lowercases what
-  it echoes answers the structured pair alike -- which is what sends the noise
-  route looking -- while a case-sensitive search for `rO0AB` in `ro0abx` finds
-  nothing, so the guard was blind in the one place the route fires. The raw
-  search stays and runs first: it is the one that peels base64 and hex, and
-  base64 does not survive lowercasing.
-
-  A format declaring no magic gets `inconclusive` rather than a verdict. There
-  is no reflection sentinel without one, so an endpoint that echoes cannot be
-  told from one that parses -- and the differential answers anyway, because the
-  noise form is random where a structured pair is not. Every shipped format
-  declares a magic; a `--template-file` need not, and reading a control that
-  cannot be validated is what this tool refuses everywhere else.
-
-- **The differential is read across requests, so the last form carried every
-  drift.** Anything that changes with the request *index* rather than with the
-  payload -- a rate limiter backing off, a filling log, a warming cache --
-  landed on whichever form went last, and noise went last every time. An
-  endpoint that begins throttling partway through answers 200, 200, 429 and
-  satisfies the noise route without having looked at a single payload.
-
-  There are two noise forms now, sent first and last so they bracket the
-  structured pair. They are the same probe as far as the target is concerned,
-  so an endpoint that held still must answer them alike; one that did not is an
-  endpoint whose answers cannot be compared across requests, and the carrier is
-  held at `inconclusive`. A transient that starts and ends between the two ends
-  is not caught, which is the honest limit of any bracket.
-
-  Making them *actually* the same probe took two passes. They are one noise
-  body sent twice, byte for byte, because anything the target can see a
-  difference in it may answer a difference to: against the live fastjson target
-  a tail beginning `n` answered "error parse new" where every other tail
-  answered "syntax error", splitting one batch in fourteen, and a parser that
-  quotes the offending token in its diagnostic would differ on any varying
-  suffix at all. Both were read as the endpoint moving.
-
-  The first attempt gave the two probes differing suffixes to survive the
-  engine's payload de-duplication -- which does not apply to them. That
-  de-duplication is on the per-probe path; the aggregate path, where `deser`
-  lives, fires every entry of its batch. Measured rather than read, and pinned
-  by a test, because the bracket silently becomes a single request if that ever
-  changes, and a drift check comparing an answer with itself passes forever.
-
-  With the suffix gone the noise control is back to the length of the
-  well-formed form, which the oracle depends on: a control that is longer is
-  one an endpoint can reject on size alone, answering the structured pair alike
-  and both noise probes differently, for no reason a parser was involved in.
-
-  The new route uses noise as the control rather than the well-formed stream.
-  Noise carries the same magic bytes and the same length with no valid
-  structure, so answering *both* structured forms differently from it is the
-  discriminating comparison -- a plain JSON endpoint rejects the truncated form
-  and the noise form the same way, as syntax errors, and never reaches it. The
-  original route is untouched, so nothing that reported `needs-review` before
-  stops doing so.
-
-  This cannot widen `confirmed`. `deser` never emits it, its ceiling is
-  `deserialization-sink` and that is reachable only through a callback. The
-  shape oracle's ceiling is `needs-review`, the tier the README already
-  describes as a fingerprint rather than proof of deserialization.
+## [2.45.5] — 2026-09-25
 
 ### Fixed
 
-- **The `deser` shape oracle's `negative` described a comparison it had not
-  made.** "The endpoint answers all three forms alike" was asserted rather than
-  observed, and on the target above it was wrong twice over. The verdict now
-  says which comparison actually collapsed: all three alike, or noise answered
-  as a structured form.
+- **The `deser` shape differential answered from evidence it had not
+  validated.** Three ways, each found by pointing the method at a live
+  fastjson 1.2.83 endpoint under vulhub and asking why it said what it said.
+
+  **Drift landed on whichever form went last.** The differential is read across
+  requests, so anything changing with the request *index* rather than with the
+  payload -- a rate limiter backing off, a filling log, a warming cache -- fell
+  on the form sent last, and noise was sent last every time. There are two
+  noise probes now, first and last, bracketing the structured pair. They are
+  one noise body sent twice, byte for byte, because the bracket asks whether
+  the endpoint answered *the same probe* alike and anything the target can see
+  a difference in it may answer a difference to: a tail beginning `n` made
+  fastjson say "error parse new" where every other tail said "syntax error".
+  A carrier whose two ends disagree is held at `inconclusive`. The engine
+  de-duplicates by payload on the per-probe path but not on the aggregate path
+  where `deser` lives, which is what makes one body twice possible; a test pins
+  that, because the bracket becomes a single request if it ever changes and a
+  drift check comparing an answer with itself passes forever.
+
+  **An endpoint echoing its input looked like a parser.** A response carrying a
+  fragment of the payload that begins at the format's magic, and not carrying
+  it in the payload-free control, is an echo and the shape channel cannot be
+  read through it -- `inconclusive`, not `negative`, because the channel was
+  unreadable rather than empty. The sentinels are anchored on the magic's
+  position in the payload rather than its start, since a probe is wrapped for
+  its injection context first and some wrappers are longer than the magic: an
+  `xml_cdata` pickle probe begins `<![CDATA[gASV`. They are matched raw, case
+  folded (because `_signature` folds case and the two halves of one oracle must
+  agree), and encoded -- base64 aligned on bytes rather than characters and
+  read from the first three-byte boundary at or past the magic, hex from the
+  magic itself.
+
+  **A format declaring no magic got a verdict anyway.** Without a magic there
+  is no sentinel, so an echoing endpoint cannot be told from a parsing one --
+  and the differential answers regardless, because the noise form is random
+  where a structured pair is not. Every shipped format declares one; a
+  `--template-file` need not, and the answer to a control that cannot be
+  validated is to say so.
+
+- **The `negative` evidence line described a comparison it had not made.** "The
+  endpoint answers all three forms alike" was asserted rather than observed.
+  It now names what actually collapsed: every form alike, a truncated stream
+  answered as a complete one, or the noise form answered as a structured one.
+
+### Withdrawn before release
+
+- **A second route through the differential, reading noise as the control.** It
+  was written for the shape fastjson has -- a format resolving its type name
+  before the parse finishes answers a truncated stream exactly as it answers a
+  complete one, which collapses the original comparison on the very endpoints
+  it exists to find -- and it did reach `needs-review` there.
+
+  It is not in this release. "Noise differs from the structured pair" has too
+  many explanations that are not a parser. Drift and echo are closed above. The
+  third is not: a filter that refuses the random payload while letting the
+  structured ones through produces the same differential, no repetition exposes
+  it because the refusal is stable, and this verdict cannot see it -- refusal
+  is judged against the probe the verdict is anchored to, and that is the
+  well-formed one.
+
+  A format of that shape is reported `negative` by the shape differential and
+  reaches `deserialization-sink` through the DNS gadget instead, which is this
+  method's real oracle and rests on a callback rather than on the shape of a
+  response. Measured on the same target: 14 callbacks, each carrying a token it
+  could only have learned by resolving the name it was handed.
 
 ## [2.45.4] — 2026-09-25
 
@@ -2497,7 +2399,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
-[2.46.0]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.46.0
+[2.45.5]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.45.5
 [2.45.4]: https://github.com/kabiri-labs/rcekit/compare/v2.45.3...v2.45.4
 [2.45.3]: https://github.com/kabiri-labs/rcekit/compare/v2.45.2...v2.45.3
 [2.45.2]: https://github.com/kabiri-labs/rcekit/compare/v2.45.1...v2.45.2
