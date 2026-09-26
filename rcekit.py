@@ -6473,12 +6473,10 @@ class DeserSink(DetectionMethod):
             # through answers 200, 200, 429 and satisfies the noise route
             # without having looked at a single payload.
             #
-            # These two are semantically the same probe: the magic followed by
-            # a random tail, which no parser can read. So an endpoint that held
-            # still must answer them alike, and one that did not is an endpoint
-            # whose answers cannot be compared across requests at all. Their
-            # tails differ because the engine de-duplicates by payload and
-            # would otherwise send the repeat once.
+            # These two are the same probe: the magic followed by a random tail,
+            # which no parser can read. So an endpoint that held still must answer
+            # them alike, and one that did not is an endpoint whose answers cannot
+            # be compared across requests at all.
             #
             # Bracketing rather than repeating every form: it costs one request
             # per ecosystem instead of four, and drift anywhere between the two
@@ -6604,8 +6602,43 @@ class DeserSink(DetectionMethod):
                     return True
         return False
 
-    @staticmethod
-    def _reflection_sentinels(magic: str, payload: str) -> List[str]:
+    def _magic_forms(self, magic: str) -> List[str]:
+        """The magic as it can appear on the wire: itself, and its escaping under
+        every rule a context declares.
+
+        A probe is escaped for its serialization context before it goes out, and
+        two of the five shipped magics are made of characters escaping moves --
+        fastjson's ``{"@type":`` leaves as ``{\\"@type\\":`` inside a JSON body,
+        which is the most ordinary way that ecosystem is delivered at all. So the
+        magic the corpus declares is not necessarily a run of the payload, and
+        anchoring on it alone finds nothing exactly where this method is most
+        used.
+
+        Read from ``contexts`` rather than from a list of rule names, so a
+        context added later is covered by having been declared."""
+        forms = [magic]
+        seen = {magic}
+        # Read defensively, as `_shape_verdict` reads `deser_probes`. A generator
+        # that declares no contexts leaves the bare magic, which is what this
+        # method did for every payload before; an AttributeError here would take
+        # the guard down and report the echo it exists to catch.
+        contexts = getattr(self.gen, "contexts", None) or {}
+        for ctx in contexts.values():
+            rule = str(ctx.get("escape", "none") or "none")
+            if rule == "none":
+                continue
+            try:
+                escaped = self.gen._escape_for_context(magic, rule)
+            except Exception:
+                # A rule that cannot render this magic contributes no form. It
+                # must not take the whole guard down with it.
+                continue
+            if escaped and escaped not in seen:
+                seen.add(escaped)
+                forms.append(escaped)
+        return forms
+
+    def _reflection_sentinels(self, magic: str, payload: str) -> List[str]:
         """What an echo of this payload would put in the response, in each
         wrapping an endpoint might apply on the way out.
 
@@ -6638,6 +6671,16 @@ class DeserSink(DetectionMethod):
         A sentinel made of the wrapper is a sentinel every echoing endpoint
         matches while echoing less than the magic.
 
+        What is anchored on is the magic *as the payload carries it*, which is
+        not always the magic the corpus declares -- see :meth:`_magic_forms`. A
+        JSON, XML, YAML or GraphQL context escapes it, and treating that as "no
+        run to anchor on" dropped every sentinel below for the bare magic alone,
+        undoing the base64 reasoning above in the one context this method is most
+        often used in. A raw escaped echo did still come back, but only because
+        ``_encoded_search`` happens to try ``unicode_escape``; that decode is one
+        level deep, so a base64-wrapped escaped echo decoded to still-escaped
+        text and matched nothing.
+
         The encoded forms still start at the payload's *first* byte, because
         that is where an endpoint encoding what it echoed starts, and a prefix
         of the encoding is only a prefix if it begins where the encoding does.
@@ -6645,20 +6688,31 @@ class DeserSink(DetectionMethod):
         magic, so they always carry it: rounding down instead would hand back a
         sentinel proving only that the wrapper came back."""
         sentinels = [magic]
-        start = payload.find(magic)
+        form, start = magic, -1
+        for candidate in self._magic_forms(magic):
+            start = payload.find(candidate)
+            if start >= 0:
+                form = candidate
+                break
         if start < 0:
             # The wrapper encoded or split the magic, so there is no run of the
             # payload to anchor on. The bare magic above is what remains, and
             # the control differential is what keeps it honest.
             return sentinels
-        through = payload[:start + len(magic) + 1]
+        if form != magic:
+            # The context escaped it. The escaped form is a sentinel in its own
+            # right: an echo comes back carrying what went out, and matching that
+            # directly is what makes a raw escaped echo recognised rather than
+            # left to whichever decode `_encoded_search` happens to attempt.
+            sentinels.append(form)
+        through = payload[:start + len(form) + 1]
         sentinels.append(through[start:])
         raw = payload.encode()
         # Hex first, because it has no alignment to satisfy: two characters per
         # byte, so the encoding of any prefix is a prefix of the encoding. It
         # therefore reaches an echo of exactly the magic, which base64 below
         # cannot.
-        for text in (payload[:start + len(magic)], through):
+        for text in (payload[:start + len(form)], through):
             hexed = text.encode().hex()
             sentinels.extend((hexed, hexed.upper()))
         # Aligned on *bytes*, which is what base64 encodes. Rounding the
@@ -6676,7 +6730,7 @@ class DeserSink(DetectionMethod):
         # remove. So it rounds up, and a base64-wrapped echo is recognised from
         # the first boundary at or past the magic's end and not before. Clamped
         # to the payload, which has nothing longer to be a prefix of.
-        need = len(payload[:start + len(magic)].encode())
+        need = len(payload[:start + len(form)].encode())
         aligned = min(-(-need // 3) * 3, len(raw))
         if aligned >= need > 0:
             sentinels.append(base64.b64encode(raw[:aligned]).decode())

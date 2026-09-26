@@ -5295,6 +5295,83 @@ class DeserShapeVerdictTestCase(unittest.TestCase):
                 with self.subTest(ecosystem=name, echo=below, wrapping="base64-below-floor"):
                     self.assertFalse(any(method._search(s, body) for s in sentinels))
 
+    def test_a_wrapped_echo_is_caught_where_the_context_escaped_the_magic(self):
+        # The same gap again, by the other door. A transport context escapes the
+        # payload before it goes out, and two of the five magics are made of
+        # characters that escaping moves: fastjson's `{"@type":` leaves as
+        # `{\"@type\":` inside a JSON body, which is the most ordinary way that
+        # ecosystem is delivered at all. `payload.find(magic)` then fails and
+        # every anchored sentinel was dropped for the bare magic alone -- so the
+        # base64 fix above was undone precisely where it mattered most.
+        #
+        # A raw escaped echo still came back, but only by luck: `_encoded_search`
+        # happens to try `unicode_escape`. Decoding is one level deep, so a
+        # base64- or hex-wrapped echo decodes to still-escaped text the bare
+        # magic cannot match, and a pure echo was reported as a fingerprint.
+        gen = RCEKit()
+        method = rcekit.DETECTION_METHODS["deser"](gen, {})
+        rules = sorted({str(ctx.get("escape", "none"))
+                        for ctx in gen.contexts.values()} - {"none"})
+        self.assertTrue(rules, "no context declares an escape rule")
+        for name, spec in gen.deser_probes.items():
+            magic = str(spec.get("magic") or "")
+            well = str(spec.get("wellformed") or "")
+            for rule in rules:
+                payload = gen._escape_for_context(well, rule)
+                escaped_magic = gen._escape_for_context(magic, rule)
+                sentinels = [s for s in method._reflection_sentinels(magic, payload) if s]
+                # Every shipped escape rule maps character by character, so the
+                # escaping of a prefix is a prefix of the escaping. Asserted,
+                # because the anchoring below rests on it.
+                self.assertTrue(payload.startswith(escaped_magic),
+                                f"{name}/{rule}: the escaped magic is not a prefix "
+                                f"of the escaped payload")
+                # The escaped magic is a sentinel in its own right, so a raw
+                # escaped echo is recognised by what it contains rather than by
+                # whichever decode `_encoded_search` happens to attempt.
+                self.assertIn(escaped_magic, sentinels,
+                              f"{name}/{rule}: the escaped magic is not a sentinel")
+                need = len(payload[:len(escaped_magic)].encode())
+                floors = {"raw": need, "hex": need, "HEX": need,
+                          "base64": -(-need // 3) * 3}
+                for length in (need, need + 1, need + 5, len(payload)):
+                    echo = payload[:length]
+                    for label, body in (
+                            ("raw", echo),
+                            ("base64", base64.b64encode(echo.encode()).decode()),
+                            ("hex", echo.encode().hex()),
+                            ("HEX", echo.encode().hex().upper())):
+                        if length < floors[label]:
+                            continue
+                        with self.subTest(ecosystem=name, escape=rule,
+                                          echo=length, wrapping=label):
+                            self.assertTrue(
+                                any(method._search(s, body) for s in sentinels),
+                                f"{name}/{rule}: a {label} echo of {length} "
+                                f"characters is not recognised as reflection")
+                below = floors["base64"] - 3
+                if below >= need:
+                    body = base64.b64encode(payload[:below].encode()).decode()
+                    with self.subTest(ecosystem=name, escape=rule, echo=below,
+                                      wrapping="base64-below-floor"):
+                        self.assertFalse(any(method._search(s, body) for s in sentinels))
+
+    def test_the_escaped_sentinels_do_not_fire_on_a_parser_either(self):
+        # The escaped forms are sentinels too, so they get the same negative
+        # direction as the bare magic: a parser resolving the type name must not
+        # match one. Measured bodies, every escape rule.
+        gen = RCEKit()
+        method = rcekit.DETECTION_METHODS["deser"](gen, {})
+        for rule in sorted({str(ctx.get("escape", "none"))
+                            for ctx in gen.contexts.values()} - {"none"}):
+            payload = gen._escape_for_context(self.WELL, rule)
+            sentinels = [s for s in method._reflection_sentinels(self.MAGIC, payload) if s]
+            for label, body in (("type error", self.TYPE_ERROR),
+                                ("syntax error", self.SYNTAX_ERROR)):
+                matched = [s for s in sentinels if method._search(s, body)]
+                self.assertEqual(matched, [],
+                                 f"{rule}/{label}: sentinel matched a parser's own answer")
+
     def test_the_sentinels_do_not_fire_on_a_parser_that_names_the_class(self):
         # The other direction, on the bodies the live target returned. A parser
         # resolving the type name puts `java.lang.String` in its error and

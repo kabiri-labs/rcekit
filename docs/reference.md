@@ -237,7 +237,11 @@ backing off, a filling log — lands on whichever form goes last. An endpoint th
 answers the same probe two different ways did not hold still, and that carrier is
 reported `inconclusive` rather than read. A response carrying the probe back is
 `inconclusive` for the same reason, decided against the payload-free control so
-that page content merely containing a format's magic is not mistaken for it.
+that page content merely containing a format's magic is not mistaken for it. The
+magic is looked for as the transport context sent it — escaped for JSON, XML,
+YAML or GraphQL where that applies — and through base64, hex, URL and HTML
+wrappings, so an endpoint that hands the probe back inside its own encoding is
+still read as an echo.
 
 Response signatures drop long digit and hex runs, so request ids and timestamps
 on an otherwise identical error page do not make every endpoint look like a
