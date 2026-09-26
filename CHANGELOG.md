@@ -8,6 +8,38 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Added
+
+- **A coverage ledger, so a measured result and a reproduced one stop looking
+  alike.** The README's CVE table had four rows and two columns that mattered,
+  and no way to say what stood behind any of them. It now carries seven columns
+  and nine rows, and the two on the right are the point: `Bench case` says
+  whether `tests/bench/` reproduces the row under Docker with its negative
+  control, and `Recording` says whether a file in `confirmation-gifs/` shows it.
+
+  Five rows are new, measured against vulhub builds during this work: OpenTSDB
+  2.4.1 (CVE-2023-25826) reaching `confirmed` through `oob` and `needs-review`
+  through `time`; HugeGraph 1.2.0 reaching `confirmed` through both `eval` and
+  `reflected`; and a Spring Boot application on fastjson 1.2.83 reaching
+  `deserialization-sink`. All five say `not yet` under `Bench case`, which is
+  the honest state and the reason that column exists.
+
+  `Advisory` is empty on three of them, deliberately. HugeGraph 1.3.0 answers
+  the arithmetic exactly as 1.2.0 does -- its Gremlin API evaluates Groovy
+  unauthenticated by design -- and fastjson resolving an `Inet4Address` is
+  documented autoType behaviour. Those rows prove a *method* against real
+  software, which is worth recording; calling them CVE reproductions would be
+  the overclaim the table exists to avoid. Both facts were measured rather than
+  assumed: the patched HugeGraph image was pulled and run.
+
+  Three tests hold the ledger to the repository: a row claiming a bench case
+  must have one, a row claiming a recording must have one, and the capability
+  rows must stay distinguishable from the CVE rows. Each was checked by making
+  the false claim and watching it fail. The tier check now reads *every* row
+  rather than only those naming an advisory, and its parser is keyed on column
+  headings rather than position -- the old one was hard-coded to four columns
+  and found nothing at all once the table grew.
+
 ### Fixed
 
 - **The comparison table named seven of the nine registered methods.** `lookup`
