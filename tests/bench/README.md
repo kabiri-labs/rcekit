@@ -128,9 +128,9 @@ README table must not outrun the engine.
 
 ## Status
 
-Both shipped cases have now been executed through this harness, against vulhub
-on Docker. The first run is what the section above says it is: validation of the
-case files, and both needed correcting.
+The first two cases were executed through this harness against vulhub on Docker,
+and that run is what the section above says a first run is: validation of the
+case files. Both needed correcting.
 
 `struts2-s2-001` reported `negative` from 700 probes **against a target that is
 vulnerable** — the benchmark's own false negative, and the one failure it exists
@@ -150,9 +150,13 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: 3/3, in 34m20s.
+`python tests/bench/runner.py --all` is green: **7/7, in 55m32s, at 2.45.5**
+(2026-09-26). The three cases above were last executed as a set at 2.36.0, and
+36 commits touched `rcekit.py` between the two runs — including the response
+decoding rewrite in 2.45.4, which is squarely in the "touching delivery" case
+for re-running this. None of them regressed against real software.
 
-Both cases set `share_target`, because neither half writes anything: the
+Both of those cases set `share_target`, because neither half writes anything: the
 vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
 the controls probe for a class that is not there or hold a timing signal at
 `needs-review`. Measured on `struts2-s2-001` against vulhub on Docker: **33.8s**
@@ -162,13 +166,19 @@ fast case is most of the run.
 
     | RCE class | Target | Method | Verdict | Control | Result |
     |---|---|---|---|---|---|
+    | Deserialization sink (fastjson autoType) | Spring Boot on fastjson 1.2.83 | `deser` | `deserialization-sink` | `negative` | pass |
+    | Expression injection (Gremlin/Groovy) | Apache HugeGraph 1.2.0 | `eval` | **`confirmed`** | `negative` | pass |
+    | OS command injection | Apache HugeGraph 1.2.0 | `reflected` | **`confirmed`** | `negative` | pass |
     | Expression-lookup sink (Log4Shell/JNDI) | Apache Solr 8.11.0 -- CVE-2021-44228 | `lookup` | `lookup-sink` | `negative` | pass |
+    | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`confirmed`** | `needs-review` | pass |
     | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
 
-That is every row in the repository README's coverage table: the `reflected`
-and `eval` confirmations, the `lookup` sink, and the `time` tier ceiling, which
-is the Webmin control here.
+That is every row in the repository README's coverage ledger. 7 cases cover its
+9 rows, because the two `time` rows are the *control* halves of the Webmin and
+OpenTSDB cases rather than cases of their own — a tier ceiling is a claim about
+a method that must not be promoted, and the place that claim belongs is a
+control.
 
 ### The fourth row now has one, and it needed the harness to grow
 
@@ -201,12 +211,80 @@ That claim is what `lookup` was added for, and until this case ran it rested on
 a fixture. It now rests on Solr 8.11.0.
 
 
+### Four more cases, and what each one had to get right
+
+The four added at 2.45.5 cover the rows that had been measured by hand. None of
+them passed on the first run, and not one of the failures was the tool's.
+
+**`opentsdb-cve-2023-25826`** needed the target to hold *state* before a probe
+could reach the sink. The injection point is the `key=` parameter, which
+OpenTSDB writes into a gnuplot script — but with no data for the queried metric
+the request dies in `TSQuery.buildQueries` and answers 500 long before gnuplot
+runs. Pointed at an empty target, the tool reports `negative` against a build
+that is vulnerable.
+
+There is no `setup` hook here and the case does not need one. A one-shot service
+in the override writes the data point, and `wait_for` polls the same query
+without an injection — 200 once the point is in, 500 while the metric is absent.
+The race closes on a *condition* rather than on a sleep, which is the whole
+reason `wait_for` exists.
+
+**`fastjson-1.2.83`** is the `deser` row, and it does not rest on the shape
+oracle: fastjson answers a truncated stream exactly as it answers a complete one,
+so the shape differential reports `negative` here by design and the DNS gadget is
+what reaches the tier. Its control runs `eval` through the same endpoint and must
+stay `negative` — parsing an object graph is not evaluating an expression.
+
+**`hugegraph-gremlin-eval` and `hugegraph-gremlin-shell`** are two rows against
+one target, and separating them is the point.
+
+The Gremlin API evaluates Groovy unauthenticated by design, so `eval` confirms
+and the row carries no advisory: 1.3.0 answers the arithmetic exactly as 1.2.0
+does, and the ProcessBuilder body reaches a shell on 1.3.0 too — both measured
+against the patched image rather than assumed.
+
+The shell case **must** use the ProcessBuilder body, and writing it against the
+plain endpoint would have produced a green case reproducing a false claim. On the
+plain endpoint `reflected` also confirms, and wrongly: Groovy reads `; expr A + B`
+as the command expression `expr(A + B)`, computes the sum, fails to resolve the
+method and echoes the result in its error. No shell runs. What earns the
+OS-command class is not the arithmetic but the substitution collapse — the
+response carrying `$(echo TAG)` resolved, at HTTP 200, which only a POSIX shell
+produces.
+
+Readiness cost three attempts and is worth writing down. HugeGraph runs two
+servers: the REST API on 8080, and the Gremlin Server — which every probe here
+reaches — as a separate process on 8182 that comes up later and binds the
+container's loopback, so it cannot be polled from outside. `/versions` answers
+200 at t=12s and `/graphs` at t=18s while the engine is still refusing with
+`Connect to 127.0.0.1:8182 failed: Connection refused` wrapped in a 500; all
+three agree at t=21s. A case started on `/graphs` ran 240 of 468 probes against
+an engine that was not listening and confirmed 2 where a settled target confirms
+10 — a pass by luck, and the next slower machine would have read `negative`
+against a target that is vulnerable. A GET on `/gremlin` goes through the engine,
+so that is what both cases wait on.
+
+**What the harness could not tell us.** Three of these first runs failed with
+`compose up failed` and nothing else: a leftover network holding the case's
+subnet, and a container from an earlier measurement holding port 5005. The real
+messages — `Pool overlaps with other one on this address space`, `Bind for
+0.0.0.0:5005 failed: port is already allocated` — never reached the report, so
+each one had to be reproduced by hand to find out. For a harness whose whole job
+is not to mistake one failure for another, "the target could not start" and "the
+tool did not confirm" should not look alike.
+
 ### `boolean` ships without a case, and this is the reason
 
 `--methods boolean` reads a sink that evaluates a predicate and renders nothing
 of it. The target that shape was designed against is MongoDB `$where`, and the
-case would be a vulhub Mongo image with an application in front of it -- which
-needs a container runtime this build environment does not have.
+case would be a Mongo image with an application in front of it.
+
+The runtime is no longer what stands in the way -- 7 cases run under Docker at
+2.45.5 -- so the honest statement is narrower: the case is not written yet. The
+candidate is Chartbrew CVE-2026-25887, where a Mongo query reaches `Function()`
+behind authentication, across a 4-container stack. `boolean` is one of 3 methods
+with no case; `file` and `write` are the others, and each is queued against a
+named target rather than left open.
 
 So the method ships on its unit suite, as the contribution guide allows, and the
 gap is worth stating precisely rather than leaving implied. What a fixture

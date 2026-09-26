@@ -31,11 +31,11 @@ against a payload-free control:
 | Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`confirmed`** | yes | GIF |
 | Apache Solr 8.11.0 (Log4j 2.14.1) | CVE-2021-44228 | Expression-lookup (Log4Shell/JNDI) | `lookup` | `lookup-sink` | yes | GIF |
 | Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `needs-review` | as a control | GIF |
-| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`confirmed`** | not yet | — |
-| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `needs-review` | not yet | — |
-| Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | not yet | — |
-| Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`confirmed`** | not yet | — |
-| Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | not yet | — |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`confirmed`** | yes | — |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `needs-review` | as a control | — |
+| Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | yes | — |
+| Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`confirmed`** | yes | — |
+| Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -45,12 +45,11 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. 4 rows do; `python tests/bench/runner.py --all` was last green at
-**2.36.0** (2026-09-20), 3/3 cases. That is a point-in-time claim, not a
-continuous one: the benchmark runs on a cadence, not on every change. The 5 rows
-marked *not yet* were measured by hand against the same vulhub builds, and nobody
-can re-run them on demand. That is a weaker thing, and saying so is why the
-column exists.
+control. All 9 rows do; `python tests/bench/runner.py --all` was last green at
+**2.45.5** (2026-09-26), 7/7 cases in 55m32s. That is a point-in-time claim, not
+a continuous one: the benchmark runs on a cadence, not on every change. A row
+reading *as a control* is reproduced by the control half of another row's case,
+which is the half that describes it.
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
 HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers

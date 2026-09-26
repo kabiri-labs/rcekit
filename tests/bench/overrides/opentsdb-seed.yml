@@ -1,0 +1,59 @@
+# Bench-only override for vulhub's opentsdb/CVE-2023-25826.
+#
+# Two things the stock compose file does not provide.
+#
+# A subnet. `oob` proves the injection through a callback, and the target cannot
+# reach a listener on the host, so RCEKit runs in a container on the target's own
+# network -- and a fixed address can only be assigned on a user-configured
+# subnet.
+#
+# A metric. The sink is the `key=` parameter, which OpenTSDB writes into a
+# gnuplot script, so a probe only reaches it once a graph can be rendered at all.
+# With no data for the queried metric the request fails in
+# `TSQuery.buildQueries` and answers 500 long before gnuplot is invoked: the tool
+# would report `negative` against a target that is vulnerable, which is the one
+# failure a benchmark must not produce. So one data point is written first.
+#
+# The case's `wait_for` polls the same query without an injection, which answers
+# 200 only once that point is in -- 500 while the metric is absent. That is what
+# keeps the seeding from racing the run rather than a sleep.
+services:
+  opentsdb:
+    networks:
+      - benchnet
+
+  # Stock Python, the same image the run itself uses, so nothing extra is pulled
+  # and no shell quoting stands between this file and the request it makes.
+  seed:
+    image: python:3.11-slim
+    depends_on:
+      - opentsdb
+    networks:
+      - benchnet
+    restart: "no"
+    entrypoint:
+      - python
+      - -c
+      - |
+        import json, time, urllib.request
+        body = json.dumps({"metric": "sys.cpu.nice", "timestamp": 1346846400,
+                           "value": 20,
+                           "tags": {"host": "web01", "dc": "lga"}}).encode()
+        for attempt in range(120):
+            try:
+                urllib.request.urlopen(urllib.request.Request(
+                    "http://opentsdb:4242/api/put/", data=body,
+                    headers={"Content-Type": "application/json"}), timeout=5)
+                print("seeded sys.cpu.nice", flush=True)
+                break
+            except Exception as exc:
+                print("waiting for opentsdb:", exc, flush=True)
+                time.sleep(2)
+        else:
+            raise SystemExit("could not write the seed point; the case cannot run")
+
+networks:
+  benchnet:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/24
