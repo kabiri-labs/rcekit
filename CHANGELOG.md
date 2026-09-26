@@ -265,6 +265,43 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [2.45.7] — 2026-09-26
+
+### Fixed
+
+- **The `write` product overflowed a 32-bit int, so the method reported
+  `negative` on more than half of the targets it was built for.** RCEKit
+  computes `a*b` in Python, where integers do not overflow. The interpreter on
+  the other side usually is not Python: JSP and ASPX are 3 of the 5 languages
+  this method writes, and both evaluate the expression as a signed 32-bit int.
+  A product past 2**31-1 therefore came back wrapped, disagreed with the value
+  RCEKit had computed, and the run reported `negative` against a target that is
+  fully exploitable -- the one failure this tool exists not to produce.
+
+  Measured against Tomcat 8.5.19 (CVE-2017-12615), writing the probe by PUT and
+  fetching it back. `97233*38786` was served as `-523688158` where RCEKit
+  expected `3771279138`; `4721*8093` came back as `38207053`, exactly. The
+  operand range drew a pair whose product overflows in **56%** of runs, and the
+  operands are drawn once per run, so there was no second probe to recover: more
+  than half of all runs against a JVM or .NET target lost.
+
+  The operands are now 4 digits apiece, which caps the product at 99,980,001 --
+  the range `eval` has always used against these same targets. Nothing about the
+  oracle changes: the product is still bracketed by two random tags and still
+  differenced against a payload-free control, which is what makes it unforgeable
+  rather than its magnitude.
+
+  The same run confirms now. `RKYBRDH<%=3253*8793%>RKICSMR` came back as
+  `RKYBRDH28603629RKICSMR` from the fetched file, and `write` reached
+  `confirmed` against real software for the first time.
+
+  Two tests, both written first and watched to fail: the drawn operands multiply
+  to something a signed 32-bit int can hold, across 400 seeds; and a store whose
+  evaluator wraps to 32 bits the way a JVM does reaches `confirmed` rather than
+  `negative`. A third test had pinned the operand width with a hard-coded
+  `\d{5}`; it reads the declared range now and asserts the operands fall inside
+  it, which the digit count had only implied.
+
 ## [2.45.6] — 2026-09-26
 
 ### Fixed
@@ -2516,6 +2553,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.7]: https://github.com/kabiri-labs/rcekit/compare/v2.45.6...v2.45.7
 [2.45.6]: https://github.com/kabiri-labs/rcekit/compare/v2.45.5...v2.45.6
 [2.45.5]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.45.5
 [2.45.4]: https://github.com/kabiri-labs/rcekit/compare/v2.45.3...v2.45.4
