@@ -91,6 +91,53 @@ def links_of(path):
     return LINK_RE.findall(body)
 
 
+LEDGER_ROW_RE = re.compile(r"^\|(.+)\|\s*$")
+LEDGER_TIER_RE = re.compile(r"`([a-z][a-z-]*)`")
+LEDGER_ADVISORY_RE = re.compile(r"(CVE-\d{4}-\d{4,}|S2-\d+)")
+
+
+def coverage_ledger(body):
+    """The README's coverage ledger, as a list of rows keyed by column heading.
+
+    Keyed rather than positional, which `MethodTableTierTestCase` already
+    learned the hard way: a table that grows a column shifts every claim after
+    it, and a positional reader either stops finding the table or silently
+    starts examining the wrong cell. This one grew from four columns to seven
+    when the capability rows arrived, and the old reader found nothing at all.
+
+    Every row is returned, including the ones whose Advisory is an em-dash.
+    Those prove a method against real software rather than reproducing a CVE,
+    and their verdict is a claim about the code exactly as the others' is.
+    """
+    rows, headers = [], None
+    for line in body.splitlines():
+        match = LEDGER_ROW_RE.match(line)
+        if not match:
+            headers = None
+            continue
+        cells = row_cells(match.group(1))
+        if "Verdict" in cells and "`--methods`" in cells:
+            headers = cells
+            continue
+        if not headers or len(cells) != len(headers) or set(cells[0]) <= set("- :"):
+            continue
+        row = dict(zip(headers, cells))
+        method = LEDGER_TIER_RE.search(row["`--methods`"])
+        tier = LEDGER_TIER_RE.search(row["Verdict"])
+        if not (method and tier):
+            continue
+        advisory = LEDGER_ADVISORY_RE.search(row.get("Advisory", ""))
+        rows.append({
+            "target": row.get("Target", ""),
+            "advisory": advisory.group(1) if advisory else None,
+            "method": method.group(1),
+            "tier": tier.group(1),
+            "bench": row.get("Bench case", ""),
+            "recording": row.get("Recording", ""),
+        })
+    return rows
+
+
 class VersionBadgeTestCase(unittest.TestCase):
     def test_readme_badge_matches_dunder_version(self):
         """A stale badge misreports which release a reader is looking at."""
@@ -373,30 +420,14 @@ class DemoTierTestCase(unittest.TestCase):
     def setUp(self):
         self.body = README.read_text(encoding="utf-8")
         self.rows = self._cve_table()
-        self.assertTrue(self.rows, "the README's CVE table was not found")
+        self.assertTrue(self.rows, "the README's coverage ledger was not found")
+        # The recordings are cross-checked by advisory, so they need the subset
+        # of rows that name one. The tier check reads every row.
+        self.by_advisory = {(row["advisory"], row["method"]): row["tier"]
+                            for row in self.rows if row["advisory"]}
 
     def _cve_table(self):
-        """The CVE table as {(advisory, method): tier}, read from the one table
-        whose header ends in a Verdict column."""
-        rows = {}
-        in_table = False
-        for line in self.body.splitlines():
-            match = self.ROW_RE.match(line)
-            if not match:
-                in_table = False
-                continue
-            cells = row_cells(match.group(1))
-            if len(cells) == 4 and cells[3] == "Verdict":
-                in_table = True
-                continue
-            if not in_table or len(cells) != 4 or set(cells[0]) <= set("- :"):
-                continue
-            method = self.TIER_RE.search(cells[1])
-            advisory = self.ADVISORY_RE.search(cells[2])
-            tier = self.TIER_RE.search(cells[3])
-            if method and advisory and tier:
-                rows[(advisory.group(1), method.group(1))] = tier.group(1)
-        return rows
+        return coverage_ledger(self.body)
 
     def test_every_row_states_the_tier_its_method_reports(self):
         """The table is the source the heading and the alt text are checked
@@ -416,16 +447,17 @@ class DemoTierTestCase(unittest.TestCase):
         at its ceiling. A row that genuinely belongs below one should widen
         this deliberately -- the failure says so -- rather than be waved
         through by a rule loose enough to miss the case above."""
-        for (advisory, method), tier in self.rows.items():
-            with self.subTest(advisory=advisory, method=method):
-                self.assertIn(method, rcekit.DETECTION_METHODS)
-                ceiling = rcekit.DETECTION_METHODS[method].tier
+        for row in self.rows:
+            label = row["advisory"] or row["target"]
+            with self.subTest(row=label, method=row["method"]):
+                self.assertIn(row["method"], rcekit.DETECTION_METHODS)
+                ceiling = rcekit.DETECTION_METHODS[row["method"]].tier
                 self.assertEqual(
-                    tier, ceiling,
-                    f"the {advisory} row says `{method}` reached {tier}, but that "
-                    f"method's tier is {ceiling}. If the row is right and the "
-                    "demonstration really sat below the method's ceiling, widen this "
-                    "test on purpose")
+                    row["tier"], ceiling,
+                    f"the {label} row says `{row['method']}` reached {row['tier']}, "
+                    f"but that method's tier is {ceiling}. If the row is right and "
+                    "the demonstration really sat below the method's ceiling, widen "
+                    "this test on purpose")
 
     def test_every_demo_heading_matches_its_row_in_the_table(self):
         seen = 0
@@ -436,10 +468,10 @@ class DemoTierTestCase(unittest.TestCase):
                 continue
             seen += 1
             with self.subTest(summary=summary):
-                candidates = {key: tier for key, tier in self.rows.items()
+                candidates = {key: tier for key, tier in self.by_advisory.items()
                               if key[0] == advisory.group(1)}
                 self.assertTrue(candidates,
-                                "the demo names an advisory the CVE table does not")
+                                "the demo names an advisory the ledger does not")
                 methods = [name for name in self.METHOD_RE.findall(summary)
                            if name in rcekit.DETECTION_METHODS]
                 if methods:
@@ -482,6 +514,101 @@ class DemoTierTestCase(unittest.TestCase):
                     f"a {heading_tier.group(1)} recording is described as confirming: "
                     f"{alt.group(1)}")
         self.assertGreaterEqual(seen, 1, "no sub-confirmed recordings were checked")
+
+
+class CoverageLedgerTestCase(unittest.TestCase):
+    """The ledger's two rightmost columns are claims about the repository, and
+    they are the ones a reader checks the rest of the table against.
+
+    `Bench case` says a run reproduces the row. `Recording` says a file in
+    `confirmation-gifs/` shows it. Both are trivially checkable and both are
+    exactly the kind of claim that rots: a case renamed, a recording deleted,
+    a row added by hand with the column filled in out of optimism.
+    """
+
+    BENCH_CASES = REPO_ROOT / "tests" / "bench" / "cases"
+    GIF_DIR = REPO_ROOT / "confirmation-gifs"
+
+    def setUp(self):
+        self.rows = coverage_ledger(README.read_text(encoding="utf-8"))
+        self.assertTrue(self.rows, "the coverage ledger was not found")
+
+    def _bench_targets(self):
+        import json
+        targets = []
+        for path in sorted(self.BENCH_CASES.glob("*.json")):
+            targets.append(json.loads(path.read_text(encoding="utf-8"))["target"])
+        return targets
+
+    def test_a_row_claiming_a_bench_case_has_one(self):
+        """`yes` in that column is checkable, so it is checked. A case renamed
+        or removed leaves the row asserting a reproduction nobody can run."""
+        cases = " | ".join(self._bench_targets())
+        for row in self.rows:
+            claimed = row["bench"].strip().lower()
+            if not claimed.startswith(("yes", "as a control")):
+                continue
+            # The case files name their target the way the ledger's first two
+            # columns do together, so the advisory is the reliable join.
+            with self.subTest(target=row["target"], method=row["method"]):
+                self.assertTrue(
+                    row["advisory"] and row["advisory"] in cases,
+                    f"{row['target']} claims a bench case; "
+                    f"tests/bench/cases/ has {self._bench_targets()}")
+
+    def test_a_row_claiming_a_recording_has_one(self):
+        gifs = {path.name for path in self.GIF_DIR.glob("*.gif")}
+        self.assertTrue(gifs, "confirmation-gifs/ holds no recordings")
+        for row in self.rows:
+            if row["recording"].strip() in ("", "—", "-"):
+                continue
+            with self.subTest(target=row["target"], method=row["method"]):
+                # Joined on the advisory rather than the method, because the
+                # filenames record which *channel* was filmed and that is not
+                # always the method the row now names. `lookup` was added after
+                # the Log4Shell recording was made, and the file is still
+                # `oob-log4shell-…`: the run it shows is the same callback, and
+                # renaming it would break every link that points at it.
+                key = (row["advisory"] or "").lower().replace("-", "")
+                wanted = [name for name in gifs
+                          if key and key in name.lower().replace("-", "")]
+                self.assertTrue(
+                    wanted,
+                    f"{row['target']} / `{row['method']}` claims a recording; "
+                    f"confirmation-gifs/ has {sorted(gifs)}")
+
+    def test_the_counts_in_the_prose_match_the_table(self):
+        """The paragraphs under the ledger quote figures — how many rows have a
+        bench case, how many do not. A number written by hand beside a table
+        that grows is a number that goes stale on the next row, and the prose is
+        what a reader trusts without counting."""
+        body = README.read_text(encoding="utf-8")
+        with_case = sum(1 for row in self.rows
+                        if row["bench"].strip().lower().startswith(("yes", "as a control")))
+        without = sum(1 for row in self.rows
+                      if row["bench"].strip().lower().startswith("not yet"))
+        self.assertEqual(with_case + without, len(self.rows),
+                         "a Bench case cell says something this test cannot read")
+        # Whitespace collapsed, so a sentence is found whether or not it happens
+        # to wrap across a line.
+        flat = " ".join(body.split())
+        self.assertIn(f"{with_case} rows do;", flat,
+                      f"the prose does not say {with_case} rows have a bench case")
+        self.assertIn(f"The {without} rows marked *not yet*", flat,
+                      f"the prose does not say {without} rows lack one")
+
+    def test_a_row_with_no_advisory_says_so_rather_than_inventing_one(self):
+        """A capability row proves a method against real software; it does not
+        reproduce a CVE. The column is `—` for those on purpose, and the prose
+        under the table explains why for each. This keeps the two kinds of row
+        distinguishable instead of letting a blank read as an oversight."""
+        without = [row for row in self.rows if not row["advisory"]]
+        self.assertTrue(
+            without,
+            "no capability rows in the ledger — if they were removed, remove "
+            "this test and the paragraph explaining the empty column with them")
+        body = README.read_text(encoding="utf-8")
+        self.assertIn("Advisory** is empty where the verdict does not depend on", body)
 
 
 class TableClaimParsingTestCase(unittest.TestCase):

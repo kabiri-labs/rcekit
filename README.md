@@ -21,21 +21,45 @@ clean.
 ## Proof, not "maybe"
 
 RCEKit confirms RCE through **multiple methods** under one CLI. Below it is pointed
-at **real, publicly-documented CVEs** in production software — each verdict
-differenced against a payload-free control:
+at real production software — publicly-documented CVEs, and builds that
+demonstrate a method without reproducing one — with every verdict differenced
+against a payload-free control:
 
-| RCE class | `--methods` | Real-world target | Verdict |
-|---|---|---|---|
-| OS command injection (results-based) | `reflected` | Webmin 1.910 — CVE-2019-15107 | **`confirmed`** |
-| Expression injection (OGNL) | `eval` | Apache Struts2 — S2-001 | **`confirmed`** |
-| Expression-lookup (Log4Shell/JNDI) | `lookup` | Apache Solr 8.11.0 (Log4j 2.14.1) — CVE-2021-44228 | `lookup-sink` |
-| Blind command injection (no output) | `time` | Webmin 1.910 — CVE-2019-15107 | `needs-review` |
+| Target | Advisory | RCE class | `--methods` | Verdict | Bench case | Recording |
+|---|---|---|---|---|---|---|
+| Webmin 1.910 | CVE-2019-15107 | OS command injection (results-based) | `reflected` | **`confirmed`** | yes | GIF |
+| Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`confirmed`** | yes | GIF |
+| Apache Solr 8.11.0 (Log4j 2.14.1) | CVE-2021-44228 | Expression-lookup (Log4Shell/JNDI) | `lookup` | `lookup-sink` | yes | GIF |
+| Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `needs-review` | as a control | GIF |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`confirmed`** | not yet | — |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `needs-review` | not yet | — |
+| Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | not yet | — |
+| Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`confirmed`** | not yet | — |
+| Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | not yet | — |
 
-Every row is reproduced by [`tests/bench/`](tests/bench/), which runs RCEKit
-against these builds under Docker and checks the verdict **and** its negative
-control. Last run green at **2.36.0** (2026-09-20): 3/3 cases. That is a
-point-in-time claim, not a continuous one -- the benchmark is run on a cadence,
-not on every change.
+3 of those columns say how much weight the row carries, and they are the ones
+worth reading before the rest.
+
+**Verdict** is what the run reported against that build. Measured, not what the
+method could reach in principle.
+
+**Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
+bringing the target up under Docker and checking the verdict **and** its negative
+control. 4 rows do; `python tests/bench/runner.py --all` was last green at
+**2.36.0** (2026-09-20), 3/3 cases. That is a point-in-time claim, not a
+continuous one: the benchmark runs on a cadence, not on every change. The 5 rows
+marked *not yet* were measured by hand against the same vulhub builds, and nobody
+can re-run them on demand. That is a weaker thing, and saying so is why the
+column exists.
+
+**Advisory** is empty where the verdict does not depend on the patch. Both
+HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers
+the arithmetic exactly as 1.2.0 does — its Gremlin API evaluates Groovy
+unauthenticated by design, which was checked by pulling the patched image and
+running it — and fastjson resolving an `Inet4Address` is documented autoType
+behaviour. Those rows prove a **method** against real software, which is worth
+recording; calling them CVE reproductions would be the overclaim this table
+exists to avoid.
 
 Each control is the row's real test. Struts2 probed with `reflected` comes back
 `negative`, because S2-001 re-evaluates OGNL and there is no shell behind it.

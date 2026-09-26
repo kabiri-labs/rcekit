@@ -119,10 +119,20 @@ To add one:
    bench case proves it reaches that verdict against the real software. It is
    not a per-PR gate, and a method whose case cannot run yet still ships --
    with the reason written down in `tests/bench/README.md`, not left implicit.
-7. Do not add a row to the README's **CVE table** without a bench run behind it.
-   That table is the reproduced claim, and it carries the version it was last
-   verified at. The **methods table** describes capability, and the unit suite
-   is what backs that.
+7. A row in the README's **coverage ledger** needs a run behind it, and its
+   `Bench case` column has to say which kind. `yes` means `tests/bench/`
+   reproduces it, target and negative control; that is the strong claim and it
+   carries the version it was last verified at. `not yet` means it was measured
+   by hand against the same build and nobody can re-run it on demand — honest,
+   weaker, and the reason the column is there. Never fill the column in ahead of
+   the case: a test reads it against `tests/bench/cases/` and
+   `confirmation-gifs/`.
+
+   Leave the `Advisory` column empty where the verdict does not depend on the
+   patch. A row proving a method against real software is worth recording;
+   labelling it with a CVE it does not reproduce is the overclaim the ledger
+   exists to prevent. The **methods table** describes capability in the
+   abstract, and the unit suite is what backs that.
 
 ## Adding a bench case
 
