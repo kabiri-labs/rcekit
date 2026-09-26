@@ -8874,6 +8874,70 @@ class WriteThenExecuteTestCase(unittest.TestCase):
         return (method or self._method()).build_probes(
             record or self.rec, _random.Random(seed))
 
+    def test_the_product_fits_a_signed_32_bit_int(self):
+        """The interpreter on the other side is usually not Python.
+
+        JSP and ASPX are 3 of the 5 languages this method writes, and both
+        evaluate `a*b` as a 32-bit signed int. RCEKit computes the same
+        expression in Python, where it does not overflow, so a product past
+        2**31-1 makes the two disagree and the run reports `negative` against a
+        target that is fully exploitable.
+
+        Measured against Tomcat 8.5.19 (CVE-2017-12615), writing the probe by
+        PUT and fetching it back: `97233*38786` came back `-523688158` where
+        RCEKit expected `3771279138`, and `4721*8093` came back `38207053`,
+        matching exactly. With the old range, 56% of runs drew a pair that
+        overflows -- and the operands are drawn once per run, so there is no
+        second probe to save it.
+
+        Many seeds, because one is a sample of a range and the claim is about
+        the range."""
+        ceiling = 2 ** 31 - 1
+        import random as _random
+        for seed in range(400):
+            method = self._method(write_langs=["jsp"])
+            method.build_probes(self.rec, _random.Random(seed))
+            a, b, _t1, _t2 = method._operands
+            with self.subTest(seed=seed):
+                self.assertLessEqual(
+                    a * b, ceiling,
+                    f"seed {seed}: {a}*{b} = {a * b} overflows a signed 32-bit "
+                    f"int, so a JSP or ASPX target computes something else")
+
+    def test_a_target_whose_ints_are_32_bit_still_confirms(self):
+        """The same claim from the outside: a store that interprets the file the
+        way a JVM does confirms rather than coming back negative.
+
+        The route is the one that failed on Tomcat -- write the probe, fetch it
+        back, read the product -- with the evaluator wrapping to 32 bits the way
+        `<%= %>` does. Nothing here is about the delimiters; it is about the
+        width of the integer behind them."""
+        def route(method, path, params, headers, body):
+            if path == self.read_url:
+                content = store.get("file")
+                if content is None:
+                    return 404, "Not Found"
+
+                def wrap(match):
+                    product = int(match.group(1)) * int(match.group(2))
+                    # Two's-complement wrap into a signed 32-bit int, which is
+                    # what a JVM does and what Python does not.
+                    return str((product + 2 ** 31) % 2 ** 32 - 2 ** 31)
+
+                return 200, re.sub(r"<%=\s*(\d+)\*(\d+)\s*%>", wrap, content)
+            store["file"] = params.get("content", "")
+            return 200, "stored"
+
+        store = {}
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/upload?content=FUZZ", methods=["write"],
+                config={"write_read_url": base + self.read_url})
+        self.assertEqual(
+            rcekit.overall_detection_verdict(results), "confirmed",
+            "a target whose ints are 32 bits did not confirm: "
+            + "; ".join(r.get("detail", "") for r in results))
+
     def test_the_written_probe_carries_no_whitespace(self):
         """A sink that splits its input on whitespace gets a broken file.
 
@@ -8948,10 +9012,21 @@ class WriteThenExecuteTestCase(unittest.TestCase):
             self.assertFalse(probe.payload.startswith(("; ", "| ", "&& ")))
 
     def test_the_product_is_computed_locally_from_random_operands(self):
+        low = rcekit.WriteThenExecute.OPERAND_LOW
+        high = rcekit.WriteThenExecute.OPERAND_HIGH
         for probe in self._probes():
-            operands = re.search(r"(\d{5})\*(\d{5})", probe.payload)
+            operands = re.search(r"(\d+)\*(\d+)", probe.payload)
             self.assertIsNotNone(operands, probe.payload)
-            product = int(operands.group(1)) * int(operands.group(2))
+            a, b = int(operands.group(1)), int(operands.group(2))
+            # Read off the declared range rather than a hard-coded digit count,
+            # which pinned the width and not the behaviour -- and assert the
+            # range, which the width only implied, so operands cannot drift out
+            # of it unnoticed.
+            for operand in (a, b):
+                self.assertTrue(low <= operand <= high,
+                                f"{operand} is outside the declared operand "
+                                f"range {low}-{high}")
+            product = a * b
             self.assertIn(str(product), probe.expected)
             # Reflection returns the one-liner, never the product.
             self.assertNotIn(str(product), probe.payload)

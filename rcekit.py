@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.6"
+__version__ = "2.45.7"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -5105,6 +5105,26 @@ class WriteThenExecute(DetectionMethod):
     # or XML body has to survive that serialization to land intact.
     PLAIN_CONTEXT = "raw"
 
+    # Operands for the product, and the bound is the interpreter's, not ours.
+    # RCEKit computes `a*b` in Python, where integers do not overflow; the thing
+    # on the other side usually does. JSP and ASPX are 3 of the 5 languages this
+    # method writes and both evaluate it as a signed 32-bit int, so a product
+    # past 2**31-1 comes back wrapped and the run reports `negative` against a
+    # target that is fully exploitable.
+    #
+    # Measured against Tomcat 8.5.19 (CVE-2017-12615): `97233*38786` was served
+    # as `-523688158` where RCEKit expected `3771279138`, while `4721*8093` came
+    # back exactly. The earlier range drew a pair whose product overflows in 56%
+    # of runs, and the operands are drawn once per run -- so more than half of
+    # all runs against a JVM or .NET target lost, with no second probe to
+    # recover.
+    #
+    # 4 digits apiece keeps the product under 10**8, comfortably inside the
+    # bound, and is the range `eval` has always used against these same targets.
+    # The product is not what makes this unforgeable on its own: it is bracketed
+    # by two random tags and differenced against a payload-free control.
+    OPERAND_LOW, OPERAND_HIGH = 1000, 9999
+
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
         super().__init__(gen, config)
         # Operands are drawn once per method instance rather than per carrier.
@@ -5114,6 +5134,9 @@ class WriteThenExecute(DetectionMethod):
         # -- for a state-changing method that is not a cost, it is a blast
         # radius. Still fresh per run, which is what makes the product
         # unforgeable.
+        #
+        # Drawing once also means a single bad draw loses the whole run, which
+        # is why the range below is chosen the way it is -- see OPERAND_RANGE.
         self._operands: Optional[Tuple[int, int, str, str]] = None
 
     def _channel(self) -> Optional[str]:
@@ -5157,7 +5180,8 @@ class WriteThenExecute(DetectionMethod):
         if read_url is None:
             return []
         if self._operands is None:
-            self._operands = (rng.randint(10000, 99999), rng.randint(10000, 99999),
+            self._operands = (rng.randint(self.OPERAND_LOW, self.OPERAND_HIGH),
+                              rng.randint(self.OPERAND_LOW, self.OPERAND_HIGH),
                               self._tag(rng), self._tag(rng))
         a, b, t1, t2 = self._operands
         expr = f"{a}*{b}"
