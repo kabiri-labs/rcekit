@@ -550,7 +550,14 @@ class CoverageLedgerTestCase(unittest.TestCase):
         The vulnerable half is `expect_method` / `expect`. The control half
         names its method inside an argv list, so it is read out of there rather
         than assumed -- a control that stopped passing `--methods` would
-        otherwise look like a control for whatever the row claimed."""
+        otherwise look like a control for whatever the row claimed.
+
+        `target` is split on the em dash the cases spell it with, so the build
+        and the advisory are compared as whole strings. Containment is not
+        enough and this was written that way first: `OpenTSDB 2.4.1` is a
+        substring of `OpenTSDB 2.4.10`, so a case repointed at the next patch
+        release went on satisfying the row for the previous one -- the exact
+        mismatch the join exists to catch."""
         import json
         cases = []
         for path in sorted(self.BENCH_CASES.glob("*.json")):
@@ -559,9 +566,13 @@ class CoverageLedgerTestCase(unittest.TestCase):
             argv = control.get("invocation") or []
             control_methods = [argv[i + 1] for i, arg in enumerate(argv)
                                if arg == "--methods" and i + 1 < len(argv)]
+            target = case.get("target", "")
+            build, _, advisory = target.partition("—")
             cases.append({
                 "name": path.name,
-                "target": case.get("target", ""),
+                "target": target,
+                "build": build.strip(),
+                "advisory": advisory.strip(),
                 "method": (case.get("expect_method") or "").split("/")[0],
                 "expect": case.get("expect", ""),
                 "control_methods": control_methods,
@@ -581,15 +592,23 @@ class CoverageLedgerTestCase(unittest.TestCase):
         and the verdict now, and reads the control half for an `as a control`
         row, because that is the half such a row is describing.
 
-        The case is found by **target**, with the advisory required on top of it
-        where the row names one. Joining on the advisory alone was both too weak
-        and too strong. Too weak: a row for one target was satisfied by a case
-        for a different target that happened to share the advisory. Too strong:
-        the ledger deliberately leaves `Advisory` empty where the verdict does
-        not depend on the patch, and a capability row was then forbidden from
-        naming a case at all -- so a case could be written and run, and the row
-        it reproduces could not say so. Both directions verified by building
-        them."""
+        The case is found by **build and advisory, both compared whole**.
+        Joining on the advisory alone was too weak in one direction and too
+        strong in the other. Too weak: a row for one target was satisfied by a
+        case for a different target that happened to share the advisory. Too
+        strong: the ledger deliberately leaves `Advisory` empty where the
+        verdict does not depend on the patch, and a capability row was then
+        forbidden from naming a case at all -- so a case could be written and
+        run, and the row it reproduces could not say so.
+
+        Substring containment was the next thing tried and was wrong for the
+        same reason the advisory join was: `OpenTSDB 2.4.1` is contained in
+        `OpenTSDB 2.4.10`, so a case moved to the next patch release kept
+        satisfying the row for the previous one, which is a ledger claiming
+        coverage from a build nobody ran. The advisory has to match whole too,
+        in both directions: a case naming a CVE cannot answer for a capability
+        row that names none, because the two disagree about what is being
+        reproduced. Every direction verified by building it."""
         cases = self._bench_cases()
         self.assertTrue(cases, "tests/bench/cases/ holds no cases")
         for row in self.rows:
@@ -598,8 +617,8 @@ class CoverageLedgerTestCase(unittest.TestCase):
                 continue
             with self.subTest(target=row["target"], method=row["method"]):
                 near = [c for c in cases
-                        if row["target"] in c["target"]
-                        and (not row["advisory"] or row["advisory"] in c["target"])]
+                        if c["build"] == row["target"]
+                        and c["advisory"] == (row["advisory"] or "")]
                 wanted = " / ".join(x for x in (row["target"], row["advisory"]) if x)
                 self.assertTrue(
                     near,
