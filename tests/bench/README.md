@@ -292,10 +292,16 @@ vulnerable response is computed -- a PUT answers 204 with an empty body -- so
 together.
 
 `share_target` is deliberately absent, which is the first case here to need that.
-Both halves write files into the web root -- the control left 959 of them -- and
-the harness's own rule is never to share a target whose halves write. A fresh
-container costs 3 seconds here, which is not worth trading for a control measured
-against a directory the other half had already filled.
+Both halves write a file into the web root, and the harness never shares a target
+whose halves write: a control measured against a target the other half has
+altered is measuring something else, whether or not the verdict happens to move.
+A fresh container costs 3 seconds here.
+
+The first version of that paragraph said the control left 959 files behind, which
+was a guess dressed as a measurement. It does not: the control's URL is fixed and
+only the body carries `FUZZ`, so its 959 PUTs overwrite **one** 35-byte file.
+Counted in the container before and after -- 1 JSP, then 2, the second being the
+control's. The setting is right for the rule's reason, not for the vivid one.
 
 **What this case caught that no fixture could.** Two defects, both in probe
 construction, both invisible from the unit suite:

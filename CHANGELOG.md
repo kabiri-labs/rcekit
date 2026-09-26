@@ -53,11 +53,14 @@ formats, or the template schema.
   probes, every one answered 204.
 
   It is the first case here that may not share a target between its halves --
-  both write files into the web root -- which turned up a harness bug: under
+  both write a file into the web root -- which turned up a harness bug: under
   `--keep-up` the teardown *between* the halves was skipped too, and compose
-  handed the control the container the vulnerable half had just written to. The
-  teardown between the halves is mandatory now; the one after the last half is
-  still the flag's to skip.
+  handed the control the container the vulnerable half had just written to. That
+  teardown is mandatory now wherever the halves resolve to the same target. A
+  control that brings up its own has nothing to contaminate, so `--keep-up`
+  still leaves the vulnerable target running there -- which is the environment
+  worth looking at after a failure. The teardown after the last half stays the
+  flag's to skip either way.
 
   The case is also what caught the two `write` defects fixed in 2.45.6 and
   2.45.7, neither of which a fixture could have found.
