@@ -527,9 +527,18 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
             # something that was never going to come up.
             shared = False
     try:
+        # `keep_up` is deliberately not passed to the first half. The teardown
+        # *between* the halves is not a convenience -- it is what a case saying
+        # it cannot share a target is asking for, and `--keep-up` would
+        # otherwise hand the control the container the vulnerable half had just
+        # written to. Measured on `tomcat-cve-2017-12615`, the first case here
+        # to need it: under `--keep-up` the sequence became up, up, with no
+        # teardown in the middle and compose reusing the running container. The
+        # teardown *after* the last half is the one the flag is about, and the
+        # control below still honours it.
         ok, detail, report = run_one(
             case, case["invocation"], case["expect"], case.get("expect_method"),
-            case.get("wait_for"), case, vulhub_root, keep_up, verbose,
+            case.get("wait_for"), case, vulhub_root, False, verbose,
             timeout=case.get("timeout"), manage_target=not shared)
         outcome["vulnerable_ok"] = ok
         outcome["vulnerable_detail"] = detail
