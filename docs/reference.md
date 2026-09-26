@@ -222,14 +222,26 @@ Two oracles, of deliberately different strength:
 | **shape** | nothing | `needs-review` |
 | **dns** | a delegated `--oob-host` name and a listener | `deserialization-sink` |
 
-**shape** sends three payloads per ecosystem — a well-formed object stream, the
-same stream truncated, and the format's magic bytes followed by random noise of
-the same length — and asks whether the endpoint answers the well-formed one
-differently from *both* others. A parser does; a parameter that is merely stored
-treats all three as opaque text. Response signatures drop long digit and hex
-runs, so request ids and timestamps on an otherwise identical error page do not
-make every endpoint look like a parser. It is a fingerprint, not proof, and it
-never gets promoted.
+**shape** sends **four** payloads per ecosystem — a well-formed object stream,
+the same stream truncated, and the format's magic bytes followed by random noise
+of the same length, that last one sent **twice** so it brackets the pair — and
+asks whether the endpoint answers the well-formed one differently from *both*
+others. A parser does; a parameter that is merely stored treats all of them as
+opaque text. With the five ecosystems the corpus ships that is **20 requests per
+carrier**, not 15; `--deser-formats` narrows it.
+
+The two noise payloads are one body sent twice, byte for byte, and they bracket
+the pair because the differential is read *across* requests: anything that
+changes with the request index rather than with the payload — a rate limiter
+backing off, a filling log — lands on whichever form goes last. An endpoint that
+answers the same probe two different ways did not hold still, and that carrier is
+reported `inconclusive` rather than read. A response carrying the probe back is
+`inconclusive` for the same reason, decided against the payload-free control so
+that page content merely containing a format's magic is not mistaken for it.
+
+Response signatures drop long digit and hex runs, so request ids and timestamps
+on an otherwise identical error page do not make every endpoint look like a
+parser. It is a fingerprint, not proof, and it never gets promoted.
 
 **dns** sends a gadget whose only side effect is a name lookup. For Java that is
 URLDNS — a `HashMap` holding one `java.net.URL`, where `HashMap.readObject`
