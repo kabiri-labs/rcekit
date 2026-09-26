@@ -579,7 +579,17 @@ class CoverageLedgerTestCase(unittest.TestCase):
         the ledger would go on claiming `eval` is reproduced there. Verified by
         making exactly that edit and watching this pass. It compares the method
         and the verdict now, and reads the control half for an `as a control`
-        row, because that is the half such a row is describing."""
+        row, because that is the half such a row is describing.
+
+        The case is found by **target**, with the advisory required on top of it
+        where the row names one. Joining on the advisory alone was both too weak
+        and too strong. Too weak: a row for one target was satisfied by a case
+        for a different target that happened to share the advisory. Too strong:
+        the ledger deliberately leaves `Advisory` empty where the verdict does
+        not depend on the patch, and a capability row was then forbidden from
+        naming a case at all -- so a case could be written and run, and the row
+        it reproduces could not say so. Both directions verified by building
+        them."""
         cases = self._bench_cases()
         self.assertTrue(cases, "tests/bench/cases/ holds no cases")
         for row in self.rows:
@@ -587,13 +597,15 @@ class CoverageLedgerTestCase(unittest.TestCase):
             if not claimed.startswith(("yes", "as a control")):
                 continue
             with self.subTest(target=row["target"], method=row["method"]):
-                self.assertTrue(row["advisory"],
-                                "a row with no advisory cannot name a bench case")
-                near = [c for c in cases if row["advisory"] in c["target"]]
+                near = [c for c in cases
+                        if row["target"] in c["target"]
+                        and (not row["advisory"] or row["advisory"] in c["target"])]
+                wanted = " / ".join(x for x in (row["target"], row["advisory"]) if x)
                 self.assertTrue(
                     near,
                     f"{row['target']} claims a bench case; no case names "
-                    f"{row['advisory']}")
+                    f"{wanted} -- cases name "
+                    f"{sorted(c['target'] for c in cases)}")
                 if claimed.startswith("as a control"):
                     match = [c for c in near
                              if row["method"] in c["control_methods"]
@@ -608,7 +620,7 @@ class CoverageLedgerTestCase(unittest.TestCase):
                 self.assertTrue(
                     match,
                     f"no case reproduces {row['target']} / `{row['method']}` at "
-                    f"{row['tier']}; cases for that advisory run {where}")
+                    f"{row['tier']}; cases for that target run {where}")
 
     def _demo_blocks(self):
         """The README's recordings, as {(advisory, tier): image path}.
@@ -696,8 +708,17 @@ class CoverageLedgerTestCase(unittest.TestCase):
         flat = " ".join(body.split())
         self.assertIn(f"{with_case} rows do;", flat,
                       f"the prose does not say {with_case} rows have a bench case")
-        self.assertIn(f"The {without} rows marked *not yet*", flat,
-                      f"the prose does not say {without} rows lack one")
+        if without:
+            self.assertIn(f"The {without} rows marked *not yet*", flat,
+                          f"the prose does not say {without} rows lack one")
+        else:
+            # The sentence has to go when the last `not yet` row does, or the
+            # prose keeps describing rows the table no longer has. Asserting its
+            # absence rather than looking for "The 0 rows marked *not yet*",
+            # which nobody would write and which would fail for the wrong reason.
+            self.assertNotIn("rows marked *not yet*", flat,
+                             "no row is marked `not yet`, but the prose still "
+                             "describes some")
 
     def test_a_row_with_no_advisory_says_so_rather_than_inventing_one(self):
         """A capability row proves a method against real software; it does not

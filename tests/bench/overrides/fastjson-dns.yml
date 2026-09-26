@@ -1,0 +1,24 @@
+# Bench-only override for vulhub's fastjson/1.2.83-rce.
+#
+# The `deser` DNS gadget is a non-executing object graph whose only side effect
+# is a name lookup -- URLDNS for Java -- so the only channel it has is DNS, and
+# the callback lands only if RCEKit's listener owns UDP 53 on an address the
+# target's resolver asks. On a developer machine something already owns that
+# port, and a delegated domain is not something a benchmark can arrange.
+#
+# So the run happens where the port is free: RCEKit runs in a container on this
+# network, at the fixed address below, and the application's resolver is pointed
+# at it. Nothing here is exposed to the host beyond what vulhub already
+# publishes.
+services:
+  web:
+    dns:
+      - 172.29.0.10
+    networks:
+      - benchnet
+
+networks:
+  benchnet:
+    ipam:
+      config:
+        - subnet: 172.29.0.0/24

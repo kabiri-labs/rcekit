@@ -1,0 +1,69 @@
+{
+  "name": "hugegraph-gremlin-eval",
+  "rce_class": "Expression injection (Gremlin/Groovy)",
+  "target": "Apache HugeGraph 1.2.0",
+  "vulhub_path": "hugegraph/CVE-2024-27348",
+  "wait_for": {
+    "url": "http://127.0.0.1:8080/gremlin?gremlin=1%2B1",
+    "status": 200,
+    "timeout": 300
+  },
+  "share_target": true,
+  "invocation": [
+    "--verify-url",
+    "http://127.0.0.1:8080/gremlin",
+    "--verify-method",
+    "POST",
+    "--verify-header",
+    "Content-Type: application/json",
+    "--verify-data",
+    "{\"gremlin\":\"FUZZ\",\"bindings\":{},\"language\":\"gremlin-groovy\",\"aliases\":{}}",
+    "--verify-body-location",
+    "json_string",
+    "--methods",
+    "eval"
+  ],
+  "expect": "confirmed",
+  "expect_method": "eval",
+  "negative_control": {
+    "kind": "class-attribution",
+    "invocation": [
+      "--verify-url",
+      "http://127.0.0.1:8080/gremlin",
+      "--verify-method",
+      "POST",
+      "--verify-header",
+      "Content-Type: application/json",
+      "--verify-data",
+      "{\"gremlin\":\"FUZZ\",\"bindings\":{},\"language\":\"gremlin-groovy\",\"aliases\":{}}",
+      "--verify-body-location",
+      "json_string",
+      "--methods",
+      "time",
+      "--time-base",
+      "3"
+    ],
+    "expect": "negative"
+  },
+  "notes": [
+    "Readiness is polled on the Gremlin endpoint itself, not on /versions or /graphs. HugeGraph runs two servers: the REST API on 8080, and the Gremlin Server -- which every probe here reaches -- as a separate process on 8182 that comes up later and binds the container's loopback, so it cannot be polled from outside. Measured across a boot: /versions answers 200 at t=12s and /graphs at t=18s, while the engine is still refusing with \"Connect to 127.0.0.1:8182 failed: Connection refused\" wrapped in a 500; all three agree at t=21s. A case started on /graphs ran 240 of 468 probes against an engine that was not listening and confirmed 2 where a settled target confirms 10 -- a pass by luck, and the next slower machine would have read `negative` against a target that is vulnerable. A GET on /gremlin goes through the engine, so waiting on it waits for the thing the probes need.",
+    "The Gremlin API evaluates Groovy without authentication by design, so this",
+    "row carries no advisory: 1.3.0 answers the arithmetic exactly as 1.2.0 does,",
+    "which was measured rather than assumed -- `eval` confirms 33 of 480 probes",
+    "against the patched image. What the case proves is the method against real",
+    "software, not a patch level.",
+    "The control is class attribution, and it is negative for a reason worth",
+    "stating: `time` sends shell sleeps, and Groovy's own `sleep` takes",
+    "MILLISECONDS. `sleep 3` evaluated as Groovy delays 3ms, so there is no",
+    "delay here to find and a blind OS-command signal must not appear. Measured:",
+    "every separator came back between 0.02s and 0.05s.",
+    "That distinction is what makes this control meaningful rather than",
+    "decorative. On this same endpoint `reflected` DOES confirm, and wrongly:",
+    "Groovy reads `; expr A + B` as the command expression `expr(A + B)`,",
+    "computes the sum, fails to resolve the method and echoes the result in its",
+    "error. No shell runs. So the OS-command class is reachable here only",
+    "through the ProcessBuilder body in hugegraph-gremlin-shell, and this",
+    "control is what pins the difference between a method that stays honest on",
+    "an expression evaluator and one that does not."
+  ]
+}
