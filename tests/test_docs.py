@@ -806,6 +806,53 @@ class VerdictTableTestCase(unittest.TestCase):
             self.assertEqual(row, row.lower().strip())
 
 
+class ShapeProtocolTestCase(unittest.TestCase):
+    """The shape oracle's request count is a claim an operator plans from.
+
+    `docs/reference.md` describes the protocol and `README.md` advertises an
+    execution plan that prints the exact probe count before anything fires. A
+    page saying three payloads while the method sends four is that promise
+    broken in the one place someone reads before a monitored engagement --
+    and it is how the count drifted when `noise_again` was added: nothing
+    compared the prose to `SHAPE_FORMS`.
+    """
+
+    REFERENCE = DOCS_DIR / "reference.md"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.REFERENCE.read_text(encoding="utf-8")
+        cls.forms = rcekit.DETECTION_METHODS["deser"].SHAPE_FORMS
+        cls.ecosystems = len(rcekit.RCEKit().deser_probes)
+
+    WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+    def test_the_page_states_the_number_of_payloads_the_method_sends(self):
+        spelled = self.WORDS[len(self.forms)]
+        self.assertRegex(
+            self.text,
+            r"\*\*shape\*\* sends \*\*%s\*\* payloads" % spelled,
+            f"docs/reference.md does not say the shape oracle sends {spelled} payloads, "
+            f"which is what SHAPE_FORMS declares: {self.forms}")
+
+    def test_the_page_states_the_request_count_per_carrier(self):
+        """Spelled out because it is the number a monitored engagement budgets.
+
+        Whitespace is collapsed before the search so the claim is found whether
+        or not the sentence happens to wrap across a line."""
+        total = len(self.forms) * self.ecosystems
+        self.assertIn(
+            f"{total} requests per carrier",
+            " ".join(self.text.split()),
+            f"docs/reference.md does not state {total} requests per carrier "
+            f"({len(self.forms)} forms x {self.ecosystems} ecosystems)")
+
+    def test_no_stale_count_survives_in_the_page(self):
+        """The old number must not linger somewhere the first check does not read."""
+        stale = self.WORDS[len(self.forms) - 1]
+        self.assertNotIn(f"shape** sends **{stale}**", self.text)
+
+
 class MethodTableTierTestCase(unittest.TestCase):
     """The same check as `DemoTierTestCase`, for the two tables under `docs/`.
 

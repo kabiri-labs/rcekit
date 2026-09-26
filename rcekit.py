@@ -6264,11 +6264,26 @@ class DeserSink(DetectionMethod):
 
     Two oracles, of deliberately different strength:
 
-    * **shape** (safe, no listener) -- a differential across three payloads: a
+    * **shape** (safe, no listener) -- a differential across four payloads: a
       well-formed object stream, the same stream truncated, and the format's
-      magic bytes followed by noise. A parser distinguishes the well-formed one;
-      a parameter that is merely stored treats all three as opaque text. That is
-      a fingerprint, not proof, so it reaches ``needs-review`` only.
+      magic bytes followed by noise, that last one sent twice so it brackets the
+      pair. A parser distinguishes the well-formed one; a parameter that is
+      merely stored treats all of them as opaque text. That is a fingerprint,
+      not proof, so it reaches ``needs-review`` only.
+
+      Four rather than three, and the arithmetic is worth stating because an
+      operator on a monitored engagement plans from it: with the five
+      ecosystems the corpus ships this is 20 requests per carrier, not 15.
+      ``--deser-formats`` narrows it.
+
+      The two noise payloads are one body sent twice, byte for byte. The
+      differential is read *across* requests, so anything changing with the
+      request index rather than with the payload lands on whichever form goes
+      last; an endpoint answering the same probe two different ways did not hold
+      still, and that carrier is reported ``inconclusive`` rather than read. A
+      response carrying the probe back is ``inconclusive`` for the same reason,
+      decided against the payload-free control so that page content merely
+      containing a format's magic is not mistaken for reflection.
     * **dns** (needs ``--oob-host``) -- a non-executing gadget whose only side
       effect is a name lookup: URLDNS for Java serialization, an
       ``Inet4Address`` autotype for polymorphic JSON. A callback proves the
@@ -6510,7 +6525,7 @@ class DeserSink(DetectionMethod):
         Long digit and hex runs are dropped because request ids, timestamps and
         CSRF tokens change between two otherwise identical error pages, and
         comparing them raw would make every endpoint look like it distinguishes
-        the three forms."""
+        the forms."""
         body = re.sub(r"[0-9a-f]{8,}", "", (obs.body or "").lower())
         body = re.sub(r"\d{4,}", "", body)
         return (obs.status, len(body) // 16, body)
@@ -6540,8 +6555,8 @@ class DeserSink(DetectionMethod):
         input, and the oracle would be reading its own payloads back as though
         the target had said something.
 
-        The three forms alone cannot rule this out, and that is not a gap in
-        the comparison but a property of it: the original route covers every
+        The structured forms and the noise alone cannot rule this out, and that
+        is not a gap in the comparison but a property of it: the original route covers every
         case where the well-formed and truncated answers differ, so the only
         region left is where they agree, and there the single remaining
         comparison is the well-formed answer against noise. Any rule reaching

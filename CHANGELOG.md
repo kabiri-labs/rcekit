@@ -307,6 +307,20 @@ formats, or the template schema.
   `--template-file` need not, and the answer to a control that cannot be
   validated is to say so.
 
+- **The page an operator plans traffic from still described three payloads.**
+  The bracket makes the shape oracle send four per ecosystem -- 20 requests per
+  carrier rather than 15, with the five the corpus ships -- and
+  `docs/reference.md` and the method's own docstring both still said three.
+  README advertises an execution plan that prints the exact probe count before
+  anything fires, so a page that undercounts it breaks that promise in the one
+  place someone reads before a monitored engagement.
+
+  Both now state four, and the arithmetic, and what the repeated probe is for.
+  A test holds the page to `SHAPE_FORMS` and to the ecosystem count, in both
+  directions: adding a form without updating the page fails it, and reverting
+  the page without touching the code fails it too. Nothing compared the two
+  before, which is how the count drifted the moment the form was added.
+
 - **The `negative` evidence line described a comparison it had not made.** "The
   endpoint answers all three forms alike" was asserted rather than observed.
   It now names what actually collapsed: every form alike, a truncated stream
