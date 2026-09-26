@@ -529,53 +529,155 @@ class CoverageLedgerTestCase(unittest.TestCase):
     BENCH_CASES = REPO_ROOT / "tests" / "bench" / "cases"
     GIF_DIR = REPO_ROOT / "confirmation-gifs"
 
+    # Recordings are named for the method they show, and a row is checked
+    # against that. One predates the method its row now names: `lookup` was
+    # added after the Log4Shell callback was filmed, and the file is still
+    # `oob-…`. Named here explicitly rather than loosening the rule for
+    # everything, which is what the first version of this check did -- and it
+    # let the timing demo be pointed at the reflected recording unnoticed.
+    LEGACY_RECORDINGS = {
+        ("CVE-2021-44228", "lookup-sink"): "oob-log4shell-cve-2021-44228.gif",
+    }
+
     def setUp(self):
-        self.rows = coverage_ledger(README.read_text(encoding="utf-8"))
+        self.body = README.read_text(encoding="utf-8")
+        self.rows = coverage_ledger(self.body)
         self.assertTrue(self.rows, "the coverage ledger was not found")
 
-    def _bench_targets(self):
-        import json
-        targets = []
-        for path in sorted(self.BENCH_CASES.glob("*.json")):
-            targets.append(json.loads(path.read_text(encoding="utf-8"))["target"])
-        return targets
+    def _bench_cases(self):
+        """Every case file, parsed, with what each half of it actually runs.
 
-    def test_a_row_claiming_a_bench_case_has_one(self):
-        """`yes` in that column is checkable, so it is checked. A case renamed
-        or removed leaves the row asserting a reproduction nobody can run."""
-        cases = " | ".join(self._bench_targets())
+        The vulnerable half is `expect_method` / `expect`. The control half
+        names its method inside an argv list, so it is read out of there rather
+        than assumed -- a control that stopped passing `--methods` would
+        otherwise look like a control for whatever the row claimed."""
+        import json
+        cases = []
+        for path in sorted(self.BENCH_CASES.glob("*.json")):
+            case = json.loads(path.read_text(encoding="utf-8"))
+            control = case.get("negative_control") or {}
+            argv = control.get("invocation") or []
+            control_methods = [argv[i + 1] for i, arg in enumerate(argv)
+                               if arg == "--methods" and i + 1 < len(argv)]
+            cases.append({
+                "name": path.name,
+                "target": case.get("target", ""),
+                "method": (case.get("expect_method") or "").split("/")[0],
+                "expect": case.get("expect", ""),
+                "control_methods": control_methods,
+                "control_expect": control.get("expect", ""),
+            })
+        return cases
+
+    def test_a_row_claiming_a_bench_case_has_one_that_runs_it(self):
+        """`yes` is a claim that a run reproduces *this row*, so the row is
+        matched against what the case actually exercises.
+
+        Searching the case's target for the advisory is not enough, and this
+        test was written that way first: the Struts case could be changed to
+        stop invoking `eval` -- `expect_method` altered, nothing else -- and
+        the ledger would go on claiming `eval` is reproduced there. Verified by
+        making exactly that edit and watching this pass. It compares the method
+        and the verdict now, and reads the control half for an `as a control`
+        row, because that is the half such a row is describing."""
+        cases = self._bench_cases()
+        self.assertTrue(cases, "tests/bench/cases/ holds no cases")
         for row in self.rows:
             claimed = row["bench"].strip().lower()
             if not claimed.startswith(("yes", "as a control")):
                 continue
-            # The case files name their target the way the ledger's first two
-            # columns do together, so the advisory is the reliable join.
             with self.subTest(target=row["target"], method=row["method"]):
+                self.assertTrue(row["advisory"],
+                                "a row with no advisory cannot name a bench case")
+                near = [c for c in cases if row["advisory"] in c["target"]]
                 self.assertTrue(
-                    row["advisory"] and row["advisory"] in cases,
-                    f"{row['target']} claims a bench case; "
-                    f"tests/bench/cases/ has {self._bench_targets()}")
+                    near,
+                    f"{row['target']} claims a bench case; no case names "
+                    f"{row['advisory']}")
+                if claimed.startswith("as a control"):
+                    match = [c for c in near
+                             if row["method"] in c["control_methods"]
+                             and c["control_expect"] == row["tier"]]
+                    where = [(c["name"], c["control_methods"], c["control_expect"])
+                             for c in near]
+                else:
+                    match = [c for c in near
+                             if c["method"] == row["method"]
+                             and c["expect"] == row["tier"]]
+                    where = [(c["name"], c["method"], c["expect"]) for c in near]
+                self.assertTrue(
+                    match,
+                    f"no case reproduces {row['target']} / `{row['method']}` at "
+                    f"{row['tier']}; cases for that advisory run {where}")
 
-    def test_a_row_claiming_a_recording_has_one(self):
-        gifs = {path.name for path in self.GIF_DIR.glob("*.gif")}
-        self.assertTrue(gifs, "confirmation-gifs/ holds no recordings")
-        for row in self.rows:
-            if row["recording"].strip() in ("", "—", "-"):
+    def _demo_blocks(self):
+        """The README's recordings, as {(advisory, tier): image path}.
+
+        Keyed on the tier as well as the advisory because an advisory can carry
+        more than one row -- Webmin has `reflected` at `confirmed` and `time` at
+        `needs-review` -- and the tier is what the demo's own heading states. It
+        is also what makes this independent of the filenames, which record the
+        channel that was filmed rather than the method a row now names: the
+        Log4Shell file is still `oob-log4shell-…` because `lookup` was added
+        after it, and renaming it would break every link pointing at it."""
+        blocks = {}
+        for details in DemoTierTestCase.DETAILS_RE.findall(self.body):
+            summary = DemoTierTestCase.SUMMARY_RE.search(details)
+            image = re.search(r"!\[[^\]]*\]\(([^)\s]+)\)", details)
+            if not (summary and image):
                 continue
+            advisory = DemoTierTestCase.ADVISORY_RE.search(summary.group(1))
+            tier = DemoTierTestCase.HEADING_TIER_RE.search(summary.group(1))
+            if advisory and tier:
+                blocks[(advisory.group(1), tier.group(1))] = image.group(1)
+        return blocks
+
+    def test_a_row_claiming_a_recording_has_its_own(self):
+        """Matched to the demo that shows *this* row, not to any file mentioning
+        the advisory.
+
+        Written the loose way first, and it cost the claim: the timing
+        recording could be replaced with a copy of the reflected one and every
+        check stayed green, because both files name Webmin. Verified by making
+        that swap. Rows are matched to demo blocks one to one, so two rows
+        cannot be satisfied by the same recording."""
+        blocks = self._demo_blocks()
+        self.assertTrue(blocks, "the README shows no recordings")
+        claimed = [row for row in self.rows
+                   if row["recording"].strip() not in ("", "—", "-")]
+        self.assertTrue(claimed, "no row claims a recording")
+        used = {}
+        for row in claimed:
+            key = (row["advisory"], row["tier"])
             with self.subTest(target=row["target"], method=row["method"]):
-                # Joined on the advisory rather than the method, because the
-                # filenames record which *channel* was filmed and that is not
-                # always the method the row now names. `lookup` was added after
-                # the Log4Shell recording was made, and the file is still
-                # `oob-log4shell-…`: the run it shows is the same callback, and
-                # renaming it would break every link that points at it.
-                key = (row["advisory"] or "").lower().replace("-", "")
-                wanted = [name for name in gifs
-                          if key and key in name.lower().replace("-", "")]
-                self.assertTrue(
-                    wanted,
-                    f"{row['target']} / `{row['method']}` claims a recording; "
-                    f"confirmation-gifs/ has {sorted(gifs)}")
+                self.assertIn(
+                    key, blocks,
+                    f"{row['target']} / `{row['method']}` claims a recording, but "
+                    f"no demo shows {key[0]} at {key[1]}; demos are {sorted(blocks)}")
+                self.assertNotIn(
+                    key, used,
+                    f"{row['target']} / `{row['method']}` and {used.get(key)} both "
+                    "point at one recording; a row's claim must be its own")
+                used[key] = f"{row['target']} / `{row['method']}`"
+                path = REPO_ROOT / blocks[key]
+                self.assertTrue(path.is_file(),
+                                f"the demo for {key} links {blocks[key]}, which is missing")
+                # And it has to be *that row's* recording. Existence alone let
+                # the timing demo be pointed at the reflected Webmin file with
+                # every check still green -- both files exist, both name Webmin,
+                # and the row went on claiming a recording of a run nobody had
+                # filmed. The filenames carry the method, so that is what is
+                # compared, with one alias rather than a blanket loosening.
+                expected = self.LEGACY_RECORDINGS.get(key)
+                if expected:
+                    self.assertEqual(
+                        path.name, expected,
+                        f"{key} is filmed as {expected}; the demo links {path.name}")
+                else:
+                    self.assertIn(
+                        row["method"], path.name,
+                        f"{row['target']} / `{row['method']}` links {path.name}, "
+                        "which is not that method's recording")
 
     def test_the_counts_in_the_prose_match_the_table(self):
         """The paragraphs under the ledger quote figures — how many rows have a
