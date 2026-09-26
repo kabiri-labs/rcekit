@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.5"
+__version__ = "2.45.6"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -5067,17 +5067,27 @@ class WriteThenExecute(DetectionMethod):
     # `exts` drives `--write-lang auto`; `template` takes {t1}/{t2} (boundary
     # tags) and {expr} (the arithmetic).
     #
+    # No whitespace in any of them, and that is load-bearing rather than tidy.
+    # The content is delivered through the operator's own injection point, and
+    # some of those tokenise on spaces before anything is written: RRDtool --
+    # reached through Cacti's `right_axis_label` -- builds the file from a
+    # `LINE1:out:<content>` argument, so `RKAAA<?=7*6?>RKBBB` writes a 47-byte
+    # file with the content intact while `RKAAA<?= 7*6 ?>RKBBB` writes nothing
+    # at all and answers `ERROR: '7*6' is not a valid function name in 7*6`.
+    # Whitespace inside `<?= ?>` and `<%= %>` is optional, so dropping it costs
+    # nothing and buys every sink of that shape.
+    #
     # JSP, ASPX and ERB share the `<%= %>` delimiters, so their probes are
     # byte-identical and the engine's per-payload de-duplication fires them as
     # one request. They stay separate names because `auto` narrows by extension,
     # and because a contributor adding a fourth `<%= %>` dialect should not have
     # to discover that by reading the payloads.
     LANGUAGES = {
-        "jsp": {"exts": ("jsp",), "template": "{t1}<%= {expr} %>{t2}"},
-        "aspx": {"exts": ("aspx", "asp", "ashx"), "template": "{t1}<%= {expr} %>{t2}"},
-        "erb": {"exts": ("erb", "rhtml"), "template": "{t1}<%= {expr} %>{t2}"},
+        "jsp": {"exts": ("jsp",), "template": "{t1}<%={expr}%>{t2}"},
+        "aspx": {"exts": ("aspx", "asp", "ashx"), "template": "{t1}<%={expr}%>{t2}"},
+        "erb": {"exts": ("erb", "rhtml"), "template": "{t1}<%={expr}%>{t2}"},
         "php": {"exts": ("php", "php3", "php4", "php5", "php7", "phtml", "phar"),
-                "template": "{t1}<?= {expr} ?>{t2}"},
+                "template": "{t1}<?={expr}?>{t2}"},
         # .jspx is XML, so the scriptlet delimiters are not available at all --
         # the container parses the file as a document and `<%=` is character
         # data. It is the one shape here that is not a delimiter swap.
