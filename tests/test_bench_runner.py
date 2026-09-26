@@ -491,6 +491,37 @@ class SharedTargetTestCase(unittest.TestCase):
             runner.subprocess, runner.run_rcekit = original_sub, original_run
         self.assertEqual([call[-1] for call in fake.calls], ["-d"])
 
+    def test_keep_up_does_not_cost_an_unshared_case_its_teardown(self):
+        """`--keep-up` is about what survives the run, not about what the
+        control is measured against.
+
+        A case that does not set `share_target` is saying its halves cannot meet
+        the same container -- `tomcat-cve-2017-12615` is the first here to mean
+        it, because both halves write files into the web root. Skipping the
+        teardown between the halves under `--keep-up` handed the control the
+        container the vulnerable half had just written to, and compose reused it
+        rather than starting a fresh one: the sequence was up, up. The control
+        was then measured against a contaminated target while the case still
+        claimed it never could be.
+
+        The teardown between the halves stays. The one after the last half is
+        the one the flag is for, and it is still skipped."""
+        fake = self._FakeSubprocess()
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original_sub, original_run = runner.subprocess, runner.run_rcekit
+        runner.subprocess, runner.run_rcekit = fake, fake_run_rcekit
+        try:
+            runner.run_case(self._composed(), keep_up=True)
+        finally:
+            runner.subprocess, runner.run_rcekit = original_sub, original_run
+        self.assertEqual(
+            [call[-1] for call in fake.calls], ["-d", "-v", "-d"],
+            "the halves of an unshared case must not meet the same container, "
+            "and the last one is the only target --keep-up leaves running")
+
     def test_sharing_a_target_the_halves_do_not_share_is_rejected(self):
         # A patched-build control brings up its own container, so there is
         # nothing to share. Left set, the key would read as though the two
