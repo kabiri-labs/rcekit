@@ -150,11 +150,12 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: **7/7, in 55m32s, at 2.45.5**
+`python tests/bench/runner.py --all` is green: **8/8, in 54m08s, at 2.45.7**
 (2026-09-26). The three cases above were last executed as a set at 2.36.0, and
-36 commits touched `rcekit.py` between the two runs — including the response
-decoding rewrite in 2.45.4, which is squarely in the "touching delivery" case
-for re-running this. None of them regressed against real software.
+36 commits touched `rcekit.py` between that run and 2.45.5 — including the
+response decoding rewrite in 2.45.4, which is squarely in the "touching
+delivery" case for re-running this. None of them regressed against real
+software, then or at 2.45.7.
 
 Both of those cases set `share_target`, because neither half writes anything: the
 vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
@@ -172,10 +173,11 @@ fast case is most of the run.
     | Expression-lookup sink (Log4Shell/JNDI) | Apache Solr 8.11.0 -- CVE-2021-44228 | `lookup` | `lookup-sink` | `negative` | pass |
     | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`confirmed`** | `needs-review` | pass |
     | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
+    | Write primitive (PUT a JSP) | Apache Tomcat 8.5.19 -- CVE-2017-12615 | `write` | **`confirmed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
 
-That is every row in the repository README's coverage ledger. 7 cases cover its
-9 rows, because the two `time` rows are the *control* halves of the Webmin and
+That is every row in the repository README's coverage ledger. 8 cases cover its
+10 rows, because the two `time` rows are the *control* halves of the Webmin and
 OpenTSDB cases rather than cases of their own — a tier ceiling is a claim about
 a method that must not be promoted, and the place that claim belongs is a
 control.
@@ -273,18 +275,67 @@ each one had to be reproduced by hand to find out. For a harness whose whole job
 is not to mistake one failure for another, "the target could not start" and "the
 tool did not confirm" should not look alike.
 
+### `write` has one now, and it cost two fixes in the tool
+
+`tomcat-cve-2017-12615` is the canonical shape for this method and the one its
+docstring names. `PUT /rcekit-probe.jsp/` with the content in the body, no
+session, no chain: the trailing slash is the bypass, because the DefaultServlet
+refuses a `.jsp` target and normalises the path to the same file after the check.
+The method substitutes file content and names a read-back URL, and this target
+needs exactly those two things.
+
+The control is the argument for the method's existence rather than a formality.
+This target **is** exploitable and `write` confirms on it, but nothing in the
+vulnerable response is computed -- a PUT answers 204 with an empty body -- so
+`reflected` must come back `negative`. Measured: 959 probes, every one answered
+204, verdict `negative`. If that control ever confirms, the tiers have run
+together.
+
+`share_target` is deliberately absent, which is the first case here to need that.
+Both halves write files into the web root -- the control left 959 of them -- and
+the harness's own rule is never to share a target whose halves write. A fresh
+container costs 3 seconds here, which is not worth trading for a control measured
+against a directory the other half had already filled.
+
+**What this case caught that no fixture could.** Two defects, both in probe
+construction, both invisible from the unit suite:
+
+* The probe carried **whitespace** -- `<?= a*b ?>` -- and a sink that tokenises
+  before it writes rejects that outright. Found through RRDtool, reached via
+  Cacti's `right_axis_label`; fixed in 2.45.6. A fixture stores whatever it is
+  given and never splits on spaces.
+* The product **overflowed a signed 32-bit int**. JSP and ASPX evaluate `a*b` as
+  int32 and RCEKit computed it in Python, so `97233*38786` came back
+  `-523688158` against an expected `3771279138`. The old operand range overflowed
+  in 56% of runs, drawn once per run, against exactly the JVM and .NET targets
+  this method was written for. Fixed in 2.45.7.
+
+The second is the sharper lesson: **a fixture that computes in Python never
+disagrees with a tool that computes in Python.** Only an interpreter with a
+different integer width does, and only a real target has one.
+
+**One environmental hazard worth recording.** This case and `struts2-s2-001`
+both build locally, and a build resolves its base image through the registry even
+when the layers are cached. Both were seen failing that resolution -- Tomcat with
+a `403` on the manifest HEAD, Struts2 in a full `--all` run that had otherwise
+taken 54 minutes -- while `docker pull` of the same tag succeeded immediately.
+Pulling `vulhub/tomcat:8.5` and `vulhub/tomcat:8.5.19` first clears both. The
+runner reports only `compose up failed` for this -- the same gap described a
+section above, and the reason a 54-minute run had to be repeated to find out
+whether anything was actually broken.
+
 ### `boolean` ships without a case, and this is the reason
 
 `--methods boolean` reads a sink that evaluates a predicate and renders nothing
 of it. The target that shape was designed against is MongoDB `$where`, and the
 case would be a Mongo image with an application in front of it.
 
-The runtime is no longer what stands in the way -- 7 cases run under Docker at
-2.45.5 -- so the honest statement is narrower: the case is not written yet. The
+The runtime is no longer what stands in the way -- 8 cases run under Docker at
+2.45.7 -- so the honest statement is narrower: the case is not written yet. The
 candidate is Chartbrew CVE-2026-25887, where a Mongo query reaches `Function()`
-behind authentication, across a 4-container stack. `boolean` is one of 3 methods
-with no case; `file` and `write` are the others, and each is queued against a
-named target rather than left open.
+behind authentication, across a 4-container stack. `boolean` is one of 2 methods
+with no case; `file` is the other, and each is queued against a named target
+rather than left open.
 
 So the method ships on its unit suite, as the contribution guide allows, and the
 gap is worth stating precisely rather than leaving implied. What a fixture

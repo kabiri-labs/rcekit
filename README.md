@@ -36,6 +36,7 @@ against a payload-free control:
 | Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | yes | — |
 | Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`confirmed`** | yes | — |
 | Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | yes | — |
+| Apache Tomcat 8.5.19 | CVE-2017-12615 | Write primitive (PUT a JSP) | `write` | **`confirmed`** | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -45,8 +46,8 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 9 rows do; `python tests/bench/runner.py --all` was last green at
-**2.45.5** (2026-09-26), 7/7 cases in 55m32s. That is a point-in-time claim, not
+control. All 10 rows do; `python tests/bench/runner.py --all` was last green at
+**2.45.7** (2026-09-26), 8/8 cases in 54m08s. That is a point-in-time claim, not
 a continuous one: the benchmark runs on a cadence, not on every change. A row
 reading *as a control* is reproduced by the control half of another row's case,
 which is the half that describes it.
