@@ -21,8 +21,11 @@ formats, or the template schema.
   2.4.1 (CVE-2023-25826) reaching `confirmed` through `oob` and `needs-review`
   through `time`; HugeGraph 1.2.0 reaching `confirmed` through both `eval` and
   `reflected`; and a Spring Boot application on fastjson 1.2.83 reaching
-  `deserialization-sink`. All five say `not yet` under `Bench case`, which is
-  the honest state and the reason that column exists.
+  `deserialization-sink`. All five landed saying `not yet` under `Bench case`,
+  which was the honest state at the time and the reason that column exists; each
+  has a case now, and `runner.py --all` is green at 7/7 in 55m32s against
+  2.45.5. The 4 rows that predate this work were last executed as a set at
+  2.36.0, and none of them regressed.
 
   `Advisory` is empty on three of them, deliberately. HugeGraph 1.3.0 answers
   the arithmetic exactly as 1.2.0 does -- its Gremlin API evaluates Groovy
@@ -262,7 +265,34 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
-## [Unreleased]
+## [2.45.6] — 2026-09-26
+
+### Fixed
+
+- **The `write` probe carried whitespace, and some sinks tokenise before they
+  write.** The file content this method delivers is a language one-liner, and
+  its templates spelled the expression with spaces around it -- `<?= a*b ?>`,
+  `<%= a*b %>`. The content goes through the operator's own injection point, and
+  a sink that splits its input on whitespace never writes a valid file.
+
+  Measured against RRDtool 1.7.2, reached through Cacti 1.2.28's
+  `right_axis_label` (CVE-2025-24367), which builds the file from a
+  `LINE1:out:<content>` argument. `RKAAA<?=7*6?>RKBBB` wrote a 47-byte file with
+  the content intact. `RKAAA<?= 7*6 ?>RKBBB` wrote no file at all and answered
+  `ERROR: '7*6' is not a valid function name in 7*6`. The whitespace was the
+  whole difference.
+
+  Whitespace inside `<?= ?>` and `<%= %>` is optional, so the templates drop it:
+  nothing is lost and every sink of that shape is gained. Verified end to end
+  against the real sink rather than a fixture -- RCEKit generated
+  `RKYOOQS<?=69294*83370?>RKGFZQP`, RRDtool wrote it whole, and PHP answered
+  `RKYOOQS5777040780RKGFZQP`, which is the value RCEKit had computed for that
+  probe.
+
+  `jspx` keeps its spaces: it is an XML document whose root element carries
+  namespace attributes, and a sink that tokenises on whitespace was never going
+  to carry one. Two tests pin the rest -- the generated probe and the templates
+  themselves -- both written first and watched to fail.
 
 ## [2.45.5] — 2026-09-25
 
@@ -2486,6 +2516,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[2.45.6]: https://github.com/kabiri-labs/rcekit/compare/v2.45.5...v2.45.6
 [2.45.5]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.45.5
 [2.45.4]: https://github.com/kabiri-labs/rcekit/compare/v2.45.3...v2.45.4
 [2.45.3]: https://github.com/kabiri-labs/rcekit/compare/v2.45.2...v2.45.3

@@ -8874,6 +8874,48 @@ class WriteThenExecuteTestCase(unittest.TestCase):
         return (method or self._method()).build_probes(
             record or self.rec, _random.Random(seed))
 
+    def test_the_written_probe_carries_no_whitespace(self):
+        """A sink that splits its input on whitespace gets a broken file.
+
+        Measured against the sink this was written for: RRDtool 1.7.2, reached
+        through Cacti's `right_axis_label` (CVE-2025-24367), writes the file
+        from a `LINE1:out:<content>` argument. Fed
+        `RKAAA<?=7*6?>RKBBB` it produced a 47-byte file with the content
+        intact; fed `RKAAA<?= 7*6 ?>RKBBB` it produced no file at all and
+        answered `ERROR: '7*6' is not a valid function name in 7*6`. The
+        whitespace was the whole difference.
+
+        Whitespace inside `<?= ?>` and `<%= %>` is optional, so dropping it
+        costs nothing and buys every sink that tokenises on spaces. The probe is
+        asserted whole rather than the templates alone, because the tags and the
+        expression are substituted in and any one of them could reintroduce a
+        space."""
+        for lang in sorted(rcekit.WriteThenExecute.LANGUAGES):
+            if lang == "jspx":
+                # XML, and its root element carries namespace attributes that
+                # cannot lose their spaces. A sink that tokenises on whitespace
+                # was never going to carry a jspx document anyway.
+                continue
+            with self.subTest(language=lang):
+                probes = self._probes(self._method(write_langs=[lang]))
+                self.assertTrue(probes, f"{lang} built no probe")
+                for probe in probes:
+                    self.assertNotRegex(
+                        probe.payload, r"\s",
+                        f"{lang} probe carries whitespace: {probe.payload!r}")
+
+    def test_the_language_templates_declare_no_whitespace(self):
+        """The same claim one level down, so a new language cannot arrive with a
+        space in it and be caught only by whichever sink it silently fails
+        against."""
+        for lang, spec in rcekit.WriteThenExecute.LANGUAGES.items():
+            if lang == "jspx":
+                continue
+            with self.subTest(language=lang):
+                self.assertNotRegex(
+                    spec["template"], r"\s",
+                    f"{lang} template carries whitespace: {spec['template']!r}")
+
     def _store_target(self, mode):
         """A target with a write primitive, in one of three postures.
 

@@ -613,6 +613,16 @@ XML (`<jsp:expression>`) because a `.jspx` container parses the file as a
 document and never sees scriptlet delimiters. With no extension to read, `auto`
 writes all five — three requests.
 
+The content carries **no whitespace** — `<?=a*b?>`, not `<?= a*b ?>` — because
+the injection point is yours and some of them tokenise before they write.
+RRDtool is the case that settled it: reached through Cacti's `right_axis_label`,
+it builds the file from a `LINE1:out:<content>` argument, writes the spaceless
+form whole, and rejects the spaced one outright with
+`ERROR: 'a*b' is not a valid function name`. Whitespace inside those delimiters
+is optional, so nothing is given up. `jspx` is the exception: it is an XML
+document whose root element carries namespace attributes, and a sink that splits
+on spaces was never going to carry one.
+
 Like `file`, this method changes target state, so it stays gated on the read-back
 URL being named, prints what it is about to do first, and attaches a cleanup line
 to **both** the `confirmed` and the `needs-review` tiers — a `needs-review` here
