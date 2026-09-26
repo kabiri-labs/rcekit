@@ -522,6 +522,36 @@ class SharedTargetTestCase(unittest.TestCase):
             "the halves of an unshared case must not meet the same container, "
             "and the last one is the only target --keep-up leaves running")
 
+    def test_keep_up_spares_a_control_that_brings_up_its_own_target(self):
+        """The teardown between the halves answers contamination, so it applies
+        where contamination is possible and not everywhere.
+
+        A patched-build control brings up a different target. Nothing of the
+        vulnerable half can reach it, and tearing that half down anyway would
+        destroy the environment an operator passing `--keep-up` after a failure
+        most wants to look at. Both stay up here; only a shared resolution
+        forces the teardown."""
+        case = self._composed()
+        case["negative_control"]["compose"] = [
+            "docker", "compose", "-p", "patched", "up", "-d"]
+        case["negative_control"]["compose_down"] = [
+            "docker", "compose", "-p", "patched", "down", "-v"]
+        fake = self._FakeSubprocess()
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original_sub, original_run = runner.subprocess, runner.run_rcekit
+        runner.subprocess, runner.run_rcekit = fake, fake_run_rcekit
+        try:
+            runner.run_case(case, keep_up=True)
+        finally:
+            runner.subprocess, runner.run_rcekit = original_sub, original_run
+        self.assertEqual(
+            [call[-1] for call in fake.calls], ["-d", "-d"],
+            "a control with its own target cannot contaminate anything, so "
+            "--keep-up should leave the vulnerable half up too")
+
     def test_sharing_a_target_the_halves_do_not_share_is_rejected(self):
         # A patched-build control brings up its own container, so there is
         # nothing to share. Left set, the key would read as though the two

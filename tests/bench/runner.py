@@ -516,7 +516,8 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
     # and a control measured against a contaminated target measures nothing.
     # So the case declares it, and only a case whose halves really do resolve
     # to the same target may -- which validation enforces.
-    shared = bool(case.get("share_target")) and target_setup(control_case) == target_setup(case)
+    same_target = target_setup(control_case) == target_setup(case)
+    shared = bool(case.get("share_target")) and same_target
     cwd, problem = target_cwd(case, vulhub_root)
     started = False
     if shared and not problem:
@@ -527,18 +528,28 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
             # something that was never going to come up.
             shared = False
     try:
-        # `keep_up` is deliberately not passed to the first half. The teardown
-        # *between* the halves is not a convenience -- it is what a case saying
-        # it cannot share a target is asking for, and `--keep-up` would
-        # otherwise hand the control the container the vulnerable half had just
-        # written to. Measured on `tomcat-cve-2017-12615`, the first case here
-        # to need it: under `--keep-up` the sequence became up, up, with no
-        # teardown in the middle and compose reusing the running container. The
-        # teardown *after* the last half is the one the flag is about, and the
-        # control below still honours it.
+        # `keep_up` reaches the first half only when the two halves bring up
+        # *different* targets. Where they resolve to the same one, the teardown
+        # between them is not a convenience: it is what a case declining to
+        # share is asking for, and skipping it hands the control the container
+        # the vulnerable half just wrote to. Measured on
+        # `tomcat-cve-2017-12615`, the first case here to decline: under
+        # `--keep-up` the sequence became up, up, with no teardown in the middle
+        # and compose reusing the running container.
+        #
+        # A patched-build control brings up its own target, so there is nothing
+        # to contaminate and nothing to gain by destroying the vulnerable one --
+        # which is the environment an operator passing `--keep-up` after a
+        # failure most wants to look at. Two targets of the same application may
+        # still collide on a published port, but that is a property of running
+        # both at once and not of this teardown.
+        #
+        # Either way the teardown *after* the last half stays the flag's to
+        # skip, and the control below honours it.
         ok, detail, report = run_one(
             case, case["invocation"], case["expect"], case.get("expect_method"),
-            case.get("wait_for"), case, vulhub_root, False, verbose,
+            case.get("wait_for"), case, vulhub_root,
+            keep_up and not same_target, verbose,
             timeout=case.get("timeout"), manage_target=not shared)
         outcome["vulnerable_ok"] = ok
         outcome["vulnerable_detail"] = detail
