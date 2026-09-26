@@ -12,8 +12,8 @@ formats, or the template schema.
 
 - **A coverage ledger, so a measured result and a reproduced one stop looking
   alike.** The README's CVE table had four rows and two columns that mattered,
-  and no way to say what stood behind any of them. It now carries seven columns
-  and nine rows, and the two on the right are the point: `Bench case` says
+  and no way to say what stood behind any of them. It gained seven columns and
+  five more rows, and the two on the right are the point: `Bench case` says
   whether `tests/bench/` reproduces the row under Docker with its negative
   control, and `Recording` says whether a file in `confirmation-gifs/` shows it.
 
@@ -23,9 +23,10 @@ formats, or the template schema.
   `reflected`; and a Spring Boot application on fastjson 1.2.83 reaching
   `deserialization-sink`. All five landed saying `not yet` under `Bench case`,
   which was the honest state at the time and the reason that column exists; each
-  has a case now, and `runner.py --all` is green at 7/7 in 55m32s against
-  2.45.5. The 4 rows that predate this work were last executed as a set at
-  2.36.0, and none of them regressed.
+  has a case now. The 4 rows that predate this work had last been executed as a
+  set at 2.36.0, and none of them regressed. The ledger carries the figures for
+  the whole set, because a running total written here rots on the next change
+  rather than the next release.
 
   `Advisory` is empty on three of them, deliberately. HugeGraph 1.3.0 answers
   the arithmetic exactly as 1.2.0 does -- its Gremlin API evaluates Groovy
@@ -42,6 +43,27 @@ formats, or the template schema.
   rather than only those naming an advisory, and its parser is keyed on column
   headings rather than position -- the old one was hard-coded to four columns
   and found nothing at all once the table grew.
+
+- **A bench case for `write`, the last tier-1 method without one.**
+  `tomcat-cve-2017-12615` -- `PUT /rcekit-probe.jsp/` with the content in the
+  body, which is the shape the method's own docstring names. Its control runs
+  `reflected` against the same point and must stay `negative`: the target is
+  exploitable and `write` confirms on it, but a PUT answers 204 with an empty
+  body, so nothing in the vulnerable response is computed. Measured at 959
+  probes, every one answered 204.
+
+  It is the first case here that may not share a target between its halves --
+  both write a file into the web root -- which turned up a harness bug: under
+  `--keep-up` the teardown *between* the halves was skipped too, and compose
+  handed the control the container the vulnerable half had just written to. That
+  teardown is mandatory now wherever the halves resolve to the same target. A
+  control that brings up its own has nothing to contaminate, so `--keep-up`
+  still leaves the vulnerable target running there -- which is the environment
+  worth looking at after a failure. The teardown after the last half stays the
+  flag's to skip either way.
+
+  The case is also what caught the two `write` defects fixed in 2.45.6 and
+  2.45.7, neither of which a fixture could have found.
 
 ### Fixed
 
