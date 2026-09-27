@@ -98,9 +98,29 @@ class CaseError(Exception):
 
 
 def target_setup(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...], Tuple[str, ...]]:
-    """The part of a case that decides *which* target comes up."""
+    """Everything a case says about its target's lifecycle, teardown included.
+
+    Used where the question is whether two halves describe the same arrangement
+    at all -- validation, and whether a case may share one container."""
     return (case.get("vulhub_path"), tuple(case.get("compose", ())),
             tuple(case.get("compose_down", ())))
+
+
+def target_identity(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...]]:
+    """Only what selects and starts the target, so two halves that would land on
+    the same container are recognised as doing so.
+
+    Deliberately narrower than :func:`target_setup`, which carries `compose_down`
+    as well. A control overriding only its teardown -- to keep its volumes, say --
+    still inherits the `vulhub_path` and the `compose` that bring the target up,
+    so both halves reach the same container and the teardown between them is
+    mandatory. Comparing the full setup called them different and skipped it.
+
+    The wider comparison stays where it is. Refusing to *share* a container in
+    that same edge case costs one container start and says so loudly, which is
+    the safe direction for a check whose whole job is to stop a control being
+    measured against a target something else already touched."""
+    return (case.get("vulhub_path"), tuple(case.get("compose", ())))
 
 
 def control_plan(case: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
@@ -516,8 +536,14 @@ def run_case(case: Dict[str, Any], vulhub_root: Optional[Path] = None,
     # and a control measured against a contaminated target measures nothing.
     # So the case declares it, and only a case whose halves really do resolve
     # to the same target may -- which validation enforces.
-    same_target = target_setup(control_case) == target_setup(case)
-    shared = bool(case.get("share_target")) and same_target
+    # Two questions, two comparisons. `shared` asks whether the case may bring
+    # one container up for both halves, and answers from the whole setup.
+    # `same_target` asks whether the halves would *land* on the same container
+    # if each brought its own up, which is what decides whether the teardown
+    # between them may be skipped -- and a control overriding only its teardown
+    # still lands on the same one. See `target_identity`.
+    same_target = target_identity(control_case) == target_identity(case)
+    shared = bool(case.get("share_target")) and target_setup(control_case) == target_setup(case)
     cwd, problem = target_cwd(case, vulhub_root)
     started = False
     if shared and not problem:
