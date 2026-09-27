@@ -93,6 +93,15 @@ CONTROL_EXPECTATIONS = tuple(sorted(
     (_reported_tiers() - {"confirmed"}) | {"negative", "inconclusive"}))
 
 
+# What a control proves, as `tests/bench/README.md` documents it. Enforced here
+# rather than left as free text: `kind` is the only word telling a reader what a
+# control is *for*, and nothing checked it, so it drifted. The `file` case called
+# its control `class-attribution` while the notes in the same file called it
+# channel isolation -- one of them had to be wrong to anything reading either.
+CONTROL_KINDS = ("channel-isolation", "class-attribution", "patched-build",
+                 "tier-ceiling")
+
+
 class CaseError(Exception):
     """A case file that cannot be trusted to measure anything."""
 
@@ -191,6 +200,12 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
             raise CaseError(f"{source}: 'share_target' is set, but the control brings up a "
                             "different target — the two halves cannot share a container they "
                             "do not share, and leaving this set would read as though they did")
+    kind = control.get("kind")
+    if kind is not None and kind not in CONTROL_KINDS:
+        raise CaseError(f"{source}: negative_control 'kind' must be one of "
+                        f"{', '.join(CONTROL_KINDS)} — a label nothing checks "
+                        f"describes the wrong thing to whatever reads it; "
+                        f"got {kind!r}")
     control_expect = control.get("expect", "negative")
     if control_expect == "confirmed":
         raise CaseError(f"{source}: a negative control expecting 'confirmed' is a contradiction")

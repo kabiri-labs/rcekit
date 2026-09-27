@@ -15,6 +15,7 @@ reported as a clean negative.
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -66,6 +67,45 @@ def minimal_case(**overrides):
 class CaseValidationTestCase(unittest.TestCase):
     """A malformed case must fail loudly. A benchmark that quietly skips cases
     reports fewer failures than reality — the one thing it must never do."""
+
+    def test_a_control_kind_outside_the_taxonomy_is_rejected(self):
+        """`kind` said what a control proves and nothing checked it, so it drifted:
+        the `file` case called its control `class-attribution` while its own notes
+        called it channel isolation. A label nothing validates is a label that
+        describes the wrong thing to whatever reads it."""
+        case = minimal_case()
+        case["negative_control"]["kind"] = "vibes"
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("kind", str(raised.exception))
+        self.assertIn("vibes", str(raised.exception))
+
+    def test_every_documented_kind_validates(self):
+        for kind in runner.CONTROL_KINDS:
+            with self.subTest(kind=kind):
+                case = minimal_case()
+                case["negative_control"]["kind"] = kind
+                self.assertEqual(runner.validate_case(case)["name"], "example")
+
+    def test_the_taxonomy_matches_the_one_the_bench_readme_documents(self):
+        """The table readers trust and the tuple the runner enforces are the same
+        set, or one of them is lying. Read from the table rather than repeated
+        here, so a kind added to either has to reach the other."""
+        table = (runner.BENCH_ROOT / "README.md").read_text(encoding="utf-8")
+        start = table.index("| Kind | What it proves |")
+        block = table[start:table.index("\n\n", start)]
+        documented = sorted(re.findall(r"^\| `([a-z-]+)` \|", block, re.M))
+        self.assertEqual(
+            documented, sorted(runner.CONTROL_KINDS),
+            "the control kinds the harness accepts and the ones its README "
+            "documents have drifted apart")
+
+    def test_every_shipped_case_declares_a_kind_in_the_taxonomy(self):
+        for path in runner.discover_cases():
+            case = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(case=path.name):
+                self.assertIn(case["negative_control"].get("kind"),
+                              runner.CONTROL_KINDS)
 
     def test_a_well_formed_case_validates(self):
         self.assertEqual(runner.validate_case(minimal_case())["name"], "example")

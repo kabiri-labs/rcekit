@@ -56,16 +56,20 @@ The runner refuses to load a case whose control cannot measure anything:
   still expect `error`: "an unreachable target reports `error`, not `negative`"
   is a real property worth pinning.)
 
-Controls come in three kinds. All three share one invariant: the control must
-not reach `confirmed`.
+Controls come in 4 kinds, and all of them share one invariant: the control must
+not reach `confirmed`. The runner rejects a `kind` outside this table, because
+`kind` is the only word telling a reader what a control is *for* -- left as free
+text it drifted, and a case labelled itself `class-attribution` while its own
+notes described something else.
 
 | Kind | What it proves | Example |
 |---|---|---|
 | `patched-build` | The tool does not confirm on a fixed version | same case against a patched image |
 | `class-attribution` | The tool names the class, rather than flagging the parameter | S2-001 probed with `reflected` → `negative` |
 | `tier-ceiling` | A weaker signal is not promoted on a target where it happens to be right | Webmin probed with `time` → `needs-review` |
+| `channel-isolation` | The verdict rests on the method's own channel, not on the target merely reacting | Webmin's `file` probe writing to an unserved path → `negative` |
 
-The third is the one people skip, and it is the one that protects the tool's
+`tier-ceiling` is the one people skip, and it is the one that protects the tool's
 central promise. Timing produces no computed value; if it were ever promoted to
 `confirmed` on a genuinely vulnerable sink, the erosion would look like a
 success.
