@@ -138,6 +138,77 @@ def coverage_ledger(body):
     return rows
 
 
+class ConfirmationContractTestCase(unittest.TestCase):
+    """The paragraph at the top of the README that says what `confirmed` rests
+    on, held against the methods that actually reach it.
+
+    It named 2 channels -- a computed result in the response, an out-of-band
+    callback -- and 5 methods reach `confirmed`. `file` fits neither: it has the
+    target write a random token and fetches it back in a second request, which
+    is not a callback and is not in the injection response. `write` fits neither
+    either, for the same reason with a computed product in place of the token.
+    So a reader taking that paragraph as the whole contract was given two thirds
+    of it, and the gap had been there since `write` earned its row.
+
+    Keyed on `DETECTION_METHODS` rather than a list written out here, so a method
+    added later cannot reach `confirmed` while the paragraph goes on describing
+    the ones that came before it."""
+
+    # The phrase in the contract paragraph that accounts for each confirming
+    # method. Two methods may share one: `reflected` and `eval` both put the
+    # value in the response, and `file` and `write` both have it fetched back.
+    CHANNEL_FOR = {
+        "reflected": "present in the response",
+        "eval": "present in the response",
+        "oob": "out-of-band callback",
+        "file": "fetched back",
+        "write": "fetched back",
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        body = README.read_text(encoding="utf-8")
+        start = body.index("Every `confirmed` rests on")
+        cls.contract = " ".join(body[start:body.index("\n\n---", start)].split())
+
+    def _confirming(self):
+        return {name for name, method in rcekit.DETECTION_METHODS.items()
+                if method.tier == "confirmed"}
+
+    def test_every_confirming_method_has_a_channel_in_the_contract(self):
+        for name in sorted(self._confirming()):
+            with self.subTest(method=name):
+                phrase = self.CHANNEL_FOR.get(name)
+                self.assertIsNotNone(
+                    phrase,
+                    f"`{name}` reaches `confirmed` and this test does not know "
+                    f"which channel carries its proof -- add it here and check "
+                    f"the README paragraph names that channel")
+                self.assertIn(
+                    phrase, self.contract,
+                    f"the confirmation contract does not name the channel "
+                    f"`{name}` confirms through")
+
+    def test_the_contract_describes_no_channel_the_engine_cannot_use(self):
+        """The other direction. A channel left in the paragraph after its method
+        stopped reaching `confirmed` would describe a proof nothing produces."""
+        stale = sorted(set(self.CHANNEL_FOR) - self._confirming())
+        self.assertEqual(
+            stale, [],
+            f"the contract accounts for {stale}, which no longer reach "
+            f"`confirmed` -- the paragraph is describing a proof the engine "
+            f"does not produce")
+
+    def test_the_contract_counts_its_channels(self):
+        """The prose quotes a figure, and a figure beside a list that grows is a
+        figure that goes stale."""
+        channels = len(set(self.CHANNEL_FOR[name] for name in self._confirming()))
+        self.assertIn(
+            f"{channels} channels", self.contract,
+            f"the contract names {channels} distinct channels and the prose "
+            f"does not say so")
+
+
 class VersionBadgeTestCase(unittest.TestCase):
     def test_readme_badge_matches_dunder_version(self):
         """A stale badge misreports which release a reader is looking at."""

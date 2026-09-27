@@ -10,11 +10,14 @@ to test — a URL or a captured HTTP request — and every finding comes back wi
 the tier it earned.
 
 Every `confirmed` rests on a value RCEKit generated at random for that probe and
-that reflection cannot produce: a computed result present in the response and
-absent from a payload-free control, or an out-of-band callback carrying a token
-only the target ever held. Weaker signals keep their own tiers and are never
-promoted into it. And a run that could not test something never reports it as
-clean.
+that reflection cannot produce. It comes back through one of 3 channels: a
+computed result **present in the response** and absent from a payload-free
+control; an **out-of-band callback** carrying a token only the target ever held;
+or a value the target stored and RCEKit **fetched back** in a second request —
+the token `file` has it write to a path it serves, the product `write`'s
+one-liner computes when the target interprets the file it stored. Weaker signals
+keep their own tiers and are never promoted into it. And a run that could not
+test something never reports it as clean.
 
 ---
 
