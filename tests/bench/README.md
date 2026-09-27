@@ -57,10 +57,11 @@ The runner refuses to load a case whose control cannot measure anything:
   is a real property worth pinning.)
 
 Controls come in 4 kinds, and all of them share one invariant: the control must
-not reach `confirmed`. The runner rejects a `kind` outside this table, because
-`kind` is the only word telling a reader what a control is *for* -- left as free
-text it drifted, and a case labelled itself `class-attribution` while its own
-notes described something else.
+not reach `confirmed`. `kind` is **required**, and the runner rejects a value
+outside this table -- absent included. It is the only word telling a reader what a
+control is *for*, and left unchecked it drifted: a case labelled itself
+`class-attribution` while its own notes described something else, and a control
+could carry no kind at all.
 
 | Kind | What it proves | Example |
 |---|---|---|
@@ -101,7 +102,7 @@ success.
 | `invocation` | RCEKit arguments; `--acknowledge-consent` and `--detect-json` are added by the runner |
 | `expect` | `confirmed`, `needs-review`, `negative`, `inconclusive`, `error`, `nothing-tested` |
 | `expect_method` | Optional. `reflected`, or the full carrier `reflected/unix/raw` |
-| `negative_control` | Required. Its own `invocation` and/or `compose`, plus its `expect` |
+| `negative_control` | Required. Its own `invocation` and/or `compose`, plus its `expect` and its `kind` |
 
 `{bench}` and `{repo}` in an `invocation` expand to this directory and the repo
 root, so a case can reference a captured request without a fragile relative path.

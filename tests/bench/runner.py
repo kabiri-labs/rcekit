@@ -200,8 +200,18 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
             raise CaseError(f"{source}: 'share_target' is set, but the control brings up a "
                             "different target — the two halves cannot share a container they "
                             "do not share, and leaving this set would read as though they did")
-    kind = control.get("kind")
-    if kind is not None and kind not in CONTROL_KINDS:
+    # Required, and absent is not exempt. The first version of this read
+    # `kind is not None and ...`, which is a decision -- that a control may say
+    # nothing about what it proves -- reached for reflexively to avoid a
+    # comparison against None, and written down nowhere. The taxonomy exists
+    # because `kind` is the only word telling a reader what a control is for, so
+    # a control without one is the paperwork this harness refuses, not a
+    # tolerable default.
+    if "kind" not in control:
+        raise CaseError(f"{source}: negative_control needs a 'kind' saying what it "
+                        f"proves, one of {', '.join(CONTROL_KINDS)}")
+    kind = control["kind"]
+    if kind not in CONTROL_KINDS:
         raise CaseError(f"{source}: negative_control 'kind' must be one of "
                         f"{', '.join(CONTROL_KINDS)} — a label nothing checks "
                         f"describes the wrong thing to whatever reads it; "
