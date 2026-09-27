@@ -150,8 +150,8 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: **8/8, in 54m08s, at 2.45.7**
-(2026-09-26). The three cases above were last executed as a set at 2.36.0, and
+`python tests/bench/runner.py --all` is green: **9/9, in 1h36m48s, at 2.45.7**
+(2026-09-27). The three cases above were last executed as a set at 2.36.0, and
 36 commits touched `rcekit.py` between that run and 2.45.5 — including the
 response decoding rewrite in 2.45.4, which is squarely in the "touching
 delivery" case for re-running this. None of them regressed against real
@@ -174,10 +174,11 @@ fast case is most of the run.
     | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`confirmed`** | `needs-review` | pass |
     | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
     | Write primitive (PUT a JSP) | Apache Tomcat 8.5.19 -- CVE-2017-12615 | `write` | **`confirmed`** | `negative` | pass |
+    | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`confirmed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
 
-That is every row in the repository README's coverage ledger. 8 cases cover its
-10 rows, because the two `time` rows are the *control* halves of the Webmin and
+That is every row in the repository README's coverage ledger. 9 cases cover its
+11 rows, because the two `time` rows are the *control* halves of the Webmin and
 OpenTSDB cases rather than cases of their own — a tier ceiling is a claim about
 a method that must not be promoted, and the place that claim belongs is a
 control.
@@ -330,18 +331,54 @@ runner reports only `compose up failed` for this -- the same gap described a
 section above, and the reason a 54-minute run had to be repeated to find out
 whether anything was actually broken.
 
+### `file` needed no new target, and its control is the sharpest here
+
+`webmin-cve-2019-15107-file` reads the injection the `reflected` row already
+uses through a different channel. `file` needs no listener and no egress: the
+probe makes the target write a random token to a path it also serves, and a
+followup fetch reads it back. Webmin's theme ships an `unauthenticated/`
+directory that miniserv serves without a session, and the CGI runs as root, so
+it is writable. 33 of 195 probes confirm.
+
+No new environment was needed, and that was not luck. The method's docstring is
+explicit that the read-back path **does not have to be a web root** -- an LFI
+parameter, a download or export handler, a `/tmp`-backed preview all qualify --
+so any target with command injection and something readable will do. Three
+already in this suite have command injection. Reading that before choosing a
+target is what kept this off Cacti CVE-2022-46169, which would have meant
+rebuilding an install wizard in SQL.
+
+**The control isolates the channel, not the class, and that is the point.** It
+is the identical invocation with the write path moved to `/tmp`, which Webmin
+does not serve:
+
+* `negative` across 206 probes, every one reporting `token absent from the
+  fetched file`
+* while **44 files really did land in /tmp**, the first holding its token
+
+So the command ran, the write landed, the token is on disk -- and the method
+still refuses to confirm, because its channel did not carry it. That is the
+claim `file` makes and no other method does: the proof is the target *serving
+the value back*, not the command running. Nothing else in this suite separates
+"the target did something" from "the target returned what I planted".
+
+A class-attribution control was tried first -- `eval` comes back `negative` here
+across 840 probes, because a shell is not an expression evaluator. True, and it
+defends the wrong claim: `webmin-cve-2019-15107` already separates those classes,
+and nothing in it would catch `file` confirming from a response rather than a
+fetch.
+
 ### `boolean` ships without a case, and this is the reason
 
 `--methods boolean` reads a sink that evaluates a predicate and renders nothing
 of it. The target that shape was designed against is MongoDB `$where`, and the
 case would be a Mongo image with an application in front of it.
 
-The runtime is no longer what stands in the way -- 8 cases run under Docker at
+The runtime is no longer what stands in the way -- 9 cases run under Docker at
 2.45.7 -- so the honest statement is narrower: the case is not written yet. The
 candidate is Chartbrew CVE-2026-25887, where a Mongo query reaches `Function()`
-behind authentication, across a 4-container stack. `boolean` is one of 2 methods
-with no case; `file` is the other, and each is queued against a named target
-rather than left open.
+behind authentication, across a 4-container stack. `boolean` is now the **only**
+method without a case.
 
 So the method ships on its unit suite, as the contribution guide allows, and the
 gap is worth stating precisely rather than leaving implied. What a fixture

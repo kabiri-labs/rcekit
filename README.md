@@ -31,6 +31,7 @@ against a payload-free control:
 | Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`confirmed`** | yes | GIF |
 | Apache Solr 8.11.0 (Log4j 2.14.1) | CVE-2021-44228 | Expression-lookup (Log4Shell/JNDI) | `lookup` | `lookup-sink` | yes | GIF |
 | Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `needs-review` | as a control | GIF |
+| Webmin 1.910 | CVE-2019-15107 | OS command injection (self-OOB read-back) | `file` | **`confirmed`** | yes | — |
 | OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`confirmed`** | yes | — |
 | OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `needs-review` | as a control | — |
 | Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | yes | — |
@@ -46,8 +47,8 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 10 rows do; `python tests/bench/runner.py --all` was last green at
-**2.45.7** (2026-09-26), 8/8 cases in 54m08s. That is a point-in-time claim, not
+control. All 11 rows do; `python tests/bench/runner.py --all` was last green at
+**2.45.7** (2026-09-27), 9/9 cases in 1h36m48s. That is a point-in-time claim, not
 a continuous one: the benchmark runs on a cadence, not on every change. A row
 reading *as a control* is reproduced by the control half of another row's case,
 which is the half that describes it.
