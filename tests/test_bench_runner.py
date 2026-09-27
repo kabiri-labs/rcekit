@@ -522,6 +522,35 @@ class SharedTargetTestCase(unittest.TestCase):
             "the halves of an unshared case must not meet the same container, "
             "and the last one is the only target --keep-up leaves running")
 
+    def test_a_control_overriding_only_its_teardown_still_shares_the_container(self):
+        """Target identity is what *starts* the target, not what stops it.
+
+        A control may override `compose_down` alone -- to keep its volumes, say --
+        while inheriting the `vulhub_path` and `compose` that bring the target up.
+        Both halves then land on the same container, so the teardown between them
+        is mandatory. Comparing the whole setup called them different targets and
+        skipped it, which put back the contamination the comparison exists to
+        prevent: measured as up, up, with the control reusing the container the
+        vulnerable half had written to."""
+        case = self._composed()
+        # Same `compose`, so the same container comes up for both halves.
+        case["negative_control"]["compose_down"] = ["docker", "compose", "down"]
+        fake = self._FakeSubprocess()
+
+        def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
+            return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
+
+        original_sub, original_run = runner.subprocess, runner.run_rcekit
+        runner.subprocess, runner.run_rcekit = fake, fake_run_rcekit
+        try:
+            runner.run_case(case, keep_up=True)
+        finally:
+            runner.subprocess, runner.run_rcekit = original_sub, original_run
+        self.assertEqual(
+            [call[-1] for call in fake.calls], ["-d", "-v", "-d"],
+            "a control that overrides only its teardown still meets the "
+            "container the vulnerable half brought up")
+
     def test_keep_up_spares_a_control_that_brings_up_its_own_target(self):
         """The teardown between the halves answers contamination, so it applies
         where contamination is possible and not everywhere.

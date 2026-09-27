@@ -56,11 +56,14 @@ formats, or the template schema.
   both write a file into the web root -- which turned up a harness bug: under
   `--keep-up` the teardown *between* the halves was skipped too, and compose
   handed the control the container the vulnerable half had just written to. That
-  teardown is mandatory now wherever the halves resolve to the same target. A
-  control that brings up its own has nothing to contaminate, so `--keep-up`
-  still leaves the vulnerable target running there -- which is the environment
-  worth looking at after a failure. The teardown after the last half stays the
-  flag's to skip either way.
+  teardown is mandatory now wherever the halves would land on the same
+  container, which is decided from what *starts* a target -- its `vulhub_path`
+  and `compose` -- and not from what stops it. A control overriding only
+  `compose_down`, to keep its volumes say, still meets the container the
+  vulnerable half brought up. A control that brings up its own target has
+  nothing to contaminate, so `--keep-up` leaves the vulnerable one running
+  there, which is the environment worth looking at after a failure. The
+  teardown after the last half stays the flag's to skip either way.
 
   The case is also what caught the two `write` defects fixed in 2.45.6 and
   2.45.7, neither of which a fixture could have found.
