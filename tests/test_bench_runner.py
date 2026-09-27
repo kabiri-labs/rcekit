@@ -58,7 +58,12 @@ def minimal_case(**overrides):
         "negative_control": {"invocation": ["--verify-url", "http://127.0.0.1:1/?y=FUZZ",
                                             "--methods", "reflected",
                                             "--max-payloads", "3", "--verify-timeout", "1"],
-                             "expect": "negative"},
+                             "expect": "negative",
+                             # Required, like every shipped case declares. The
+                             # fixture omitting it is how a kindless control
+                             # stayed valid: 22 tests built one and nothing
+                             # objected.
+                             "kind": "class-attribution"},
     }
     case.update(overrides)
     return case
@@ -67,6 +72,20 @@ def minimal_case(**overrides):
 class CaseValidationTestCase(unittest.TestCase):
     """A malformed case must fail loudly. A benchmark that quietly skips cases
     reports fewer failures than reality — the one thing it must never do."""
+
+    def test_a_control_with_no_kind_at_all_is_rejected(self):
+        """Absent is outside the taxonomy too.
+
+        The first version of this check read `kind is not None and kind not in
+        CONTROL_KINDS`, which is a decision -- "a control may say nothing about
+        what it proves" -- that appears in no prose and no test. The shipped
+        cases all declare one, so the repository-wide check stayed green while
+        `minimal_case` itself, the fixture 22 tests build on, had none."""
+        case = minimal_case()
+        case["negative_control"].pop("kind", None)
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("kind", str(raised.exception))
 
     def test_a_control_kind_outside_the_taxonomy_is_rejected(self):
         """`kind` said what a control proves and nothing checked it, so it drifted:
@@ -127,7 +146,7 @@ class CaseValidationTestCase(unittest.TestCase):
     def test_a_control_that_reuses_the_vulnerable_invocation_is_rejected(self):
         # A "control" that runs the identical command against the identical
         # target measures nothing; it just doubles the runtime.
-        case = minimal_case(negative_control={"expect": "negative"})
+        case = minimal_case(negative_control={"kind": "class-attribution", "expect": "negative"})
         with self.assertRaises(runner.CaseError) as ctx:
             runner.validate_case(case)
         self.assertIn("measures nothing", str(ctx.exception))
@@ -140,6 +159,7 @@ class CaseValidationTestCase(unittest.TestCase):
         case = minimal_case(
             expect="needs-review",
             negative_control={"invocation": list(minimal_case()["invocation"]),
+                              "kind": "class-attribution", 
                               "expect": "needs-review"})
         with self.assertRaises(runner.CaseError) as ctx:
             runner.validate_case(case)
@@ -151,6 +171,7 @@ class CaseValidationTestCase(unittest.TestCase):
         # mistake it for a duplicate.
         case = minimal_case(vulhub_path="webmin/CVE-2019-15107",
                             negative_control={"vulhub_path": "webmin/patched",
+                                              "kind": "patched-build",
                                               "expect": "negative"})
         self.assertEqual(runner.validate_case(case)["name"], "example")
 
@@ -159,6 +180,7 @@ class CaseValidationTestCase(unittest.TestCase):
         # control would stay green with the detection engine entirely broken.
         for expectation in ("error", "nothing-tested"):
             case = minimal_case(negative_control={"invocation": ["--bogus"],
+                                                  "kind": "class-attribution", 
                                                   "expect": expectation})
             with self.assertRaises(runner.CaseError, msg=expectation) as ctx:
                 runner.validate_case(case)
@@ -167,6 +189,7 @@ class CaseValidationTestCase(unittest.TestCase):
     def test_a_control_may_expect_any_exercised_outcome(self):
         for expectation in runner.CONTROL_EXPECTATIONS:
             case = minimal_case(negative_control={"invocation": ["--other"],
+                                                  "kind": "class-attribution", 
                                                   "expect": expectation})
             self.assertEqual(runner.validate_case(case)["name"], "example", expectation)
 
@@ -179,13 +202,13 @@ class CaseValidationTestCase(unittest.TestCase):
         # The duplication the validator rejects must be the duplication the
         # runner would have run, so both go through control_plan.
         case = minimal_case(compose=["docker", "compose", "up", "-d"],
-                            negative_control={"invocation": ["--other"], "expect": "negative"})
+                            negative_control={"invocation": ["--other"], "kind": "class-attribution", "expect": "negative"})
         invocation, setup = runner.control_plan(case)
         self.assertEqual(invocation, ["--other"])
         self.assertEqual(runner.target_setup(setup), runner.target_setup(case))
 
     def test_a_control_expecting_confirmed_is_rejected(self):
-        case = minimal_case(negative_control={"invocation": ["--x"], "expect": "confirmed"})
+        case = minimal_case(negative_control={"invocation": ["--x"], "kind": "class-attribution", "expect": "confirmed"})
         with self.assertRaises(runner.CaseError) as ctx:
             runner.validate_case(case)
         self.assertIn("contradiction", str(ctx.exception))
