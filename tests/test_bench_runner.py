@@ -55,8 +55,13 @@ def minimal_case(**overrides):
         "invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected",
                        "--max-payloads", "3", "--verify-timeout", "1"],
         "expect": "confirmed",
+        # A *different* method, which is what makes the `class-attribution`
+        # label below honest. The first version of this fixture ran `reflected`
+        # in both halves and called the control class attribution anyway -- the
+        # same mislabel the validation now refuses, sitting in the fixture 22
+        # tests are built on.
         "negative_control": {"invocation": ["--verify-url", "http://127.0.0.1:1/?y=FUZZ",
-                                            "--methods", "reflected",
+                                            "--methods", "eval",
                                             "--max-payloads", "3", "--verify-timeout", "1"],
                              "expect": "negative",
                              # Required, like every shipped case declares. The
@@ -69,9 +74,122 @@ def minimal_case(**overrides):
     return case
 
 
+class ListingTestCase(unittest.TestCase):
+    """`--list` printed file stems and loaded nothing.
+
+    That made it useless as the check it looks like: a malformed case appeared in
+    the listing exactly as a good one did, so "it shows up in --list" proved only
+    that a file exists. The module's own rule is that a benchmark which quietly
+    skips a malformed case reports fewer failures than reality, and a listing is
+    the first place that shows."""
+
+    def _run(self, cases_dir):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        out, err = io.StringIO(), io.StringIO()
+        original = runner.CASES_DIR
+        runner.CASES_DIR = cases_dir
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = runner.main(["--list"])
+        finally:
+            runner.CASES_DIR = original
+        return code, out.getvalue(), err.getvalue()
+
+    def test_a_listing_of_sound_cases_succeeds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "good.json").write_text(json.dumps(minimal_case()), encoding="utf-8")
+            code, out, _ = self._run(path)
+        self.assertEqual(code, 0)
+        self.assertIn("good", out)
+
+    def test_a_malformed_case_is_named_in_the_listing_and_fails_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            broken = minimal_case()
+            broken["negative_control"]["kind"] = "vibes"
+            (path / "broken.json").write_text(json.dumps(broken), encoding="utf-8")
+            code, out, err = self._run(path)
+        self.assertNotEqual(code, 0, "a listing that includes a case it cannot "
+                                     "load must not report success")
+        self.assertIn("broken", out + err)
+        self.assertIn("kind", err)
+
+
 class CaseValidationTestCase(unittest.TestCase):
     """A malformed case must fail loudly. A benchmark that quietly skips cases
     reports fewer failures than reality — the one thing it must never do."""
+
+    def test_the_label_must_match_what_the_control_actually_does(self):
+        """Membership was never the defect.
+
+        The mislabel that produced this taxonomy was between two *valid* kinds:
+        the `file` case called its control `class-attribution` when the control
+        reruns the same method and moves only the read-back path. A check that
+        asks whether the label is in the table accepts that, and every test added
+        with the table passed while the original defect sat in the tree --
+        verified by restoring it and watching the suite stay green.
+
+        So each kind carries a necessary condition, read off the control plan:
+
+        =================== ==================================================
+        kind                the control must
+        =================== ==================================================
+        `patched-build`     bring up a different target
+        `class-attribution` run a different method
+        `tier-ceiling`      run a different method, and expect a weaker tier
+        `channel-isolation` run the same method against the same target
+        =================== ==================================================
+
+        The scenario here is the historical one rather than an invented
+        stranger, because the defect a guard is written for is not a thing to
+        imagine -- it is in the report that asked for the guard."""
+        case = minimal_case(
+            invocation=["--verify-url", "http://127.0.0.1:1/?x=FUZZ",
+                        "--methods", "file", "--file-write-path", "/srv/www",
+                        "--file-read-url", "http://127.0.0.1:1/{name}"],
+            negative_control={"invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ",
+                                             "--methods", "file",
+                                             "--file-write-path", "/tmp",
+                                             "--file-read-url", "http://127.0.0.1:1/{name}"],
+                              "kind": "class-attribution",
+                              "expect": "negative"})
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("class-attribution", str(raised.exception))
+        self.assertIn("channel-isolation", str(raised.exception))
+
+        # The same control, labelled for what it does, is accepted.
+        case["negative_control"]["kind"] = "channel-isolation"
+        self.assertEqual(runner.validate_case(case)["name"], "example")
+
+    def test_each_kind_rejects_a_control_that_does_not_earn_it(self):
+        """The rest of the taxonomy, one violation each."""
+        same = ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected"]
+        other = ["--verify-url", "http://127.0.0.1:1/?y=FUZZ", "--methods", "time"]
+        for kind, control, note in (
+                # A patched-build control that brings up no different target.
+                ("patched-build", {"invocation": other, "expect": "negative"},
+                 "different target"),
+                # A class-attribution control running the very same method.
+                ("class-attribution", {"invocation": list(same) + ["--evade", "low"],
+                                       "expect": "negative"}, "different method"),
+                # A tier-ceiling control expecting `negative`, which is the
+                # class-attribution claim, not a ceiling being held.
+                ("tier-ceiling", {"invocation": other, "expect": "negative"},
+                 "weaker tier"),
+                # A channel-isolation control that changed the method.
+                ("channel-isolation", {"invocation": other, "expect": "negative"},
+                 "same method"),
+        ):
+            with self.subTest(kind=kind):
+                control = dict(control, kind=kind)
+                case = minimal_case(invocation=same, negative_control=control)
+                with self.assertRaises(runner.CaseError) as raised:
+                    runner.validate_case(case)
+                self.assertIn(kind, str(raised.exception))
+                self.assertIn(note, str(raised.exception))
 
     def test_a_control_with_no_kind_at_all_is_rejected(self):
         """Absent is outside the taxonomy too.
@@ -99,11 +217,30 @@ class CaseValidationTestCase(unittest.TestCase):
         self.assertIn("kind", str(raised.exception))
         self.assertIn("vibes", str(raised.exception))
 
-    def test_every_documented_kind_validates(self):
-        for kind in runner.CONTROL_KINDS:
+    def test_every_documented_kind_validates_on_a_control_that_earns_it(self):
+        """One fitting control per kind, because no single control honestly is
+        all four. The earlier version set each kind on the same fixture in turn
+        and passed, which is how a label could mean nothing."""
+        same = ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected"]
+        fitting = {
+            # A different build, same invocation.
+            "patched-build": (dict(vulhub_path="webmin/CVE-2019-15107"),
+                              {"vulhub_path": "webmin/patched", "expect": "negative"}),
+            # A different method, expecting nothing.
+            "class-attribution": ({}, {"invocation": ["--methods", "eval"],
+                                       "expect": "negative"}),
+            # A different method, held at its ceiling.
+            "tier-ceiling": ({}, {"invocation": ["--methods", "time"],
+                                  "expect": "needs-review"}),
+            # The same method, a different channel.
+            "channel-isolation": ({}, {"invocation": list(same) + ["--file-write-path", "/tmp"],
+                                       "expect": "negative"}),
+        }
+        for kind, (overrides, control) in fitting.items():
             with self.subTest(kind=kind):
-                case = minimal_case()
-                case["negative_control"]["kind"] = kind
+                case = minimal_case(invocation=same,
+                                    negative_control=dict(control, kind=kind),
+                                    **overrides)
                 self.assertEqual(runner.validate_case(case)["name"], "example")
 
     def test_the_taxonomy_matches_the_one_the_bench_readme_documents(self):
@@ -111,13 +248,23 @@ class CaseValidationTestCase(unittest.TestCase):
         set, or one of them is lying. Read from the table rather than repeated
         here, so a kind added to either has to reach the other."""
         table = (runner.BENCH_ROOT / "README.md").read_text(encoding="utf-8")
-        start = table.index("| Kind | What it proves |")
-        block = table[start:table.index("\n\n", start)]
-        documented = sorted(re.findall(r"^\| `([a-z-]+)` \|", block, re.M))
+
+        def kinds_in(heading):
+            start = table.index(heading)
+            block = table[start:table.index("\n\n", start)]
+            return sorted(re.findall(r"^\| `([a-z-]+)` \|", block, re.M))
+
+        documented = kinds_in("| Kind | What it proves |")
         self.assertEqual(
             documented, sorted(runner.CONTROL_KINDS),
             "the control kinds the harness accepts and the ones its README "
             "documents have drifted apart")
+        # Two tables list these: what each kind proves, and what the runner
+        # requires of a control claiming it. Two hand-kept lists of one set is
+        # the drift this taxonomy exists because of.
+        self.assertEqual(
+            kinds_in("| Kind | the control must |"), documented,
+            "the two tables in tests/bench/README.md name different kinds")
 
     def test_every_shipped_case_declares_a_kind_in_the_taxonomy(self):
         for path in runner.discover_cases():

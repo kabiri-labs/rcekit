@@ -132,6 +132,72 @@ def target_identity(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...]]:
     return (case.get("vulhub_path"), tuple(case.get("compose", ())))
 
 
+def methods_in(invocation: List[str]) -> frozenset:
+    """The `--methods` an invocation selects, as a set.
+
+    Absent means the engine's default -- every applicable method -- so two
+    invocations that both omit it select the same thing, and an empty set
+    compares equal to an empty set. Comma-separated and repeated flags both
+    land here, because a case may spell either."""
+    selected: List[str] = []
+    for index, argument in enumerate(invocation):
+        if argument == "--methods" and index + 1 < len(invocation):
+            selected += [name.strip() for name in invocation[index + 1].split(",")
+                         if name.strip()]
+    return frozenset(selected)
+
+
+# What each kind *must* be true of, read off the control plan. Necessary
+# conditions rather than a derivation, so a control that varies more than one
+# thing is not forced into a single label it does not fit.
+#
+# Membership in CONTROL_KINDS was never the defect. The mislabel that produced
+# this taxonomy was between two valid kinds -- a control rerunning the same
+# method with a different read-back path, called `class-attribution` -- and a
+# check asking only whether the label is in the table accepts that. Restoring
+# the original defect and watching the suite stay green is what established
+# that, rather than any argument about it.
+def control_shape(case: Dict[str, Any]) -> Dict[str, Any]:
+    """The facts about a control that decide which kinds it can honestly claim."""
+    control = case["negative_control"]
+    control_invocation, control_case = control_plan(case)
+    return {
+        "same_target": target_identity(control_case) == target_identity(case),
+        "same_method": methods_in(control_invocation) == methods_in(case["invocation"]),
+        "expect": control.get("expect", "negative"),
+    }
+
+
+def kind_problem(kind: str, shape: Dict[str, Any]) -> Optional[str]:
+    """Why ``kind`` does not describe this control, or ``None``."""
+    if kind == "patched-build" and shape["same_target"]:
+        return ("`patched-build` says the tool does not confirm on a fixed "
+                "version, so the control has to bring up a different target")
+    if kind == "class-attribution" and shape["same_method"]:
+        return ("`class-attribution` says the tool names the class rather than "
+                "flagging the parameter, so the control has to run a different "
+                "method -- a control varying something else about the same "
+                "method is `channel-isolation`")
+    if kind == "tier-ceiling":
+        if shape["same_method"]:
+            return ("`tier-ceiling` says a weaker signal is not promoted, so the "
+                    "control has to run a different method")
+        if shape["expect"] == "negative":
+            return ("`tier-ceiling` says a weaker signal is held at its ceiling, "
+                    "so the control has to expect that weaker tier rather than "
+                    "`negative` -- expecting `negative` is the "
+                    "`class-attribution` claim")
+    if kind == "channel-isolation":
+        if not shape["same_method"]:
+            return ("`channel-isolation` says the verdict rests on the method's "
+                    "own channel, so the control has to run the same method and "
+                    "vary the channel")
+        if not shape["same_target"]:
+            return ("`channel-isolation` varies the channel, not the target, so "
+                    "the control has to run against the same target")
+    return None
+
+
 def control_plan(case: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
     """The control's effective invocation and target setup.
 
@@ -216,6 +282,9 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
                         f"{', '.join(CONTROL_KINDS)} — a label nothing checks "
                         f"describes the wrong thing to whatever reads it; "
                         f"got {kind!r}")
+    problem = kind_problem(kind, control_shape(case))
+    if problem:
+        raise CaseError(f"{source}: this control is labelled {kind!r}, and {problem}")
     control_expect = control.get("expect", "negative")
     if control_expect == "confirmed":
         raise CaseError(f"{source}: a negative control expecting 'confirmed' is a contradiction")
@@ -666,9 +735,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     cases_dir = Path(args.cases_dir)
     paths = discover_cases(cases_dir)
     if args.list:
+        # Load each one rather than printing the filenames. A listing that shows
+        # a malformed case exactly as it shows a sound one is not a check, and it
+        # reads like one -- "it appears in --list" proved only that a file
+        # exists. Loud and early is this harness's rule everywhere else.
+        broken = 0
         for path in paths:
-            print(path.stem)
-        return 0
+            try:
+                load_case(path)
+            except CaseError as exc:
+                broken += 1
+                print(f"{path.stem}  [!] {exc}", file=sys.stderr)
+            else:
+                print(path.stem)
+        return 1 if broken else 0
     if args.case:
         wanted = set(args.case)
         paths = [p for p in paths if p.stem in wanted]

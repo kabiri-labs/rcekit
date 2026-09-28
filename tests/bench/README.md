@@ -57,11 +57,20 @@ The runner refuses to load a case whose control cannot measure anything:
   is a real property worth pinning.)
 
 Controls come in 4 kinds, and all of them share one invariant: the control must
-not reach `confirmed`. `kind` is **required**, and the runner rejects a value
-outside this table -- absent included. It is the only word telling a reader what a
-control is *for*, and left unchecked it drifted: a case labelled itself
-`class-attribution` while its own notes described something else, and a control
-could carry no kind at all.
+not reach `confirmed`. `kind` is **required**, and the runner checks that the
+control *earns* the label rather than merely spelling one from the table -- the
+drift that produced this taxonomy was between two valid kinds, so membership
+alone catches nothing:
+
+| Kind | the control must |
+|---|---|
+| `patched-build` | bring up a different target |
+| `class-attribution` | run a different method |
+| `tier-ceiling` | run a different method, and expect that weaker tier |
+| `channel-isolation` | run the same method against the same target |
+
+Necessary conditions, not a derivation, so a control varying more than one thing
+is not forced into a label it does not fit.
 
 | Kind | What it proves | Example |
 |---|---|---|
