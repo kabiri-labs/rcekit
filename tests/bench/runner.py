@@ -132,19 +132,72 @@ def target_identity(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...]]:
     return (case.get("vulhub_path"), tuple(case.get("compose", ())))
 
 
+# Flags the harness reads out of an invocation to reason about a case. It does
+# not parse the CLI -- rcekit builds its parser inside `main`, so there is none to
+# borrow -- and a shadow parser would drift from the real one. These are read
+# with a deliberately small reader, and anything it cannot read for certain is
+# refused rather than guessed at. Reading `--methods=eval` as *no methods* is
+# exactly how a legitimate `class-attribution` control came to be rejected for
+# running the same method.
+READ_OPTIONS = ("--methods", "--verify-url", "--request-file")
+
+
+def option_values(invocation: List[str], option: str) -> List[str]:
+    """Every value given to ``option``, in both spellings argparse accepts.
+
+    ``--opt value`` and ``--opt=value``. Not abbreviations: argparse resolves any
+    unambiguous prefix against the whole option set, which this module does not
+    have, so :func:`abbreviated_options` refuses them instead of letting a
+    misread flag become a silent zero."""
+    values: List[str] = []
+    for index, argument in enumerate(invocation):
+        if argument == option and index + 1 < len(invocation):
+            values.append(invocation[index + 1])
+        elif argument.startswith(option + "="):
+            values.append(argument.split("=", 1)[1])
+    return values
+
+
+def abbreviated_options(invocation: List[str]) -> List[str]:
+    """Flags spelled as a proper prefix of one the harness reads.
+
+    `--method=eval` is valid to argparse and invisible to `option_values`, so a
+    case may not use it: the harness would read the invocation as selecting
+    nothing and judge the case on that."""
+    short = []
+    for argument in invocation:
+        flag = argument.split("=", 1)[0]
+        if not flag.startswith("--") or flag in READ_OPTIONS:
+            continue
+        if any(name.startswith(flag) and name != flag for name in READ_OPTIONS):
+            short.append(argument)
+    return short
+
+
 def methods_in(invocation: List[str]) -> frozenset:
     """The `--methods` an invocation selects, as a set.
 
     Absent means the engine's default -- every applicable method -- so two
     invocations that both omit it select the same thing, and an empty set
-    compares equal to an empty set. Comma-separated and repeated flags both
-    land here, because a case may spell either."""
+    compares equal to an empty set. Comma-separated and repeated flags both land
+    here, because a case may spell either."""
     selected: List[str] = []
-    for index, argument in enumerate(invocation):
-        if argument == "--methods" and index + 1 < len(invocation):
-            selected += [name.strip() for name in invocation[index + 1].split(",")
-                         if name.strip()]
+    for value in option_values(invocation, "--methods"):
+        selected += [name.strip() for name in value.split(",") if name.strip()]
     return frozenset(selected)
+
+
+def endpoint_in(invocation: List[str]) -> Tuple[str, ...]:
+    """What an invocation points at, for a case that manages no containers.
+
+    `tests/bench/README.md` supports omitting `vulhub_path` and `compose` to
+    benchmark something already running, and in that mode the target is whatever
+    the invocation names -- a `--verify-url` or a captured request file. Without
+    this, a patched deployment and a vulnerable one both had the identity
+    `(None, ())`, and a legitimate `patched-build` control was refused for
+    targeting the same thing."""
+    return tuple(option_values(invocation, "--verify-url")
+                 + option_values(invocation, "--request-file"))
 
 
 # What each kind *must* be true of, read off the control plan. Necessary
@@ -161,8 +214,17 @@ def control_shape(case: Dict[str, Any]) -> Dict[str, Any]:
     """The facts about a control that decide which kinds it can honestly claim."""
     control = case["negative_control"]
     control_invocation, control_case = control_plan(case)
+    # A case that manages no containers has no compose metadata to tell its
+    # halves apart, so the target is whatever each invocation points at. Both
+    # identities were `(None, ())` otherwise, and a patched deployment compared
+    # equal to the vulnerable one.
+    identity = target_identity(case)
+    control_identity = target_identity(control_case)
+    if identity == (None, ()) and control_identity == (None, ()):
+        identity = endpoint_in(case["invocation"])
+        control_identity = endpoint_in(control_invocation)
     return {
-        "same_target": target_identity(control_case) == target_identity(case),
+        "same_target": control_identity == identity,
         "same_method": methods_in(control_invocation) == methods_in(case["invocation"]),
         "expect": control.get("expect", "negative"),
     }
@@ -282,6 +344,17 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
                         f"{', '.join(CONTROL_KINDS)} — a label nothing checks "
                         f"describes the wrong thing to whatever reads it; "
                         f"got {kind!r}")
+    # Refused before the shape is read, because the shape would be read wrong.
+    for half, invocation in (("invocation", case["invocation"]),
+                             ("negative_control invocation", control_invocation)):
+        short = abbreviated_options(invocation)
+        if short:
+            raise CaseError(
+                f"{source}: {half} abbreviates {', '.join(short)}. argparse accepts "
+                f"it and this harness cannot resolve it against an option set it "
+                f"does not have, so spell {', '.join(READ_OPTIONS)} out in a case "
+                f"file -- read as nothing, a flag like that decides a case on the "
+                f"wrong facts")
     problem = kind_problem(kind, control_shape(case))
     if problem:
         raise CaseError(f"{source}: this control is labelled {kind!r}, and {problem}")
