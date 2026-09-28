@@ -248,18 +248,24 @@ def load_case(path: Path) -> Dict[str, Any]:
     Nothing is silenced by that. The message carries the exception's type and
     text, so a genuine fault in this harness still reads as one, and every caller
     still treats the case as unusable."""
+    # One guarded region over the whole body, not one per step. The first version
+    # of this guarded `validate_case` and left `open()` outside it, so a path that
+    # could not be read -- a broken symlink, a permissions failure, a file that
+    # vanished between discovery and loading -- still left here as an `OSError`.
+    # That is the same defect the guard was added for, one line earlier, and it
+    # happened because the invariant was applied to a block instead of to the
+    # function. There is no "outside" now.
     try:
         with open(path, encoding="utf-8") as handle:
             case = json.load(handle)
-    except ValueError as exc:
-        raise CaseError(f"{path}: not valid JSON ({exc})")
-    if not isinstance(case, dict):
-        raise CaseError(f"{path}: a case file's root has to be an object, "
-                        f"got {type(case).__name__}")
-    try:
+        if not isinstance(case, dict):
+            raise CaseError(f"{path}: a case file's root has to be an object, "
+                            f"got {type(case).__name__}")
         return validate_case(case, str(path))
     except CaseError:
         raise
+    except ValueError as exc:
+        raise CaseError(f"{path}: not valid JSON ({exc})")
     except Exception as exc:
         raise CaseError(f"{path}: could not be read as a case "
                         f"({type(exc).__name__}: {exc})")
