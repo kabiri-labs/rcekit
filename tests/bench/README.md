@@ -72,6 +72,18 @@ alone catches nothing:
 Necessary conditions, not a derivation, so a control varying more than one thing
 is not forced into a label it does not fit.
 
+"A different target" means a different `vulhub_path` or `compose`, and for a case
+that manages no containers -- the already-running mode below -- a different
+`--verify-url` or `--request-file`, because that is the only thing telling two
+such halves apart.
+
+Spell those flags out. The harness reads `--methods`, `--verify-url` and
+`--request-file` from an invocation to check these conditions, in both spellings
+argparse takes (`--methods x` and `--methods=x`). It does **not** resolve
+abbreviations -- argparse matches any unambiguous prefix against its whole option
+set, which the harness does not have -- so a case using `--method=x` is refused
+rather than read as selecting nothing.
+
 | Kind | What it proves | Example |
 |---|---|---|
 | `patched-build` | The tool does not confirm on a fixed version | same case against a patched image |

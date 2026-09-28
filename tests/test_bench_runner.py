@@ -164,13 +164,68 @@ class CaseValidationTestCase(unittest.TestCase):
         case["negative_control"]["kind"] = "channel-isolation"
         self.assertEqual(runner.validate_case(case)["name"], "example")
 
+    def test_both_spellings_of_a_flag_read_the_same(self):
+        """argparse takes `--methods X` and `--methods=X`. Reading only the first
+        made the second look like no methods at all, so a real
+        `class-attribution` control written the second way was refused for
+        running the same method as its case."""
+        for spelling in (["--methods", "eval"], ["--methods=eval"]):
+            with self.subTest(spelling=" ".join(spelling)):
+                self.assertEqual(runner.methods_in(spelling), frozenset({"eval"}))
+        self.assertEqual(runner.methods_in(["--methods=a,b"]), frozenset({"a", "b"}))
+
+        case = minimal_case(
+            invocation=["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods=reflected"],
+            negative_control={"invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ",
+                                             "--methods=eval"],
+                              "kind": "class-attribution", "expect": "negative"})
+        self.assertEqual(runner.validate_case(case)["name"], "example")
+
+    def test_an_abbreviated_flag_is_refused_rather_than_misread(self):
+        """argparse resolves any unambiguous prefix against its whole option set,
+        which this module does not have. Guessing is what produced the bug above,
+        so the case is refused and told to spell the flag out."""
+        case = minimal_case(
+            invocation=["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--method=reflected"])
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("abbreviates", str(raised.exception))
+        self.assertIn("--method=reflected", str(raised.exception))
+
+    def test_an_unmanaged_case_tells_its_targets_apart_by_what_it_points_at(self):
+        """A case may omit `vulhub_path` and `compose` to use something already
+        running -- the README supports it and the harness's own tests rely on it.
+        Both halves then had the identity `(None, ())`, so a patched deployment
+        compared equal to the vulnerable one and a legitimate `patched-build`
+        control was refused."""
+        case = minimal_case(
+            invocation=["--verify-url", "http://vulnerable:8080/?x=FUZZ",
+                        "--methods", "reflected"],
+            negative_control={"invocation": ["--verify-url", "http://patched:8080/?x=FUZZ",
+                                             "--methods", "reflected"],
+                              "kind": "patched-build", "expect": "negative"})
+        self.assertEqual(runner.validate_case(case)["name"], "example")
+
+        # And the same shape pointed at one endpoint is still refused, so the
+        # fallback distinguishes rather than simply passing everything.
+        case["negative_control"]["invocation"] = list(case["invocation"])
+        case["negative_control"]["invocation"][-1] = "time"
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("different target", str(raised.exception))
+
     def test_each_kind_rejects_a_control_that_does_not_earn_it(self):
         """The rest of the taxonomy, one violation each."""
         same = ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected"]
         other = ["--verify-url", "http://127.0.0.1:1/?y=FUZZ", "--methods", "time"]
         for kind, control, note in (
-                # A patched-build control that brings up no different target.
-                ("patched-build", {"invocation": other, "expect": "negative"},
+                # A patched-build control pointing at the same endpoint. It has
+                # to share the URL: since unmanaged cases tell their targets
+                # apart by what they point at, a different `--verify-url` is a
+                # different target and would satisfy the label honestly.
+                ("patched-build",
+                 {"invocation": list(same[:2]) + ["--methods", "time"],
+                  "expect": "negative"},
                  "different target"),
                 # A class-attribution control running the very same method.
                 ("class-attribution", {"invocation": list(same) + ["--evade", "low"],
