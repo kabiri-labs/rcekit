@@ -93,11 +93,14 @@ CONTROL_EXPECTATIONS = tuple(sorted(
     (_reported_tiers() - {"confirmed"}) | {"negative", "inconclusive"}))
 
 
-# What a control proves, as `tests/bench/README.md` documents it. Enforced here
-# rather than left as free text: `kind` is the only word telling a reader what a
-# control is *for*, and nothing checked it, so it drifted. The `file` case called
-# its control `class-attribution` while the notes in the same file called it
-# channel isolation -- one of them had to be wrong to anything reading either.
+# What a control proves, as `tests/bench/README.md` documents it. Checked for
+# presence and membership only, and that is the whole of the claim: `kind` is the
+# case author's word for what their control is for, and a reviewer is what
+# establishes it describes the control. Deriving it instead -- comparing the two
+# halves' methods and targets -- was tried and withdrawn, because doing it means
+# modelling rcekit's CLI grammar and semantics inside this harness, and a
+# different `--verify-url` or request-file name does not establish a different
+# deployment in the first place.
 CONTROL_KINDS = ("channel-isolation", "class-attribution", "patched-build",
                  "tier-ceiling")
 
@@ -139,150 +142,6 @@ def target_identity(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...]]:
 # refused rather than guessed at. Reading `--methods=eval` as *no methods* is
 # exactly how a legitimate `class-attribution` control came to be rejected for
 # running the same method.
-# The options the harness reads out of an invocation to reason about a case, each
-# with every spelling argparse accepts for it. It does not parse the CLI --
-# rcekit builds its parser inside `main`, so there is none to borrow -- and every
-# gap in this reader has been a wrong verdict about a legitimate case. So the
-# spellings are enumerated rather than assumed, and verified against argparse:
-#
-#   --methods eval        long form, space
-#   --methods=eval        long form, equals
-#   -r req.txt            short alias, space
-#   -rreq.txt             short alias, attached
-#   repeated              `store` keeps the LAST occurrence, so this does too
-#   --method=eval         an abbreviated long form -- refused, see below
-#   absent                empty, and two absents compare equal
-READ_OPTIONS = {
-    "methods": ("--methods",),
-    "verify-url": ("--verify-url",),
-    "request-file": ("--request-file", "-r"),
-}
-LONG_OPTIONS = tuple(name for spellings in READ_OPTIONS.values()
-                     for name in spellings if name.startswith("--"))
-
-
-def option_value(invocation: List[str], spellings: Tuple[str, ...]) -> Optional[str]:
-    """The value an invocation effectively gives an option, or ``None``.
-
-    The *last* occurrence wins, because every option read here is an argparse
-    ``store`` and that is what argparse does with a repeat. Accumulating them
-    instead let `--methods reflected --methods eval` compare as two methods
-    against the one it actually selects."""
-    value: Optional[str] = None
-    for index, argument in enumerate(invocation):
-        for spelling in spellings:
-            if argument == spelling and index + 1 < len(invocation):
-                value = invocation[index + 1]
-            elif argument.startswith(spelling + "="):
-                value = argument.split("=", 1)[1]
-            elif (not spelling.startswith("--") and argument.startswith(spelling)
-                  and len(argument) > len(spelling)):
-                # `-rreq.txt`. argparse takes a short option's value attached,
-                # and the two shipped Webmin cases spell their request file `-r`.
-                value = argument[len(spelling):]
-    return value
-
-
-def abbreviated_options(invocation: List[str]) -> List[str]:
-    """Flags spelled as a proper prefix of a long option the harness reads.
-
-    `--method=eval` is valid to argparse, which resolves any unambiguous prefix
-    against its whole option set -- a set this module does not have. Guessing is
-    what made a legitimate control look like it selected nothing, so a case may
-    not use one."""
-    short = []
-    for argument in invocation:
-        flag = argument.split("=", 1)[0]
-        if not flag.startswith("--") or flag in LONG_OPTIONS:
-            continue
-        if any(name.startswith(flag) and name != flag for name in LONG_OPTIONS):
-            short.append(argument)
-    return short
-
-
-def methods_in(invocation: List[str]) -> frozenset:
-    """The `--methods` an invocation selects, as a set.
-
-    Absent means the engine's default -- every applicable method -- so two
-    invocations that both omit it select the same thing."""
-    value = option_value(invocation, READ_OPTIONS["methods"])
-    if value is None:
-        return frozenset()
-    return frozenset(name.strip() for name in value.split(",") if name.strip())
-
-
-def endpoint_in(invocation: List[str]) -> Tuple[Any, ...]:
-    """What an invocation points at, for a case that manages no containers.
-
-    `tests/bench/README.md` supports omitting `vulhub_path` and `compose` to
-    benchmark something already running, and in that mode the target is whatever
-    the invocation names -- a `--verify-url` or a captured request file. Without
-    this, a patched deployment and a vulnerable one both had the identity
-    `(None, ())`."""
-    return (option_value(invocation, READ_OPTIONS["verify-url"]),
-            option_value(invocation, READ_OPTIONS["request-file"]))
-
-
-# What each kind *must* be true of, read off the control plan. Necessary
-# conditions rather than a derivation, so a control that varies more than one
-# thing is not forced into a single label it does not fit.
-#
-# Membership in CONTROL_KINDS was never the defect. The mislabel that produced
-# this taxonomy was between two valid kinds -- a control rerunning the same
-# method with a different read-back path, called `class-attribution` -- and a
-# check asking only whether the label is in the table accepts that. Restoring
-# the original defect and watching the suite stay green is what established
-# that, rather than any argument about it.
-def control_shape(case: Dict[str, Any]) -> Dict[str, Any]:
-    """The facts about a control that decide which kinds it can honestly claim."""
-    control = case["negative_control"]
-    control_invocation, control_case = control_plan(case)
-    # A case that manages no containers has no compose metadata to tell its
-    # halves apart, so the target is whatever each invocation points at. Both
-    # identities were `(None, ())` otherwise, and a patched deployment compared
-    # equal to the vulnerable one.
-    identity = target_identity(case)
-    control_identity = target_identity(control_case)
-    if identity == (None, ()) and control_identity == (None, ()):
-        identity = endpoint_in(case["invocation"])
-        control_identity = endpoint_in(control_invocation)
-    return {
-        "same_target": control_identity == identity,
-        "same_method": methods_in(control_invocation) == methods_in(case["invocation"]),
-        "expect": control.get("expect", "negative"),
-    }
-
-
-def kind_problem(kind: str, shape: Dict[str, Any]) -> Optional[str]:
-    """Why ``kind`` does not describe this control, or ``None``."""
-    if kind == "patched-build" and shape["same_target"]:
-        return ("`patched-build` says the tool does not confirm on a fixed "
-                "version, so the control has to bring up a different target")
-    if kind == "class-attribution" and shape["same_method"]:
-        return ("`class-attribution` says the tool names the class rather than "
-                "flagging the parameter, so the control has to run a different "
-                "method -- a control varying something else about the same "
-                "method is `channel-isolation`")
-    if kind == "tier-ceiling":
-        if shape["same_method"]:
-            return ("`tier-ceiling` says a weaker signal is not promoted, so the "
-                    "control has to run a different method")
-        if shape["expect"] == "negative":
-            return ("`tier-ceiling` says a weaker signal is held at its ceiling, "
-                    "so the control has to expect that weaker tier rather than "
-                    "`negative` -- expecting `negative` is the "
-                    "`class-attribution` claim")
-    if kind == "channel-isolation":
-        if not shape["same_method"]:
-            return ("`channel-isolation` says the verdict rests on the method's "
-                    "own channel, so the control has to run the same method and "
-                    "vary the channel")
-        if not shape["same_target"]:
-            return ("`channel-isolation` varies the channel, not the target, so "
-                    "the control has to run against the same target")
-    return None
-
-
 def control_plan(case: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
     """The control's effective invocation and target setup.
 
@@ -351,36 +210,15 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
             raise CaseError(f"{source}: 'share_target' is set, but the control brings up a "
                             "different target — the two halves cannot share a container they "
                             "do not share, and leaving this set would read as though they did")
-    # Required, and absent is not exempt. The first version of this read
-    # `kind is not None and ...`, which is a decision -- that a control may say
-    # nothing about what it proves -- reached for reflexively to avoid a
-    # comparison against None, and written down nowhere. The taxonomy exists
-    # because `kind` is the only word telling a reader what a control is for, so
-    # a control without one is the paperwork this harness refuses, not a
-    # tolerable default.
+    # Required, and absent is not exempt: a control that says nothing about what
+    # it proves is the paperwork this harness refuses, not a tolerable default.
     if "kind" not in control:
         raise CaseError(f"{source}: negative_control needs a 'kind' saying what it "
                         f"proves, one of {', '.join(CONTROL_KINDS)}")
     kind = control["kind"]
     if kind not in CONTROL_KINDS:
         raise CaseError(f"{source}: negative_control 'kind' must be one of "
-                        f"{', '.join(CONTROL_KINDS)} — a label nothing checks "
-                        f"describes the wrong thing to whatever reads it; "
-                        f"got {kind!r}")
-    # Refused before the shape is read, because the shape would be read wrong.
-    for half, invocation in (("invocation", case["invocation"]),
-                             ("negative_control invocation", control_invocation)):
-        short = abbreviated_options(invocation)
-        if short:
-            raise CaseError(
-                f"{source}: {half} abbreviates {', '.join(short)}. argparse accepts "
-                f"it and this harness cannot resolve it against an option set it "
-                f"does not have, so spell {', '.join(READ_OPTIONS)} out in a case "
-                f"file -- read as nothing, a flag like that decides a case on the "
-                f"wrong facts")
-    problem = kind_problem(kind, control_shape(case))
-    if problem:
-        raise CaseError(f"{source}: this control is labelled {kind!r}, and {problem}")
+                        f"{', '.join(CONTROL_KINDS)}; got {kind!r}")
     control_expect = control.get("expect", "negative")
     if control_expect == "confirmed":
         raise CaseError(f"{source}: a negative control expecting 'confirmed' is a contradiction")
