@@ -57,34 +57,22 @@ The runner refuses to load a case whose control cannot measure anything:
   is a real property worth pinning.)
 
 Controls come in 4 kinds, and all of them share one invariant: the control must
-not reach `confirmed`. `kind` is **required**, and the runner checks that the
-control *earns* the label rather than merely spelling one from the table -- the
-drift that produced this taxonomy was between two valid kinds, so membership
-alone catches nothing:
+not reach `confirmed`. `kind` is **required**, and the runner checks that it is
+one of the values below -- presence and membership, and that is the whole of the
+check. That the label *describes* the control is the case author's claim, and a
+reviewer is what establishes it.
 
-| Kind | the control must |
-|---|---|
-| `patched-build` | bring up a different target |
-| `class-attribution` | run a different method |
-| `tier-ceiling` | run a different method, and expect that weaker tier |
-| `channel-isolation` | run the same method against the same target |
+Deriving it instead -- comparing what the two halves' methods and targets are --
+was written and withdrawn. It means modelling rcekit's CLI inside this harness:
+its grammar (`--methods x`, `--methods=x`, `-r file`, `-rfile`, a repeat taking
+the last value, abbreviations), then which flags constitute "the target", then
+which verdicts each method can emit. Seven review findings came out of that in
+two days, and the target half of it was unsound anyway: a different
+`--verify-url` or request-file name does not establish a different deployment,
+let alone a patched one -- two paths on one host are two URLs and one target.
 
-Necessary conditions, not a derivation, so a control varying more than one thing
-is not forced into a label it does not fit.
-
-"A different target" means a different `vulhub_path` or `compose`, and for a case
-that manages no containers -- the already-running mode below -- a different
-`--verify-url` or `--request-file`, because that is the only thing telling two
-such halves apart.
-
-Spell those flags out. The harness reads `--methods`, `--verify-url` and
-`--request-file` (with its `-r` alias) from an invocation to check these
-conditions, in every spelling argparse accepts for them: `--methods x`,
-`--methods=x`, `-r file`, `-rfile`, and a repeat taking the **last** value the way
-a `store` option does. It does **not** resolve abbreviations -- argparse matches
-any unambiguous prefix against its whole option set, which the harness does not
-have -- so a case using `--method=x` is refused rather than read as selecting
-nothing.
+A shared parser and a real definition of target identity are their own piece of
+work, not a condition on a label.
 
 | Kind | What it proves | Example |
 |---|---|---|
