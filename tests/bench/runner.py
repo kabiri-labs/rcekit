@@ -231,13 +231,38 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
 
 
 def load_case(path: Path) -> Dict[str, Any]:
-    """Read and validate one case file."""
+    """Read and validate one case file, raising only :class:`CaseError`.
+
+    That "only" is the contract, and `--list` rests on it: it names each case it
+    cannot load and carries on, which it can do for exactly as long as a bad file
+    arrives as a `CaseError` rather than as a traceback.
+
+    Holding it by enumeration does not work. A case file is arbitrary JSON, so
+    `validate_case` meets types nobody declared -- a `null` root, a control whose
+    `invocation` is a number, a `compose` that is not a list -- and each new key
+    in the schema adds more. Four such shapes raised `TypeError` before this, one
+    of which ended a listing and hid every case after it. So the guarantee is made
+    where the boundary is instead: whatever a file turns out to be, it leaves here
+    as a `CaseError` naming the file.
+
+    Nothing is silenced by that. The message carries the exception's type and
+    text, so a genuine fault in this harness still reads as one, and every caller
+    still treats the case as unusable."""
     try:
         with open(path, encoding="utf-8") as handle:
             case = json.load(handle)
     except ValueError as exc:
         raise CaseError(f"{path}: not valid JSON ({exc})")
-    return validate_case(case, str(path))
+    if not isinstance(case, dict):
+        raise CaseError(f"{path}: a case file's root has to be an object, "
+                        f"got {type(case).__name__}")
+    try:
+        return validate_case(case, str(path))
+    except CaseError:
+        raise
+    except Exception as exc:
+        raise CaseError(f"{path}: could not be read as a case "
+                        f"({type(exc).__name__}: {exc})")
 
 
 def discover_cases(cases_dir: Path = CASES_DIR) -> List[Path]:

@@ -104,6 +104,48 @@ class ListingTestCase(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("good", out)
 
+    def test_a_file_that_is_not_a_case_at_all_is_reported_not_raised(self):
+        """`--list` names each unloadable case and carries on, and that promise is
+        only as good as `load_case`'s.
+
+        A case file is arbitrary JSON, so `validate_case` meets types nobody
+        declared: a `null` root, a control whose `invocation` is a number. Both
+        raised `TypeError` out of the listing loop, which catches `CaseError`, so
+        one bad file ended the listing and hid every case after it. The shapes
+        here are the reported one and a sibling it did not mention -- a class,
+        not an instance."""
+        shapes = {
+            "null-root.json": "null",
+            "number-root.json": "3",
+            "control-invocation.json": json.dumps(
+                minimal_case(negative_control={"invocation": 5, "kind": "class-attribution",
+                                               "expect": "negative"})),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            for name, body in shapes.items():
+                (path / name).write_text(body, encoding="utf-8")
+            (path / "sound.json").write_text(json.dumps(minimal_case()), encoding="utf-8")
+            code, out, err = self._run(path)
+
+        self.assertNotEqual(code, 0)
+        for name in shapes:
+            with self.subTest(shape=name):
+                self.assertIn(name[:-5], err,
+                              f"{name} was not named in the listing")
+        self.assertIn("sound", out,
+                      "a later sound case was hidden by an earlier bad one")
+
+    def test_load_case_raises_only_case_errors(self):
+        """The contract the listing rests on, stated where it is kept."""
+        with tempfile.TemporaryDirectory() as directory:
+            for body in ("null", "3", "[1, 2]", '"text"'):
+                path = Path(directory) / "x.json"
+                path.write_text(body, encoding="utf-8")
+                with self.subTest(root=body):
+                    with self.assertRaises(runner.CaseError):
+                        runner.load_case(path)
+
     def test_a_malformed_case_is_named_in_the_listing_and_fails_it(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
