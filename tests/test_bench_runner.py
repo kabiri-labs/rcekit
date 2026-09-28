@@ -136,6 +136,33 @@ class ListingTestCase(unittest.TestCase):
         self.assertIn("sound", out,
                       "a later sound case was hidden by an earlier bad one")
 
+    def test_a_path_that_cannot_be_opened_is_reported_too(self):
+        """The contract covers the read, not only the parse.
+
+        `load_case` guarded `validate_case` and left `open()` outside it, so a
+        broken symlink, an unreadable file or one that vanished between discovery
+        and loading raised `OSError` straight out of the listing loop -- the same
+        defect as the shapes above, in the same function, one line earlier. The
+        invariant belongs to the function, not to a block inside it."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "vanished.json")  # never created
+            (path / "a-directory.json").mkdir()
+            for name in ("vanished.json", "a-directory.json"):
+                with self.subTest(path=name):
+                    with self.assertRaises(runner.CaseError):
+                        runner.load_case(path / name)
+
+    def test_a_listing_carries_on_past_a_path_it_cannot_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "a-directory.json").mkdir()
+            (path / "sound.json").write_text(json.dumps(minimal_case()), encoding="utf-8")
+            code, out, err = self._run(path)
+        self.assertNotEqual(code, 0)
+        self.assertIn("a-directory", err)
+        self.assertIn("sound", out, "a sound case was hidden by an unreadable one")
+
     def test_load_case_raises_only_case_errors(self):
         """The contract the listing rests on, stated where it is kept."""
         with tempfile.TemporaryDirectory() as directory:
