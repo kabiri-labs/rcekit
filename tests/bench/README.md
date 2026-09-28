@@ -78,11 +78,13 @@ that manages no containers -- the already-running mode below -- a different
 such halves apart.
 
 Spell those flags out. The harness reads `--methods`, `--verify-url` and
-`--request-file` from an invocation to check these conditions, in both spellings
-argparse takes (`--methods x` and `--methods=x`). It does **not** resolve
-abbreviations -- argparse matches any unambiguous prefix against its whole option
-set, which the harness does not have -- so a case using `--method=x` is refused
-rather than read as selecting nothing.
+`--request-file` (with its `-r` alias) from an invocation to check these
+conditions, in every spelling argparse accepts for them: `--methods x`,
+`--methods=x`, `-r file`, `-rfile`, and a repeat taking the **last** value the way
+a `store` option does. It does **not** resolve abbreviations -- argparse matches
+any unambiguous prefix against its whole option set, which the harness does not
+have -- so a case using `--method=x` is refused rather than read as selecting
+nothing.
 
 | Kind | What it proves | Example |
 |---|---|---|

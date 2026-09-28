@@ -139,37 +139,63 @@ def target_identity(case: Dict[str, Any]) -> Tuple[Any, Tuple[str, ...]]:
 # refused rather than guessed at. Reading `--methods=eval` as *no methods* is
 # exactly how a legitimate `class-attribution` control came to be rejected for
 # running the same method.
-READ_OPTIONS = ("--methods", "--verify-url", "--request-file")
+# The options the harness reads out of an invocation to reason about a case, each
+# with every spelling argparse accepts for it. It does not parse the CLI --
+# rcekit builds its parser inside `main`, so there is none to borrow -- and every
+# gap in this reader has been a wrong verdict about a legitimate case. So the
+# spellings are enumerated rather than assumed, and verified against argparse:
+#
+#   --methods eval        long form, space
+#   --methods=eval        long form, equals
+#   -r req.txt            short alias, space
+#   -rreq.txt             short alias, attached
+#   repeated              `store` keeps the LAST occurrence, so this does too
+#   --method=eval         an abbreviated long form -- refused, see below
+#   absent                empty, and two absents compare equal
+READ_OPTIONS = {
+    "methods": ("--methods",),
+    "verify-url": ("--verify-url",),
+    "request-file": ("--request-file", "-r"),
+}
+LONG_OPTIONS = tuple(name for spellings in READ_OPTIONS.values()
+                     for name in spellings if name.startswith("--"))
 
 
-def option_values(invocation: List[str], option: str) -> List[str]:
-    """Every value given to ``option``, in both spellings argparse accepts.
+def option_value(invocation: List[str], spellings: Tuple[str, ...]) -> Optional[str]:
+    """The value an invocation effectively gives an option, or ``None``.
 
-    ``--opt value`` and ``--opt=value``. Not abbreviations: argparse resolves any
-    unambiguous prefix against the whole option set, which this module does not
-    have, so :func:`abbreviated_options` refuses them instead of letting a
-    misread flag become a silent zero."""
-    values: List[str] = []
+    The *last* occurrence wins, because every option read here is an argparse
+    ``store`` and that is what argparse does with a repeat. Accumulating them
+    instead let `--methods reflected --methods eval` compare as two methods
+    against the one it actually selects."""
+    value: Optional[str] = None
     for index, argument in enumerate(invocation):
-        if argument == option and index + 1 < len(invocation):
-            values.append(invocation[index + 1])
-        elif argument.startswith(option + "="):
-            values.append(argument.split("=", 1)[1])
-    return values
+        for spelling in spellings:
+            if argument == spelling and index + 1 < len(invocation):
+                value = invocation[index + 1]
+            elif argument.startswith(spelling + "="):
+                value = argument.split("=", 1)[1]
+            elif (not spelling.startswith("--") and argument.startswith(spelling)
+                  and len(argument) > len(spelling)):
+                # `-rreq.txt`. argparse takes a short option's value attached,
+                # and the two shipped Webmin cases spell their request file `-r`.
+                value = argument[len(spelling):]
+    return value
 
 
 def abbreviated_options(invocation: List[str]) -> List[str]:
-    """Flags spelled as a proper prefix of one the harness reads.
+    """Flags spelled as a proper prefix of a long option the harness reads.
 
-    `--method=eval` is valid to argparse and invisible to `option_values`, so a
-    case may not use it: the harness would read the invocation as selecting
-    nothing and judge the case on that."""
+    `--method=eval` is valid to argparse, which resolves any unambiguous prefix
+    against its whole option set -- a set this module does not have. Guessing is
+    what made a legitimate control look like it selected nothing, so a case may
+    not use one."""
     short = []
     for argument in invocation:
         flag = argument.split("=", 1)[0]
-        if not flag.startswith("--") or flag in READ_OPTIONS:
+        if not flag.startswith("--") or flag in LONG_OPTIONS:
             continue
-        if any(name.startswith(flag) and name != flag for name in READ_OPTIONS):
+        if any(name.startswith(flag) and name != flag for name in LONG_OPTIONS):
             short.append(argument)
     return short
 
@@ -178,26 +204,23 @@ def methods_in(invocation: List[str]) -> frozenset:
     """The `--methods` an invocation selects, as a set.
 
     Absent means the engine's default -- every applicable method -- so two
-    invocations that both omit it select the same thing, and an empty set
-    compares equal to an empty set. Comma-separated and repeated flags both land
-    here, because a case may spell either."""
-    selected: List[str] = []
-    for value in option_values(invocation, "--methods"):
-        selected += [name.strip() for name in value.split(",") if name.strip()]
-    return frozenset(selected)
+    invocations that both omit it select the same thing."""
+    value = option_value(invocation, READ_OPTIONS["methods"])
+    if value is None:
+        return frozenset()
+    return frozenset(name.strip() for name in value.split(",") if name.strip())
 
 
-def endpoint_in(invocation: List[str]) -> Tuple[str, ...]:
+def endpoint_in(invocation: List[str]) -> Tuple[Any, ...]:
     """What an invocation points at, for a case that manages no containers.
 
     `tests/bench/README.md` supports omitting `vulhub_path` and `compose` to
     benchmark something already running, and in that mode the target is whatever
     the invocation names -- a `--verify-url` or a captured request file. Without
     this, a patched deployment and a vulnerable one both had the identity
-    `(None, ())`, and a legitimate `patched-build` control was refused for
-    targeting the same thing."""
-    return tuple(option_values(invocation, "--verify-url")
-                 + option_values(invocation, "--request-file"))
+    `(None, ())`."""
+    return (option_value(invocation, READ_OPTIONS["verify-url"]),
+            option_value(invocation, READ_OPTIONS["request-file"]))
 
 
 # What each kind *must* be true of, read off the control plan. Necessary

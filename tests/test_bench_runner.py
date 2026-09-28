@@ -164,6 +164,64 @@ class CaseValidationTestCase(unittest.TestCase):
         case["negative_control"]["kind"] = "channel-isolation"
         self.assertEqual(runner.validate_case(case)["name"], "example")
 
+    # Every spelling argparse accepts for an option the harness reads, verified
+    # against argparse itself rather than recalled. Three rounds of review went
+    # on gaps in this reader -- the equals form, the `-r` alias, repeated options
+    # -- each one a legitimate case judged on facts that were read wrong. The
+    # table is the domain; the tests below walk it.
+    SPELLINGS = (
+        (["--methods", "eval"], {"eval"}, "long form, space"),
+        (["--methods=eval"], {"eval"}, "long form, equals"),
+        (["--methods=a,b"], {"a", "b"}, "comma-separated values"),
+        (["--methods", "a", "--methods", "eval"], {"eval"}, "repeated: store keeps the last"),
+        (["--methods=a", "--methods=eval"], {"eval"}, "repeated in the equals form"),
+        ([], set(), "absent"),
+    )
+
+    def test_every_spelling_of_methods_reads_the_same_as_argparse_would(self):
+        for invocation, expected, label in self.SPELLINGS:
+            with self.subTest(spelling=label):
+                self.assertEqual(runner.methods_in(invocation), frozenset(expected))
+
+    def test_a_repeat_is_the_last_value_because_that_is_what_store_does(self):
+        """`--methods reflected --methods eval` runs `eval` alone. Accumulating
+        both made it compare as two methods against the one it selects, which
+        accepted a `class-attribution` label on a control running the same
+        method as its case."""
+        case = minimal_case(
+            invocation=["--verify-url", "http://127.0.0.1:1/?x=FUZZ",
+                        "--methods", "reflected", "--methods", "eval"],
+            negative_control={"invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ",
+                                             "--methods", "eval"],
+                              "kind": "class-attribution", "expect": "negative"})
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("different method", str(raised.exception))
+
+    def test_the_short_request_file_alias_names_a_target(self):
+        """`-r` is the documented alias for `--request-file` and both shipped
+        Webmin cases use it, so an unmanaged case spelling it that way had no
+        endpoint at all: a patched request file compared equal to a vulnerable
+        one. argparse also takes a short option's value attached, so `-rreq.txt`
+        is the same invocation."""
+        for spelling in (["-r", "patched.req"], ["-rpatched.req"],
+                         ["--request-file", "patched.req"]):
+            with self.subTest(spelling=" ".join(spelling)):
+                self.assertEqual(runner.endpoint_in(spelling), (None, "patched.req"))
+
+        case = minimal_case(
+            invocation=["-r", "vulnerable.req", "--methods", "reflected"],
+            negative_control={"invocation": ["-r", "patched.req", "--methods", "reflected"],
+                              "kind": "patched-build", "expect": "negative"})
+        self.assertEqual(runner.validate_case(case)["name"], "example")
+
+        # And one request file for both halves is still the same target.
+        case["negative_control"]["invocation"] = ["-r", "vulnerable.req",
+                                                 "--methods", "time"]
+        with self.assertRaises(runner.CaseError) as raised:
+            runner.validate_case(case)
+        self.assertIn("different target", str(raised.exception))
+
     def test_both_spellings_of_a_flag_read_the_same(self):
         """argparse takes `--methods X` and `--methods=X`. Reading only the first
         made the second look like no methods at all, so a real
