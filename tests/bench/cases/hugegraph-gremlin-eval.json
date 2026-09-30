@@ -23,7 +23,7 @@
     "--methods",
     "eval"
   ],
-  "expect": "confirmed",
+  "expect": "executed",
   "expect_method": "eval",
   "negative_control": {
     "kind": "class-attribution",

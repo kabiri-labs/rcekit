@@ -1,15 +1,15 @@
 # RCEKit
 
-**`confirmed` means the target executed the input. `negative` means the probes reached it.**
+**`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 2.45.7** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.0.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
 to test — a URL or a captured HTTP request — and every finding comes back with
 the tier it earned.
 
-Every `confirmed` rests on a value RCEKit generated at random for that probe and
+Every `executed` rests on a value RCEKit generated at random for that probe and
 that reflection cannot produce. It comes back through one of 3 channels: a
 computed result **present in the response** and absent from a payload-free
 control; an **out-of-band callback** carrying a token only the target ever held;
@@ -30,17 +30,17 @@ against a payload-free control:
 
 | Target | Advisory | RCE class | `--methods` | Verdict | Bench case | Recording |
 |---|---|---|---|---|---|---|
-| Webmin 1.910 | CVE-2019-15107 | OS command injection (results-based) | `reflected` | **`confirmed`** | yes | GIF |
-| Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`confirmed`** | yes | GIF |
+| Webmin 1.910 | CVE-2019-15107 | OS command injection (results-based) | `reflected` | **`executed`** | yes | GIF |
+| Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`executed`** | yes | GIF |
 | Apache Solr 8.11.0 (Log4j 2.14.1) | CVE-2021-44228 | Expression-lookup (Log4Shell/JNDI) | `lookup` | `lookup-sink` | yes | GIF |
-| Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `needs-review` | as a control | GIF |
-| Webmin 1.910 | CVE-2019-15107 | OS command injection (self-OOB read-back) | `file` | **`confirmed`** | yes | — |
-| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`confirmed`** | yes | — |
-| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `needs-review` | as a control | — |
-| Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`confirmed`** | yes | — |
-| Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`confirmed`** | yes | — |
+| Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `timing-sink` | as a control | GIF |
+| Webmin 1.910 | CVE-2019-15107 | OS command injection (self-OOB read-back) | `file` | **`executed`** | yes | — |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`executed`** | yes | — |
+| OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `timing-sink` | as a control | — |
+| Apache HugeGraph 1.2.0 | — | Expression injection (Gremlin/Groovy) | `eval` | **`executed`** | yes | — |
+| Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`executed`** | yes | — |
 | Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | yes | — |
-| Apache Tomcat 8.5.19 | CVE-2017-12615 | Write primitive (PUT a JSP) | `write` | **`confirmed`** | yes | — |
+| Apache Tomcat 8.5.19 | CVE-2017-12615 | Write primitive (PUT a JSP) | `write` | **`executed`** | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -67,20 +67,20 @@ exists to avoid.
 
 Each control is the row's real test. Struts2 probed with `reflected` comes back
 `negative`, because S2-001 re-evaluates OGNL and there is no shell behind it.
-Webmin's `time` signal is held at `needs-review` on a target where it happens to
+Webmin's `time` signal is held at `timing-sink` on a target where it happens to
 be right. And Solr probed with `oob` comes back `negative` **although it is
 exploitable** -- `oob` builds shell commands and a `${jndi:...}` sink runs none
 of them, which is the gap `lookup` exists to close, measured rather than
 asserted.
 
-The Log4Shell row says `lookup-sink`, not `confirmed`: what the callback proves
+The Log4Shell row says `lookup-sink`, not `executed`: what the callback proves
 is that the sink resolved a URI RCEKit chose. Reaching RCE needs a server that
 answers the lookup with a loadable class, and at the default risk tier only
 `jndi:dns://` goes out -- a name lookup, with no connection past it for such a
 server to answer on.
 
 <details open>
-<summary><b><code>reflected</code> — OS command injection, Webmin CVE-2019-15107 → <code>confirmed</code></b></summary>
+<summary><b><code>reflected</code> — OS command injection, Webmin CVE-2019-15107 → <code>executed</code></b></summary>
 
 <br>
 
@@ -89,7 +89,7 @@ server to answer on.
 </details>
 
 <details>
-<summary><b><code>eval</code> — OGNL expression injection, Apache Struts2 S2-001 → <code>confirmed</code></b></summary>
+<summary><b><code>eval</code> — OGNL expression injection, Apache Struts2 S2-001 → <code>executed</code></b></summary>
 
 <br>
 
@@ -107,11 +107,11 @@ server to answer on.
 </details>
 
 <details>
-<summary><b><code>time</code> — blind command injection, Webmin CVE-2019-15107 → <code>needs-review</code></b></summary>
+<summary><b><code>time</code> — blind command injection, Webmin CVE-2019-15107 → <code>timing-sink</code></b></summary>
 
 <br>
 
-![RCEKit measuring a linear timing response on Webmin 1.910 (CVE-2019-15107): response time tracks a controlled 0/N/2N delay series — a needs-review timing candidate, never confirmed on its own](confirmation-gifs/time-webmin-cve-2019-15107.gif)
+![RCEKit measuring a linear timing response on Webmin 1.910 (CVE-2019-15107): response time tracks a controlled 0/N/2N delay series — a proven timing-sink, never executed on its own](confirmation-gifs/time-webmin-cve-2019-15107.gif)
 
 </details>
 
@@ -158,7 +158,7 @@ rcekit --acknowledge-consent \
 
 ```
 [detect] methods: reflected, eval
-[detect] sent 13 probes (13 result(s)): confirmed=4, negative=9
+[detect] sent 13 probes (13 result(s)): executed=4, negative=9
 
 [detect] CONFIRMED execution (4):
   [reflected/unix/raw] ; echo RKYZRIP$((540141+314681))RKFWVFS$(echo RKBWOOC)RKYZRIP
@@ -179,7 +179,7 @@ rcekit --acknowledge-consent \
 ```
 
 ```
-[detect] sent 4 probes (4 result(s)): confirmed=3, negative=1
+[detect] sent 4 probes (4 result(s)): executed=3, negative=1
 
 [detect] CONFIRMED execution (3):
   [reflected/unix/raw] ; echo RKHWNHK$((114157+752773))RKXGFIH$(echo RKHSEIF)RKHWNHK
@@ -211,8 +211,8 @@ rcekit --acknowledge-consent \
 [verify] loaded request from search.req: enumerating 4 injection point(s)
 [detect] enumerating 4 injection point(s) x 3 method(s)
 [detect] cost: 4 points x ~1739 probes = at least 6964 requests
-[detect]   body param 'q': confirmed (1544 probes)  <-- CONFIRMED
-[detect] sent 6371 probes: confirmed=446, negative=5925
+[detect]   body param 'q': executed (1544 probes)  <-- EXECUTED
+[detect] sent 6371 probes: executed=446, negative=5925
 ```
 
 What each flag opens up:
@@ -250,27 +250,41 @@ retest is the hard part, and it fails in two directions: a "possibly vulnerable"
 that turns out to be reflection, and a "not vulnerable" from a run that never
 actually tested anything.
 
-RCEKit answers with **nine verdicts that are never collapsed into each other**:
+RCEKit answers with **twelve verdicts that are never collapsed into each
+other**. Every one of them is named for **what the target did**, not for how
+sure RCEKit is:
 
 | Verdict | What it asserts |
 |---|---|
-| **`confirmed`** | The target executed the input. It returned a value it could not produce otherwise — computed from operands random to that probe — and that value is absent from a payload-free control. |
+| **`executed`** | The target executed the input. It returned a value it could not produce otherwise — computed from operands random to that probe — and that value is absent from a payload-free control. |
+| **`timing-sink`** | The target honoured a delay RCEKit injected: response time tracked a randomised `0/N/2N` series with the request index modelled out. Proven. What waited is not shown — a sandbox implementing `sleep` answers the same way — so it is not execution. |
+| **`file-write`** | The target stored a file at a path RCEKit chose, and served it back uninterpreted. Arbitrary file write, proven by reading it back. A real finding, and not RCE. |
+| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
-| **`needs-review`** | A real signal that is not proof on its own — a linear timing regression, a parser fingerprint, a response shape that tracks a predicate. Worth your time, never worth the word "confirmed". |
+| **`needs-review`** | A real signal that is not proof on its own — the parser fingerprint `deser` reads without a listener. The one verdict here that is genuinely a candidate. |
 | **`inconclusive`** | Nothing here can be attributed to execution. Either the evidence appeared and the payload-free control carried it too, or the run never gathered it — a response channel too unsteady to carry an answer, or a measurement `--max-payloads` could not afford to finish. It outranks `negative`, because a run that did not look is not a run that found nothing. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
 | **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
 | **`error`** | Nothing reached the target. |
 | **`nothing-tested`** | No probes were built at all. |
 
-The moment `confirmed` and `maybe` blur, `confirmed` stops meaning anything — so
-nothing is ever promoted upward. A timing regression stays `needs-review` however
+The moment `executed` and `maybe` blur, `executed` stops meaning anything — so
+nothing is ever promoted upward. A timing regression stays `timing-sink` however
 clean the slope. A deserialization callback stays `deserialization-sink` however
 certain you are that the classpath is exploitable. A response shape that tracks a
-predicate stays `needs-review` however cleanly it partitions: measured against a
-sandboxed `eval` sink and against a plain SQLite comparison, that oracle produced
-the same clean differential in 40 runs each, and only one of those two is RCE.
+predicate stays `evaluation-sink` however cleanly it partitions: measured against
+a sandboxed `eval` sink and against a plain SQLite comparison, that oracle
+produced the same clean differential in 40 runs each, and only one of those two
+is RCE.
+
+**Nothing is rounded down either**, which is the half that used to be wrong.
+Three of the rows above — `timing-sink`, `file-write`, `evaluation-sink` — were
+reported as `needs-review` until 3.0.0. Each is a settled measurement, so
+`needs-review` was RCEKit declaring itself unsure of something it had proven; a
+`file-write` finding printed the words "ARBITRARY FILE WRITE confirmed" under a
+verdict that said the opposite. A verdict now says what happened and stops
+there.
 
 ### The other half: a run that tested nothing is never clean
 
@@ -309,16 +323,16 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 |-----------|-------------|----------------------|
 | **OS command injection** | `reflected` | Makes the shell compute `$((a+b))` on random operands and collapse `$(echo TAG)`; confirms the *result*, never the literal expression. Written in the sink's own dialect — POSIX, `cmd.exe` or PowerShell. |
 | **Code / expression injection** — SSTI, SpEL, OGNL, Groovy, `eval()` (CWE-94) | `eval` | Injects `a*b` in every common template syntax (`${…}` `{{…}}` `#{…}` `%{…}` `<%=…%>` `@(…)`, bare); confirms the **product** appears while the literal `a*b` does not. |
-| **Blind command injection** (no output) | `time` | Fires a controlled `0/N/2N` delay series and confirms the response time tracks the delay **linearly**; reported `needs-review` — jitter can't fake it, but timing isn't a computed value. |
+| **Blind command injection** (no output) | `time` | Fires a controlled `0/N/2N` delay series and confirms the response time tracks the delay **linearly**; reported `timing-sink` — proven, and not execution: what waited is not shown. |
 | **Internal / no-egress** targets | `file` | Writes a random token and fetches it back through *any* read-back path — a web root, an LFI parameter, a download or export handler, a `/tmp`-backed preview. Proves execution **plus** a write primitive, with no external listener. |
-| **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `confirmed` RCE, the source coming back verbatim is `needs-review` — arbitrary file write, served but not interpreted. |
+| **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `executed` RCE, the source coming back verbatim is `file-write` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
-| **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `needs-review`: a query engine comparing two numbers produces the same differential, so the differential is not execution. |
-| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `confirmed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
+| **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
+| **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 
 Three things widen where those methods can reach, without changing what any of
-them will call `confirmed`:
+them will call `executed`:
 
 - **Second-order execution** (`--observe-url`) — when the payload lands on one
   request and runs on another: stored SSTI rendered on a profile page, a payload
@@ -370,7 +384,7 @@ one:
 | No-egress — write &amp; fetch back — `file` | ✅ *any read-back path* | ✅ *(web root)* | — | — |
 | `cmd.exe` and PowerShell sinks | ✅ *per-dialect probes* | ✅ *(cmd)* | — | per template |
 | Upload → write-then-execute — `write` | ✅ *write vs. execute, separate tiers* | — | — | per template |
-| Predicate sink, nothing rendered — `boolean` | ✅ *response-shape differential, `needs-review` only* | — | — | — |
+| Predicate sink, nothing rendered — `boolean` | ✅ *response-shape differential, own tier, never RCE* | — | — | — |
 | Second-order — lands here, runs there | ✅ | — | — | — |
 | Query-language bridge to the OS | ✅ | — | — | per template |
 | Deserialization sink — `deser` | ✅ *own tier, never called RCE* | — | — | per template |
@@ -395,7 +409,7 @@ a measurement the run never finished gathering:
 
 ```
 [detect] methods: reflected, eval
-[detect] sent 13 probes (13 result(s)): confirmed=0, inconclusive=2, negative=11
+[detect] sent 13 probes (13 result(s)): executed=0, inconclusive=2, negative=11
 ```
 
 Those two would have been someone else's finding. Five mechanisms produce that
@@ -417,7 +431,7 @@ verdict, and they run on every confirmation:
   redirect target, the HTTP reason phrase, and each leaf of a JSON error
   envelope — and the finding names the channel that carried it. The control
   differential is applied to every channel too, so widening where RCEKit looks
-  does not widen what it will call `confirmed`.
+  does not widen what it will call `executed`.
 
 The same instinct runs the other way. Timing **never self-confirms**, a
 deserialization callback is **never** called RCE, a response shape that tracks a
@@ -435,7 +449,7 @@ rather than in your notes:
 | **Consent gate** | Nothing exploitative generates or fires without `--acknowledge-consent`. |
 | **Execution plan** | Prints the exact probe count, sink shapes, safety tiers and any outbound callback destinations **before** the first request goes out. |
 | **Safe by default** | Reverse shells, credential access, cloud metadata, lateral movement and container escape are held back until you raise `--verify-active-risk`; persistence and backdoors need a second flag on top. Bridges that create an object on the target are held to the same ceiling. |
-| **Cleanup commands** | `file`, `write` and the stateful bridges change target state, so every finding — including a `needs-review` — prints what to run to undo it. |
+| **Cleanup commands** | `file`, `write` and the stateful bridges change target state, so every finding — including a `file-write` — prints what to run to undo it. |
 | **Credentials stay put** | The `file` read-back fetch carries the run's `Authorization`/`Cookie` headers only to the *same origin*, and says so out loud when it withholds them. The observed-channel fetch sends none at all unless you hand it a request with `--observe-request`. |
 | **Redacted audit trail** | Every run lands in `exploit_audit.log`, recording that a credential header was sent, never its value. |
 | **Watermarking** | `--watermark` stamps a traceable token into each payload, so a payload found in the client's logs months later is attributable to your run. |
@@ -479,7 +493,7 @@ what it sends, and how to read what comes back.
 | The endpoint takes a serialized object | [Deserialization sinks](docs/reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce) |
 | The sink evaluates my input but renders nothing of it | [When the sink answers yes or no](docs/reference.md#when-the-sink-answers-yes-or-no-and-nothing-else) |
 | The sink is behind a login or a file upload | [Multi-step chains](docs/guide.md#multi-step-chains) |
-| I got `needs-review` / `inconclusive` / `error` | [Reading the results](docs/guide.md#reading-the-results) |
+| I got a weaker tier / `inconclusive` / `error` | [Reading the results](docs/guide.md#reading-the-results) |
 | It says the corpus is unusable | [Troubleshooting](docs/guide.md#troubleshooting) |
 
 ---

@@ -25,7 +25,7 @@
     "--deny-chars",
     "'"
   ],
-  "expect": "confirmed",
+  "expect": "executed",
   "expect_method": "reflected",
   "negative_control": {
     "kind": "class-attribution",

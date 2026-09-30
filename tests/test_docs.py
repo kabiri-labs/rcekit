@@ -66,7 +66,8 @@ ROW_SPLIT_RE = re.compile(r"(?<!\\)\|")
 # it, and so does "unconfirmed" -- which carries its negation inside the word,
 # where a rule about preceding words cannot see it.
 DENIAL_RE = re.compile(
-    r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+`?confirm\w*`?"
+    r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+"
+    r"`?(?:confirm\w*|execut\w*)`?"
     r"|\bunconfirm\w*",
     re.IGNORECASE)
 
@@ -139,11 +140,11 @@ def coverage_ledger(body):
 
 
 class ConfirmationContractTestCase(unittest.TestCase):
-    """The paragraph at the top of the README that says what `confirmed` rests
+    """The paragraph at the top of the README that says what `executed` rests
     on, held against the methods that actually reach it.
 
     It named 2 channels -- a computed result in the response, an out-of-band
-    callback -- and 5 methods reach `confirmed`. `file` fits neither: it has the
+    callback -- and 5 methods reach `executed`. `file` fits neither: it has the
     target write a random token and fetches it back in a second request, which
     is not a callback and is not in the injection response. `write` fits neither
     either, for the same reason with a computed product in place of the token.
@@ -151,7 +152,7 @@ class ConfirmationContractTestCase(unittest.TestCase):
     of it, and the gap had been there since `write` earned its row.
 
     Keyed on `DETECTION_METHODS` rather than a list written out here, so a method
-    added later cannot reach `confirmed` while the paragraph goes on describing
+    added later cannot reach `executed` while the paragraph goes on describing
     the ones that came before it."""
 
     # The phrase in the contract paragraph that accounts for each confirming
@@ -168,20 +169,21 @@ class ConfirmationContractTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         body = README.read_text(encoding="utf-8")
-        start = body.index("Every `confirmed` rests on")
+        start = body.index(f"Every `{rcekit.EXECUTION_TIER}` rests on")
         cls.contract = " ".join(body[start:body.index("\n\n---", start)].split())
 
-    def _confirming(self):
+    def _proving_execution(self):
         return {name for name, method in rcekit.DETECTION_METHODS.items()
-                if method.tier == "confirmed"}
+                if method.tier == rcekit.EXECUTION_TIER}
 
-    def test_every_confirming_method_has_a_channel_in_the_contract(self):
-        for name in sorted(self._confirming()):
+    def test_every_method_proving_execution_has_a_channel_in_the_contract(self):
+        for name in sorted(self._proving_execution()):
             with self.subTest(method=name):
                 phrase = self.CHANNEL_FOR.get(name)
                 self.assertIsNotNone(
                     phrase,
-                    f"`{name}` reaches `confirmed` and this test does not know "
+                    f"`{name}` reaches `{rcekit.EXECUTION_TIER}` and this test "
+                    f"does not know "
                     f"which channel carries its proof -- add it here and check "
                     f"the README paragraph names that channel")
                 self.assertIn(
@@ -191,18 +193,18 @@ class ConfirmationContractTestCase(unittest.TestCase):
 
     def test_the_contract_describes_no_channel_the_engine_cannot_use(self):
         """The other direction. A channel left in the paragraph after its method
-        stopped reaching `confirmed` would describe a proof nothing produces."""
-        stale = sorted(set(self.CHANNEL_FOR) - self._confirming())
+        stopped reaching `executed` would describe a proof nothing produces."""
+        stale = sorted(set(self.CHANNEL_FOR) - self._proving_execution())
         self.assertEqual(
             stale, [],
             f"the contract accounts for {stale}, which no longer reach "
-            f"`confirmed` -- the paragraph is describing a proof the engine "
-            f"does not produce")
+            f"`{rcekit.EXECUTION_TIER}` -- the paragraph is describing a proof "
+            f"the engine does not produce")
 
     def test_the_contract_counts_its_channels(self):
         """The prose quotes a figure, and a figure beside a list that grows is a
         figure that goes stale."""
-        channels = len(set(self.CHANNEL_FOR[name] for name in self._confirming()))
+        channels = len(set(self.CHANNEL_FOR[name] for name in self._proving_execution()))
         self.assertIn(
             f"{channels} channels", self.contract,
             f"the contract names {channels} distinct channels and the prose "
@@ -563,19 +565,25 @@ class DemoTierTestCase(unittest.TestCase):
                     f"says {expected}")
         self.assertGreaterEqual(seen, 3, "no demo headings were checked")
 
-    def test_a_recording_below_confirmed_is_not_described_as_confirming(self):
+    def test_a_recording_below_the_execution_tier_is_not_described_as_confirming(self):
         """The heading is one claim and the alt text is another.
 
         Both said `confirmed` for the Log4Shell demo. Changing the heading alone
         would have left "auto-confirming a blind Log4Shell RCE" underneath it,
-        which is the sentence a screen reader reads out."""
+        which is the sentence a screen reader reads out.
+
+        The exempt tier is read from the module rather than written here. Spelled
+        out, this skipped nothing the moment the tier was renamed, and then
+        failed on the two demos that legitimately do prove execution -- so the
+        check pointed at the wrong rows instead of going quiet, which is the
+        better failure but still the wrong one."""
         seen = 0
         for details in self.DETAILS_RE.findall(self.body):
             heading_tier = self.HEADING_TIER_RE.search(details)
             alt = self.ALT_RE.search(details)
             if not (heading_tier and alt):
                 continue
-            if heading_tier.group(1) == "confirmed":
+            if heading_tier.group(1) == rcekit.EXECUTION_TIER:
                 continue
             seen += 1
             with self.subTest(tier=heading_tier.group(1)):

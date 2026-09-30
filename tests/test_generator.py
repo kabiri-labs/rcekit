@@ -8,6 +8,7 @@ removed obfuscation transforms must stay removed, and the safety filters and
 detection mode must behave as documented.
 """
 
+import ast
 import base64
 import collections
 import inspect
@@ -963,7 +964,7 @@ class GeneratorTestCase(unittest.TestCase):
             results = self.gen.run_verification(
                 records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ",
             )
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            confirmed = [r for r in results if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "the harness must confirm at least one RCE")
             self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
         finally:
@@ -971,12 +972,12 @@ class GeneratorTestCase(unittest.TestCase):
             server.server_close()
 
     def test_timing_oracle_requires_a_reproducible_delay(self):
-        # A blocking/timing payload is only "confirmed" when the delay clears the
+        # A blocking/timing payload is only "executed" when the delay clears the
         # noise margin AND reproduces on the re-fire; a one-off spike is jitter.
         rec = make_record(payload="; sleep 8", expected_channel="timing", blocking=True)
         confirmed, _ = self.gen._evaluate_verify(
             rec, 200, "", elapsed=8.4, baseline=1.0, margin=2.0, elapsed_confirm=8.1)
-        self.assertEqual(confirmed, "confirmed")
+        self.assertEqual(confirmed, "executed")
         # First request was slow but the delay did not reproduce -> not execution.
         jitter, _ = self.gen._evaluate_verify(
             rec, 200, "", elapsed=8.4, baseline=1.0, margin=2.0, elapsed_confirm=1.2)
@@ -993,7 +994,7 @@ class GeneratorTestCase(unittest.TestCase):
         confirmed, _ = self.gen._evaluate_verify(
             rec, 200, "uid=0(root) gid=0(root)", elapsed=0.1, baseline=0.1,
             control_body="welcome home")
-        self.assertEqual(confirmed, "confirmed")
+        self.assertEqual(confirmed, "executed")
         # Same signature already in the baseline response -> not proof of execution.
         inconclusive, _ = self.gen._evaluate_verify(
             rec, 200, "uid=0(root) gid=0(root)", elapsed=0.1, baseline=0.1,
@@ -1031,7 +1032,7 @@ class GeneratorTestCase(unittest.TestCase):
             id_results = [r for r in results if r["payload"] == "; id"]
             self.assertTrue(id_results)
             self.assertEqual(id_results[0]["verdict"], "inconclusive")
-            self.assertFalse(any(r["verdict"] == "confirmed" for r in results),
+            self.assertFalse(any(r["verdict"] == "executed" for r in results),
                              "a signature echoed regardless of payload must not confirm")
         finally:
             server.shutdown()
@@ -1127,7 +1128,7 @@ class GeneratorTestCase(unittest.TestCase):
                 data='{"host": "FUZZ"}',
                 headers=["Content-Type: application/json"],
             )
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            confirmed = [r for r in results if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "a JSON-body RCE must be confirmed")
             self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
         finally:
@@ -1148,7 +1149,7 @@ class GeneratorTestCase(unittest.TestCase):
         executed, _ = self.gen._evaluate_verify(
             rec, 200, "DETECTION_ABC123", elapsed=0.1, baseline=0.1,
             control_body="(command not found)")
-        self.assertEqual(executed, "confirmed")
+        self.assertEqual(executed, "executed")
 
     def _run_detection_echo_verify(self, handler_cls):
         import socketserver
@@ -1192,7 +1193,7 @@ class GeneratorTestCase(unittest.TestCase):
         echoed = self._run_detection_echo_verify(Reflect)
         self.assertTrue(echoed)
         self.assertEqual(echoed[0]["verdict"], "inconclusive")
-        self.assertFalse(any(r["verdict"] == "confirmed" for r in echoed),
+        self.assertFalse(any(r["verdict"] == "executed" for r in echoed),
                          "a reflected canary must not confirm execution")
 
     def test_verify_canary_confirmed_against_executing_target(self):
@@ -1221,7 +1222,7 @@ class GeneratorTestCase(unittest.TestCase):
 
         executed = self._run_detection_echo_verify(Execute)
         self.assertTrue(executed)
-        self.assertEqual(executed[0]["verdict"], "confirmed")
+        self.assertEqual(executed[0]["verdict"], "executed")
 
     def test_expected_delay_ms_is_runtime_aware(self):
         cases = [
@@ -1309,7 +1310,7 @@ class GeneratorTestCase(unittest.TestCase):
                                    blocking=True, expected_delay_ms=1000)]
             results = self.gen.run_verification(
                 records, url=f"http://127.0.0.1:{port}/lookup?host=FUZZ")
-            self.assertEqual(results[0]["verdict"], "confirmed")
+            self.assertEqual(results[0]["verdict"], "executed")
         finally:
             server.shutdown()
             server.server_close()
@@ -1724,7 +1725,7 @@ class VerifyChainTestCase(unittest.TestCase):
                 selected_categories=["basic_enum"], selected_environments=["unix"],
                 selected_contexts=["raw"], selected_encodings=["none"]))
             results = self.gen.run_verification_chain(records, chain)
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            confirmed = [r for r in results if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "the chain must confirm at least one RCE")
             self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
         finally:
@@ -1765,7 +1766,7 @@ class VerifyChainTestCase(unittest.TestCase):
             rec = make_record(payload="run {callback}", category="oob",
                               expected_channel="response", match=None)
             results = self.gen.run_verification_chain([rec], chain)
-            self.assertEqual(results[0]["verdict"], "confirmed")
+            self.assertEqual(results[0]["verdict"], "executed")
             self.assertIn("callback", results[0]["detail"])
         finally:
             server.shutdown(); server.server_close()
@@ -1774,7 +1775,7 @@ class VerifyChainTestCase(unittest.TestCase):
 class DetectionMethodTestCase(unittest.TestCase):
     """Phase 1 — the ReflectedMath detection method and the method-driven engine.
 
-    The confirmation invariant: a ``confirmed`` verdict requires a value the
+    The confirmation invariant: a ``executed`` verdict requires a value the
     target *computed* (arithmetic on random operands), never a literal the
     payload already carried. Proven end-to-end against a live ``/vuln`` sink
     that executes vs a ``/reflect`` sink that only echoes — the direct
@@ -1814,7 +1815,7 @@ class DetectionMethodTestCase(unittest.TestCase):
         exec_body = f"output: {probe.expected} done"
         self.assertEqual(
             self.method.confirm(Observation(200, exec_body, control_body="idle"), probe).status,
-            "confirmed")
+            "executed")
         # Reflection: the target echoes the payload; the sum is never produced.
         self.assertEqual(
             self.method.confirm(Observation(200, probe.payload, control_body="idle"), probe).status,
@@ -1831,10 +1832,10 @@ class DetectionMethodTestCase(unittest.TestCase):
         # The computed value AND the raw expression are both present — the classic
         # command-injection sink that echoes the input (e.g. "PING <input>") while
         # also executing it. The computed value is unforgeable proof of execution,
-        # so this must stay `confirmed`; the reflection is only noted.
+        # so this must stay `executed`; the reflection is only noted.
         body = f"{probe.expected} but also {probe.forbidden}"
         verdict = self.method.confirm(Observation(200, body, control_body="idle"), probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
         self.assertIn("reflects the payload verbatim", verdict.evidence)
 
     def test_sink_raw_omits_leading_separator(self):
@@ -1974,14 +1975,14 @@ class DetectionMethodTestCase(unittest.TestCase):
             rec = make_record(environment="unix", context="raw")
             vuln = self.gen.run_detection(
                 [rec], url=f"http://127.0.0.1:{port}/vuln?cmd=FUZZ", methods=["reflected"])
-            confirmed = [r for r in vuln if r["verdict"] == "confirmed"]
+            confirmed = [r for r in vuln if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "ReflectedMath must confirm against an executing sink")
-            self.assertTrue(all(r["tier"] == "confirmed" and r["method"] == "reflected"
+            self.assertTrue(all(r["tier"] == "executed" and r["method"] == "reflected"
                                 for r in confirmed))
 
             reflect = self.gen.run_detection(
                 [rec], url=f"http://127.0.0.1:{port}/reflect?cmd=FUZZ", methods=["reflected"])
-            self.assertFalse([r for r in reflect if r["verdict"] == "confirmed"],
+            self.assertFalse([r for r in reflect if r["verdict"] == "executed"],
                              "a target that only echoes input must never be confirmed")
         finally:
             server.shutdown()
@@ -2017,7 +2018,7 @@ class DetectionMethodTestCase(unittest.TestCase):
             rec = make_record(environment="unix", context="raw")
             results = self.gen.run_detection(
                 [rec], url=f"http://127.0.0.1:{port}/ping?ip=FUZZ", methods=["reflected"])
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            confirmed = [r for r in results if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "echo-back command injection must be confirmed, not downgraded")
         finally:
             server.shutdown()
@@ -2171,7 +2172,7 @@ class RawRequestInputTestCase(unittest.TestCase):
             rec = make_record(environment="unix", context="raw")
             results = gen.run_detection([rec], url=url, methods=["reflected"],
                                         method=method, data=data, headers=headers)
-            self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+            self.assertTrue([r for r in results if r["verdict"] == "executed"],
                             "the -r request must reach the sink and confirm execution")
         finally:
             server.shutdown()
@@ -2211,7 +2212,7 @@ class FileBasedTestCase(unittest.TestCase):
         # Fetched file contains the token -> confirmed.
         self.assertEqual(
             method.confirm(Observation(200, "ok", followup_body="TOK123\n"), probe).status,
-            "confirmed")
+            "executed")
         # File served but without the token (e.g. 404 body) -> negative.
         self.assertEqual(
             method.confirm(Observation(200, "ok", followup_body="not found"), probe).status,
@@ -2279,12 +2280,12 @@ class FileBasedTestCase(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
-        confirmed = [r for r in run(execute=True) if r["verdict"] == "confirmed"]
+        confirmed = [r for r in run(execute=True) if r["verdict"] == "executed"]
         self.assertTrue(confirmed, "an executing+serving sink must confirm file-based RCE")
         self.assertTrue(all(r.get("cleanup") for r in confirmed), "each finding needs a cleanup command")
         self.assertTrue(os.listdir(webroot), "the token file must actually be written")
 
-        self.assertFalse([r for r in run(execute=False) if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in run(execute=False) if r["verdict"] == "executed"],
                          "a non-executing sink must never be confirmed")
 
     def test_methods_flag_file_requires_webroot(self):
@@ -2298,8 +2299,13 @@ class FileBasedTestCase(unittest.TestCase):
 class ParametricTimeTestCase(unittest.TestCase):
     """Phase 4 — hardened blind timing. A controlled 0/N/2N delay series must
     produce a linear response-time increase; jitter cannot fake it. Timing has
-    no computed value, so its ceiling is `needs-review` — it never confirms on
-    its own (I2/I3)."""
+    no computed value, so it never reaches `executed` on its own (I2/I3).
+
+    Its ceiling is `timing-sink`: proven, and about something narrower than
+    execution — the target honoured a delay RCEKit injected. It reported
+    `needs-review` until 3.0.0, which named the tool's confidence rather than
+    the target's behaviour, for a regression with drift modelled out and the
+    delay term held three standard errors clear of the residual."""
 
     def setUp(self):
         self.gen = RCEKit()
@@ -2317,9 +2323,18 @@ class ParametricTimeTestCase(unittest.TestCase):
                  Observation(status=200, body="", elapsed=elapsed))
                 for delay, elapsed in samples]
 
-    def test_tier_is_needs_review_and_method_is_aggregate(self):
-        self.assertEqual(self.method.tier, "needs-review")
+    def test_tier_is_its_own_proven_tier_and_method_is_aggregate(self):
+        self.assertEqual(self.method.tier, "timing-sink")
         self.assertTrue(self.method.aggregate)
+
+    def test_the_ceiling_is_not_execution_and_not_a_confidence_word(self):
+        """Both halves of the 3.0.0 rework, on the method it turns on.
+
+        The tier must stay out of `executed` -- a delay honoured is not a shell
+        honouring it -- and must stop naming a confidence for a measurement
+        that has settled."""
+        self.assertNotEqual(self.method.tier, rcekit.EXECUTION_TIER)
+        self.assertNotEqual(self.method.tier, "needs-review")
 
     def test_screen_probes_cover_zero_and_n_per_separator(self):
         # Round one only screens: one 0s and one Ns probe per candidate
@@ -2382,10 +2397,13 @@ class ParametricTimeTestCase(unittest.TestCase):
         self.assertTrue(all(p.phase == "regress" for p in nxt),
                         "a working separator must go straight to the regression")
 
-    def test_confirm_series_linear_response_is_needs_review(self):
+    def test_confirm_series_linear_response_is_a_timing_sink(self):
         verdict = self.method.confirm_series(
             self._series({0: [0.10, 0.12], 2.0: [2.11, 2.09], 4.0: [4.12, 4.08]}))
-        self.assertEqual(verdict.status, "needs-review")
+        self.assertEqual(verdict.status, "timing-sink")
+        # The evidence has to say what was proven, since the status no longer
+        # says "review this". The old string opened "blind timing candidate".
+        self.assertIn("honoured a delay", verdict.evidence)
 
     def test_latency_drift_is_not_mistaken_for_a_sleep(self):
         # A target that simply gets slower during the run -- progressive load, a
@@ -2412,9 +2430,9 @@ class ParametricTimeTestCase(unittest.TestCase):
             self._series({0: [0.1, 0.1], 2.0: [4.1, 4.0], 4.0: [2.1, 2.0]}))
         self.assertEqual(nonmono.status, "negative")
 
-    def test_end_to_end_sleeping_sink_is_needs_review_never_confirmed(self):
+    def test_end_to_end_sleeping_sink_is_a_timing_sink_never_executed(self):
         # The sink sleeps for the injected `sleep N`; a linear response must be
-        # reported needs-review, never confirmed.
+        # reported `timing-sink`, never `executed`.
         import http.server
         import re as _re
         import socketserver
@@ -2452,10 +2470,14 @@ class ParametricTimeTestCase(unittest.TestCase):
 
         vuln = run(vulnerable=True)
         self.assertTrue(vuln)
-        self.assertEqual(vuln[0]["verdict"], "needs-review")
-        self.assertEqual(vuln[0]["tier"], "needs-review")
-        self.assertFalse([r for r in vuln if r["verdict"] == "confirmed"],
-                         "timing must never self-confirm")
+        self.assertEqual(vuln[0]["verdict"], "timing-sink")
+        self.assertEqual(vuln[0]["tier"], "timing-sink")
+        self.assertFalse([r for r in vuln if r["verdict"] == rcekit.EXECUTION_TIER],
+                         "timing must never prove execution on its own")
+        # And not under the candidate tier either, which is what it used to
+        # report against this very sink.
+        self.assertFalse([r for r in vuln if r["verdict"] == "needs-review"],
+                         "a settled regression is not a candidate")
 
         flat = run(vulnerable=False)
         self.assertEqual(flat[0]["verdict"], "negative")
@@ -2502,7 +2524,7 @@ class EvalExprTestCase(unittest.TestCase):
         # Evaluated: product present, literal absent.
         self.assertEqual(
             self.method.confirm(Observation(200, f"= {probe.expected} =", control_body="x"), probe).status,
-            "confirmed")
+            "executed")
         # Reflected: literal echoed, product never produced.
         self.assertEqual(
             self.method.confirm(Observation(200, f"= {probe.forbidden} =", control_body="x"), probe).status,
@@ -2555,11 +2577,11 @@ class EvalExprTestCase(unittest.TestCase):
             rec = make_record(environment="python", context="raw", sink="ssti")
             evaluated = self.gen.run_detection(
                 [rec], url=f"http://127.0.0.1:{port}/ssti?q=FUZZ", methods=["eval"])
-            self.assertTrue([r for r in evaluated if r["verdict"] == "confirmed"],
+            self.assertTrue([r for r in evaluated if r["verdict"] == "executed"],
                             "EvalExpr must confirm against an expression evaluator")
             reflected = self.gen.run_detection(
                 [rec], url=f"http://127.0.0.1:{port}/reflect?q=FUZZ", methods=["eval"])
-            self.assertFalse([r for r in reflected if r["verdict"] == "confirmed"],
+            self.assertFalse([r for r in reflected if r["verdict"] == "executed"],
                              "a target that only echoes input must never be confirmed")
         finally:
             server.shutdown()
@@ -2652,7 +2674,7 @@ class EvadeTestCase(unittest.TestCase):
                 # that refuses the canonical shapes, where nothing confirms
                 # early. Measured: 10 sent here, 7 of them confirm.
                 config={"evade": "low", "confirm_depth": "every"})
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
+            confirmed = [r for r in results if r["verdict"] == "executed"]
             self.assertTrue(confirmed, "the ${IFS} variant must still execute and confirm")
             self.assertTrue(any("${IFS}" in r["payload"] for r in confirmed),
                             "no space-free payload executed against a shell sink")
@@ -2686,7 +2708,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/b64?host=FUZZ", methods=["reflected"])
-            self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+            self.assertTrue([r for r in results if r["verdict"] == "executed"],
                             "base64-encoded command output must still confirm")
 
     def test_backtick_variant_survives_a_dollar_paren_filter(self):
@@ -2704,7 +2726,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/filter?ip=FUZZ", methods=["reflected"])
-            self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+            self.assertTrue([r for r in results if r["verdict"] == "executed"],
                             "the backtick variant must survive a $( filter")
 
     def test_eval_is_not_fooled_by_random_numbers_in_the_page(self):
@@ -2720,7 +2742,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [make_record(environment="python", context="raw")],
                 url=f"{base}/x?q=FUZZ", methods=["eval"])
-            self.assertFalse([r for r in results if r["verdict"] == "confirmed"],
+            self.assertFalse([r for r in results if r["verdict"] == "executed"],
                              "random numbers on the page must not be a false positive")
 
     def test_timing_is_not_fooled_by_random_latency(self):
@@ -2738,7 +2760,7 @@ class DetectionRobustnessTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["time"],
                 config={"time_base": 0.6})
-            self.assertFalse([r for r in results if r["verdict"] == "confirmed"],
+            self.assertFalse([r for r in results if r["verdict"] == "executed"],
                              "random latency must never be confirmed")
             self.assertTrue(all(r["verdict"] == "negative" for r in results),
                             "a non-linear latency response is negative, not even a candidate")
@@ -2784,7 +2806,7 @@ class ReflectionControlTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+        self.assertEqual(results[0]["verdict"], "executed", results[0])
 
 
 class CompressedResponseTestCase(unittest.TestCase):
@@ -2795,7 +2817,7 @@ class CompressedResponseTestCase(unittest.TestCase):
     plain: the same run confirmed through a 400 carrying a Groovy exception and
     missed the 200 carrying real command execution. These hold the decode in
     place and hold the oracle to the same standard through it — a compressed
-    response must not become a cheaper route to `confirmed`."""
+    response must not become a cheaper route to `executed`."""
 
     def setUp(self):
         self.gen = RCEKit()
@@ -2890,12 +2912,12 @@ class CompressedResponseTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+        self.assertEqual(results[0]["verdict"], "executed", results[0])
 
     def test_reflection_through_a_gzipped_response_still_does_not_confirm(self):
         # The fix widens what the oracle can read, not what counts as proof. A
         # target that only echoes must stay unconfirmed through the decode, or
-        # decompression has become a route to `confirmed` that execution is not.
+        # decompression has become a route to `executed` that execution is not.
         def route(method, path, params, headers, body):
             return 200, self._gzip("you sent " + params.get("q", "")), \
                 [("Content-Encoding", "gzip")]
@@ -2903,7 +2925,7 @@ class CompressedResponseTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_verification([self.record], url=f"{base}/echo?q=FUZZ")
         self.assertEqual(len(results), 1)
-        self.assertNotEqual(results[0]["verdict"], "confirmed", results[0])
+        self.assertNotEqual(results[0]["verdict"], "executed", results[0])
 
     def test_an_error_body_is_decoded_too(self):
         # The evaluator that surfaces its value only in a 500 or a 400 is the
@@ -2919,7 +2941,7 @@ class CompressedResponseTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_verification([self.record], url=f"{base}/sink?q=FUZZ")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["verdict"], "confirmed", results[0])
+        self.assertEqual(results[0]["verdict"], "executed", results[0])
 
 
 class InsecureDowngradeNoticeTestCase(unittest.TestCase):
@@ -3381,7 +3403,7 @@ class SeparatorSweepTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "a ';'-filtering sink must still be confirmed via another separator")
 
     def test_a_non_vulnerable_sink_stays_negative_under_the_sweep(self):
@@ -3393,7 +3415,7 @@ class SeparatorSweepTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
         self.assertTrue(results)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class SelfSeparatingContextTestCase(unittest.TestCase):
@@ -3439,7 +3461,7 @@ class SelfSeparatingContextTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [make_record(environment="unix", context="shell_single_quoted")],
                 url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "shell_single_quoted must confirm on a single-quoted sink")
 
 
@@ -3497,7 +3519,7 @@ class ShellCapableEnvironmentTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self._rec("php")], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "a system() sink must confirm under --environments php")
 
 
@@ -3591,7 +3613,7 @@ class FilteredWaveTestCase(unittest.TestCase):
             config={"time_base": 1, "deny_chars": ";|"}, timeout=8)
         self.assertTrue([r for r in results if "&&" in (r.get("payload") or "")],
                         "the wave the filter left intact must still be sent")
-        self.assertIn("needs-review", {r["verdict"] for r in results},
+        self.assertIn("timing-sink", {r["verdict"] for r in results},
                       "the sink is reachable through a surviving separator")
 
     def test_the_cost_estimate_counts_the_wave_the_run_will_send(self):
@@ -3754,7 +3776,7 @@ class TargetProfileEmptyLadderCLITestCase(unittest.TestCase):
         result = self._detect("--max-length", "19")
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("NOTHING WAS TESTED", result.stdout)
-        self.assertNotIn("CONFIRMED execution", result.stdout)
+        self.assertNotIn("EXECUTED (", result.stdout)
 
     def test_the_message_names_the_profile_as_the_cause(self):
         result = self._detect("--max-length", "19")
@@ -3862,7 +3884,7 @@ class ProbeDepthTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "a sink that only strips substitutions is still exploitable")
 
     def test_a_sink_that_appends_a_redirect_is_confirmed(self):
@@ -3880,7 +3902,7 @@ class ProbeDepthTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"])
+        self.assertTrue([r for r in results if r["verdict"] == "executed"])
 
     def test_the_extra_shapes_do_not_cost_precision(self):
         # More probe shapes means more chances to be wrong; re-prove that an
@@ -3892,7 +3914,7 @@ class ProbeDepthTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected", "eval"])
         self.assertTrue(results)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class QuotedShellCarrierTestCase(unittest.TestCase):
@@ -3951,7 +3973,7 @@ class QuotedShellCarrierTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [record], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, "a quoted sink must be reachable without --contexts")
         self.assertTrue(any(r["context"] == "shell_single_quoted" for r in confirmed))
 
@@ -4142,11 +4164,11 @@ class LookupCallbackTestCase(unittest.TestCase):
         A callback proves the sink resolved a URI RCEKit chose. It does not
         prove the target ran attacker code -- Log4Shell becomes RCE when the
         LDAP server answers with a loadable class, and this listener answers
-        with nothing. Emitting `confirmed` would print a DNS resolution under
-        CONFIRMED execution and hand it to JSON consumers as RCE."""
+        with nothing. Emitting `executed` would print a DNS resolution under
+        the EXECUTED heading and hand it to JSON consumers as RCE."""
         self.assertIs(rcekit.DETECTION_METHODS["lookup"], rcekit.LookupCallback)
         self.assertEqual(rcekit.LookupCallback.tier, "lookup-sink")
-        self.assertNotEqual(rcekit.LookupCallback.tier, "confirmed")
+        self.assertNotEqual(rcekit.LookupCallback.tier, "executed")
 
     def test_a_callback_never_produces_a_confirmed_verdict(self):
         import random as _random
@@ -4165,19 +4187,137 @@ class LookupCallbackTestCase(unittest.TestCase):
             self.assertEqual(verdict.status, "lookup-sink", probe.payload)
 
     def test_the_overall_verdict_never_folds_it_into_execution(self):
-        # A proven sink outranks a clean run and is outranked by a suspected
-        # RCE, exactly as `deserialization-sink` is.
+        # A proven sink outranks a clean run and is outranked only by proven
+        # execution, exactly as `deserialization-sink` is.
         self.assertEqual(
             rcekit.overall_detection_verdict([{"verdict": "lookup-sink"}]), "lookup-sink")
         self.assertEqual(rcekit.overall_detection_verdict(
-            [{"verdict": "lookup-sink"}, {"verdict": "confirmed"}]), "confirmed")
+            [{"verdict": "lookup-sink"}, {"verdict": "executed"}]), "executed")
+        # And above `needs-review`, which it did not used to be. A proven
+        # lookup outranks the only thing left under `needs-review` -- `deser`'s
+        # shape fingerprint, which is a guess.
         self.assertEqual(rcekit.overall_detection_verdict(
-            [{"verdict": "lookup-sink"}, {"verdict": "needs-review"}]), "needs-review")
+            [{"verdict": "lookup-sink"}, {"verdict": "needs-review"}]), "lookup-sink")
+
+
+class TierVocabularyTestCase(unittest.TestCase):
+    """The old verdict names are gone from the module, not merely unused.
+
+    A rename that leaves one branch spelling the old name produces a verdict
+    no consumer expects and no test asks for, and `--detect-json` is a
+    published schema. Read from the source with `ast` rather than by grepping,
+    so a mention inside a docstring or a comment about the history -- of which
+    this release deliberately leaves several -- does not read as a live
+    literal.
+    """
+
+    RETIRED = ("confirmed",)
+
+    def _string_constants(self):
+        source = Path(rcekit.__file__).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                yield node
+
+    def test_no_retired_verdict_name_survives_as_a_literal(self):
+        for node in self._string_constants():
+            for retired in self.RETIRED:
+                # An exact match is a status; the word inside a sentence is
+                # prose, and the report still uses "confirmed" as a verb.
+                if node.value == retired:
+                    self.fail(f"rcekit.py line {node.lineno} still carries the "
+                              f"retired verdict {retired!r} as a bare literal")
+
+    def test_every_verdict_the_engine_emits_is_one_of_the_documented_names(self):
+        """The other direction. A tier spelled one way on the class and another
+        in the branch that emits it is two verdicts, and only one is documented."""
+        documented = {rcekit.EXECUTION_TIER, "timing-sink", "file-write",
+                      "evaluation-sink", "deserialization-sink", "lookup-sink",
+                      "needs-review", "negative", "inconclusive", "blocked",
+                      "error", "nothing-tested"}
+        emitted = set()
+        for method in rcekit.DETECTION_METHODS.values():
+            emitted |= {method.tier} | set(method.also_reports)
+        undocumented = sorted(emitted - documented)
+        self.assertEqual(undocumented, [],
+                         f"the engine emits {undocumented}, which the verdict "
+                         f"vocabulary does not name")
+
+
+class InBandSectionTestCase(unittest.TestCase):
+    """The text report's sections for verdicts that are proven and are not
+    execution, held against the tiers the engine can actually emit.
+
+    This exists for one regression. The cleanup line was printed in exactly two
+    places in the whole report -- under the execution section and under
+    NEEDS-REVIEW -- because `write`'s uninterpreted file shared the latter with
+    `time`, `boolean` and `deser`'s fingerprint. Giving it its own tier moved
+    it out of that block, and a `file-write` finding has left a file on the
+    target: a section without the cleanup line leaves the artifact there
+    unmentioned.
+    """
+
+    def _sections(self):
+        return {verdict: (heading, closing)
+                for verdict, heading, closing in rcekit.IN_BAND_SECTIONS}
+
+    def test_every_weaker_tier_the_engine_emits_has_a_section(self):
+        """Written from the classes, so a tier added later cannot report into a
+        run that prints no section for it."""
+        emitted = set()
+        for method in rcekit.DETECTION_METHODS.values():
+            emitted |= {method.tier} | set(method.also_reports)
+        emitted -= {rcekit.EXECUTION_TIER}
+        # `deser` and `lookup` keep hand-written blocks, each closing on its own
+        # remediation paragraph.
+        emitted -= {"deserialization-sink", "lookup-sink"}
+        missing = sorted(emitted - set(self._sections()))
+        self.assertEqual(missing, [],
+                         f"no report section for {missing}, which a method emits")
+
+    def test_the_sections_describe_no_tier_the_engine_cannot_emit(self):
+        """The other direction: a section for a verdict nothing produces is a
+        paragraph describing a finding the tool cannot reach."""
+        emitted = set()
+        for method in rcekit.DETECTION_METHODS.values():
+            emitted |= {method.tier} | set(method.also_reports)
+        stale = sorted(set(self._sections()) - emitted)
+        self.assertEqual(stale, [],
+                         f"the report has a section for {stale}, which nothing emits")
+
+    def test_the_sections_are_in_the_collapsed_verdict_order(self):
+        """One order, read two ways. A report that lists the weakest finding
+        first while the collapsed verdict names the strongest disagrees with
+        itself about what the operator must not miss."""
+        listed = [verdict for verdict, _h, _c in rcekit.IN_BAND_SECTIONS]
+        ranked = []
+        for verdict in listed:
+            others = [v for v in listed if v != verdict]
+            # Against every other section's verdict, the collapsed answer has
+            # to prefer whichever of the two this order puts first.
+            for other in others:
+                winner = rcekit.overall_detection_verdict(
+                    [{"verdict": verdict}, {"verdict": other}])
+                expected = verdict if listed.index(verdict) < listed.index(other) else other
+                self.assertEqual(winner, expected,
+                                 f"the report lists {listed} but the collapsed "
+                                 f"verdict prefers {winner} of {verdict}/{other}")
+            ranked.append(verdict)
+        self.assertEqual(ranked, listed)
+
+    def test_each_section_says_what_it_does_not_prove(self):
+        for verdict, (heading, closing) in self._sections().items():
+            with self.subTest(verdict=verdict):
+                self.assertTrue(heading.strip(), verdict)
+                # The closing sentence is what stops a proven non-execution
+                # finding being read as RCE, which is the whole reason these
+                # are separate sections rather than one list.
+                self.assertTrue(len(closing) > 40, f"{verdict}: {closing!r}")
 
 
 class OobCallbackTestCase(unittest.TestCase):
     """Out-of-band detection. A fully blind sink -- nothing in the response, no
-    writable web root -- had no path to a `confirmed` verdict at all."""
+    writable web root -- had no path to an `executed` verdict at all."""
 
     def setUp(self):
         self.gen = RCEKit()
@@ -4246,7 +4386,7 @@ class OobCallbackTestCase(unittest.TestCase):
         listener.record("dns", "10.0.0.9", f"{arrived.expected}.x.example")
         series = [(p, Observation(status=200, body="ok")) for p in probes]
         verdicts = dict((p.payload, v.status) for p, v in method.confirm_each(series))
-        self.assertEqual(verdicts[arrived.payload], "confirmed")
+        self.assertEqual(verdicts[arrived.payload], "executed")
         self.assertEqual({v for payload, v in verdicts.items() if payload != arrived.payload},
                          {"negative"})
 
@@ -4288,10 +4428,10 @@ class OobCallbackTestCase(unittest.TestCase):
                             "oob_listener": listener, "oob_wait": 3.0})
         finally:
             listener._servers[0].shutdown()
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         if not confirmed:
             self.skipTest("no HTTP fetch tool (curl/wget) available in this environment")
-        self.assertTrue(all(r["tier"] == "confirmed" for r in confirmed))
+        self.assertTrue(all(r["tier"] == "executed" for r in confirmed))
 
     def test_a_non_executing_sink_produces_no_callback(self):
         listener = OOBListener()
@@ -4309,7 +4449,7 @@ class OobCallbackTestCase(unittest.TestCase):
         finally:
             listener._servers[0].shutdown()
         self.assertTrue(results)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class ProbeRoundsTestCase(unittest.TestCase):
@@ -4424,7 +4564,7 @@ class SpaceFilterTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"])
+        self.assertTrue([r for r in results if r["verdict"] == "executed"])
 
     def test_a_space_filtering_sink_that_is_inert_stays_negative(self):
         def route(method, path, params, headers, body):
@@ -4434,7 +4574,7 @@ class SpaceFilterTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"])
         self.assertTrue(results)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class MethodSafetyRungTestCase(unittest.TestCase):
@@ -4473,16 +4613,29 @@ class MethodSafetyRungTestCase(unittest.TestCase):
                 with self.subTest(method=name, tier=tier):
                     self.assertNotEqual(tier, method.tier,
                                         "also_reports repeats the method's own tier")
-                    self.assertNotEqual(tier, "confirmed",
-                                        f"{name} lists `confirmed` as a weaker tier")
+                    self.assertNotEqual(tier, rcekit.EXECUTION_TIER,
+                                        f"{name} lists the execution tier as a "
+                                        f"weaker tier")
 
-    def test_the_methods_that_report_needs_review_are_the_ones_that_say_so(self):
-        # Pinned against the code that emits it, so the declaration cannot
-        # quietly stop being true. `write` reports it for a file that is served
-        # but not interpreted, `deser` for a shape fingerprint.
-        declared = {name for name, method in rcekit.DETECTION_METHODS.items()
-                    if "needs-review" in method.also_reports}
-        self.assertEqual(declared, {"write", "deser"})
+    def test_the_weaker_tiers_a_method_reports_are_the_ones_it_says(self):
+        # Pinned against the code that emits them, so the declaration cannot
+        # quietly stop being true.
+        declared = {name: set(method.also_reports)
+                    for name, method in rcekit.DETECTION_METHODS.items()
+                    if method.also_reports}
+        self.assertEqual(declared, {"write": {"file-write"},
+                                    "deser": {"needs-review"}})
+
+    def test_needs_review_is_left_with_one_reporter(self):
+        """The point of the 3.0.0 retier, as a property rather than a rename.
+
+        `needs-review` had four reporters and three of them had measured their
+        answer. It is now `deser`'s shape fingerprint alone -- the one signal
+        that really is a candidate -- and that is what makes the word mean
+        something again. A settled measurement arriving here is the regression."""
+        reporters = {name for name, method in rcekit.DETECTION_METHODS.items()
+                     if "needs-review" in {method.tier} | set(method.also_reports)}
+        self.assertEqual(reporters, {"deser"})
 
     def test_a_probe_inherits_its_method_rung_unless_it_names_its_own(self):
         method = rcekit.LookupCallback(RCEKit(), {"oob_host": "x.example"})
@@ -4763,7 +4916,7 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
     """A sink that returns no output cannot be confirmed by a results-based
     method — there is nowhere for the computed value to appear. That is what
     'blind' means, not a limitation to route around. But a run that only says
-    "no execution confirmed" reads exactly like a clean target."""
+    "no execution proven" reads exactly like a clean target."""
 
     class _Args:
         def __init__(self, webroot=None, web_base_url=None,
@@ -4808,9 +4961,13 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         self.assertNotIn("--webroot DIR", joined)
         self.assertIn("--methods oob", joined)
 
-    def test_time_is_marked_as_needs_review_only(self):
+    def test_time_is_marked_as_reaching_its_own_tier_and_not_execution(self):
         joined = "\n".join(rcekit.blind_sink_advice(["reflected"], self._Args()))
-        self.assertRegex(joined, r"--methods time.*needs-review only")
+        self.assertRegex(joined, r"--methods time.*timing-sink, NOT execution")
+        # And not as a candidate. The advice is a command the operator will run
+        # and then read a verdict from, and `needs-review` is not the word that
+        # comes back from it.
+        self.assertNotRegex(joined, r"--methods time.*needs-review")
 
     # How each tier may be spelled in prose. A tier missing from this map is one
     # no advice line knows how to describe, which the test below says out loud
@@ -4821,8 +4978,11 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
     # assertion that answers the same way for the right reason and the broken
     # one, which is the defect this whole file exists to catch.
     _TIER_WORDS = {
-        "confirmed": ("confirm",),
+        "executed": ("execution", "executed"),
         "needs-review": ("needs-review",),
+        "timing-sink": ("timing sink", "timing-sink"),
+        "file-write": ("file write", "file-write"),
+        "evaluation-sink": ("evaluation sink", "evaluation-sink"),
         "lookup-sink": ("lookup sink", "lookup-sink"),
         "deserialization-sink": ("deserialization sink", "deserialization-sink"),
     }
@@ -4831,7 +4991,8 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
     # and so does "unconfirmed", which carries its negation inside the word
     # where a rule about preceding words cannot see it.
     _DENIAL_RE = re.compile(
-        r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+`?confirm\w*`?"
+        r"\b(?:never|not|no|without|cannot(?:\s+be)?)\s+"
+        r"`?(?:confirm\w*|execut\w*)`?"
         r"|\bunconfirm\w*",
         re.IGNORECASE)
 
@@ -4840,9 +5001,8 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         has to be the tier the method can reach.
 
         `--methods lookup` shipped in this list saying "confirms" while the
-        method reported `lookup-sink` -- beside `oob` and `file`, where the same
-        word does mean confirmed execution, and `time`, which is marked
-        needs-review only. The correction had already landed on
+        method reported `lookup-sink` -- beside `oob` and `file`, where the
+        same word does mean proven execution. The correction had already landed on
         `LookupCallback.tier`; nothing compared the class to the sentence
         describing it, so the sentence the operator reads kept the old claim.
 
@@ -4857,7 +5017,16 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
                 continue
             name = match.group(1)
             named += 1
-            claim = self._DENIAL_RE.sub("", line)
+            # The claim is the parenthetical, not the whole line. The rest of
+            # the line is the command, and a flag name is not a promise: the
+            # `file` line spells `--file-write-path`, which collides with the
+            # `file-write` tier and read as the `file` method claiming a tier
+            # it does not reach.
+            parenthetical = re.search(r"\(([^)]*)\)\s*$", line)
+            self.assertIsNotNone(
+                parenthetical,
+                f"the {name} line carries no parenthetical claim: {line}")
+            claim = self._DENIAL_RE.sub("", parenthetical.group(1))
             with self.subTest(method=name):
                 self.assertIn(name, rcekit.DETECTION_METHODS,
                               "the advice names a method that does not exist")
@@ -4914,7 +5083,7 @@ class BlindSinkAdviceCLITestCase(unittest.TestCase):
             return 200, out
 
         result = self._detect(route, "--methods", "reflected")
-        self.assertIn("CONFIRMED execution", result.stdout)
+        self.assertIn("EXECUTED (", result.stdout)
         self.assertNotIn("NO OUTPUT", result.stdout)
 
 
@@ -4975,7 +5144,7 @@ class QuoteWrappingContextTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [make_record(environment="unix", context="attribute")],
                 url=f"{base}/x?q=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"])
+        self.assertTrue([r for r in results if r["verdict"] == "executed"])
 
 
 class OobWaitTestCase(unittest.TestCase):
@@ -5038,7 +5207,7 @@ class OobWaitTestCase(unittest.TestCase):
         listener.record("dns", "10.0.0.9", f"{probes[0].expected}.x.example")
         series = [(p, Observation(status=200, body="ok")) for p in probes]
         verdicts = {p.payload: v.status for p, v in method.confirm_each(series)}
-        self.assertEqual(verdicts[probes[0].payload], "confirmed")
+        self.assertEqual(verdicts[probes[0].payload], "executed")
         self.assertEqual(verdicts[probes[1].payload], "negative")
 
 
@@ -6025,9 +6194,9 @@ class FileReadBackTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
                 config={"file_write_path": writedir,
                         "file_read_url": base + "/download?f={path_enc}"}, timeout=15)
-        self.assertFalse([r for r in without if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in without if r["verdict"] == "executed"],
                          "precondition: nothing serves the write directory")
-        self.assertTrue([r for r in with_channel if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in with_channel if r["verdict"] == "executed"],
                         "a download handler must work as the read-back channel")
 
     def test_the_webroot_alias_still_confirms_on_a_web_root(self):
@@ -6037,7 +6206,7 @@ class FileReadBackTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
                 config={"webroot": writedir, "web_base_url": f"{base}/files"}, timeout=15)
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"])
+        self.assertTrue([r for r in results if r["verdict"] == "executed"])
 
     # -- authentication on the read-back fetch -------------------------------
 
@@ -6110,9 +6279,9 @@ class FileReadBackTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
                 config=config, timeout=15)
 
-        self.assertTrue([r for r in authed if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in authed if r["verdict"] == "executed"],
                         "the read-back fetch must authenticate like the write did")
-        self.assertFalse([r for r in bare if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in bare if r["verdict"] == "executed"],
                          "precondition: without the credential the handler refuses")
 
     def test_a_clean_target_stays_negative_through_the_new_channel(self):
@@ -6123,7 +6292,7 @@ class FileReadBackTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
                 config={"file_write_path": writedir,
                         "file_read_url": base + "/download?f={path_enc}"}, timeout=15)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class EvalCarrierOperandTestCase(unittest.TestCase):
@@ -6213,7 +6382,7 @@ class EvalCarrierOperandTestCase(unittest.TestCase):
         """The payload must not contain the answer.
 
         If it did, a target that merely echoed the payload would return the
-        expected value and read as `confirmed` -- reflection forging execution,
+        expected value and read as `executed` -- reflection forging execution,
         which is the one thing this oracle exists to prevent."""
         for name, probe in self._by_carrier(self._probes()).items():
             self.assertNotIn(probe.expected, probe.payload,
@@ -6497,7 +6666,7 @@ class ConfirmDepthTestCase(unittest.TestCase):
         import collections
         per_carrier = collections.Counter(
             (r["method"], r["environment"], r["context"]) for r in results
-            if r["verdict"] == "confirmed")
+            if r["verdict"] == "executed")
         self.assertTrue(per_carrier, "precondition: the target must confirm")
         self.assertEqual(set(per_carrier.values()), {1},
                          f"a carrier confirmed more than once: {per_carrier}")
@@ -6506,7 +6675,7 @@ class ConfirmDepthTestCase(unittest.TestCase):
         # The distinction the whole change rests on: per carrier, never per
         # candidate.
         results = self._run()
-        confirmed = {r["environment"] for r in results if r["verdict"] == "confirmed"}
+        confirmed = {r["environment"] for r in results if r["verdict"] == "executed"}
         self.assertGreater(len(confirmed), 1,
                            f"only one environment was examined: {confirmed}")
 
@@ -6543,7 +6712,7 @@ class ConfirmDepthTestCase(unittest.TestCase):
         """The stop has to read the verdict the run ends up reporting.
 
         With `--observe-url` a probe can be negative in the response it drew and
-        `confirmed` on the observed channel a moment later. Deciding the stop
+        `executed` on the observed channel a moment later. Deciding the stop
         from the pre-poll verdict left the carrier running after it had in fact
         confirmed, spending the budget the stop exists to hand to carriers not
         yet examined -- the coverage loss this change was written to remove,
@@ -6593,10 +6762,10 @@ class ConfirmDepthTestCase(unittest.TestCase):
         import collections
         per_carrier = collections.Counter(
             (r["method"], r["environment"], r["context"]) for r in results
-            if r["verdict"] == "confirmed")
+            if r["verdict"] == "executed")
         self.assertTrue(per_carrier, "precondition: the observed channel must confirm")
         self.assertTrue(all("OBSERVED" in r["detail"] for r in results
-                            if r["verdict"] == "confirmed"),
+                            if r["verdict"] == "executed"),
                         "precondition: the confirmation must come from the poll")
         self.assertEqual(set(per_carrier.values()), {1},
                          "a carrier kept probing after it had confirmed on the "
@@ -7032,7 +7201,7 @@ class PayloadRefusedTestCase(unittest.TestCase):
     def test_a_confirmation_still_outranks_everything(self):
         self.assertEqual(
             rcekit.overall_detection_verdict(
-                [{"verdict": "blocked"}] * 5 + [{"verdict": "confirmed"}]), "confirmed")
+                [{"verdict": "blocked"}] * 5 + [{"verdict": "executed"}]), "executed")
 
 
 class FilteredTargetRunTestCase(unittest.TestCase):
@@ -7154,9 +7323,9 @@ class RefusalNeverUnmakesEvidenceTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
                 max_payloads=6, timeout=15)
         verdicts = {r["verdict"] for r in results}
-        self.assertIn("confirmed", verdicts,
+        self.assertIn("executed", verdicts,
                       f"a proven execution was overwritten: {verdicts}")
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
 
     def test_the_refusal_is_still_counted_even_when_it_replaces_nothing(self):
         # The run should still say a filter answered, whatever the verdict was.
@@ -7164,8 +7333,9 @@ class RefusalNeverUnmakesEvidenceTestCase(unittest.TestCase):
         self.assertGreater(self.gen.refused_probes, 0)
 
     def test_only_a_negative_is_replaced(self):
-        for status in ("confirmed", "needs-review", "lookup-sink",
-                       "deserialization-sink", "inconclusive", "error"):
+        for status in ("executed", "timing-sink", "file-write", "evaluation-sink",
+                       "needs-review", "lookup-sink", "deserialization-sink",
+                       "inconclusive", "error"):
             with self.subTest(status=status):
                 self.assertIsNone(
                     self.gen._refusal(403, 200, rcekit.Verdict(status, "evidence")),
@@ -7444,7 +7614,7 @@ class MultipartInjectionPointTestCase(unittest.TestCase):
 
     def test_a_probe_and_its_control_differ_only_in_the_field_under_test(self):
         """Both go through the same renderer, so the control holds everything
-        else constant -- which is the whole basis on which `confirmed` rests."""
+        else constant -- which is the whole basis on which `executed` rests."""
         _, _, probed = self._place("note", "PAYLOAD")
         _, _, control = self._place("note", "CONTROL")
         self.assertEqual(probed.replace("PAYLOAD", "X"), control.replace("CONTROL", "X"))
@@ -7743,7 +7913,7 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         # ...it said what the run would cost before sending it...
         self.assertRegex(result.stdout, r"\[detect\] cost: \d+ points x ~\d+ probes")
         # ...and the finding names the point that worked.
-        self.assertIn("CONFIRMED execution", result.stdout)
+        self.assertIn("EXECUTED (", result.stdout)
         self.assertIn("at header 'User-Agent'", result.stdout)
 
     def test_enumeration_without_methods_is_refused(self):
@@ -8003,14 +8173,14 @@ class EvalCarrierTestCase(unittest.TestCase):
         probe = next(p for p in self._probes() if p.carrier == "freemarker")
         verdict = EvalExpr(self.gen).confirm(
             Observation(200, f"out {probe.expected} end", control_body="idle"), probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
         self.assertIn("freemarker carrier", verdict.evidence)
 
     def test_a_bare_confirmation_evidence_is_unchanged(self):
         probe = next(p for p in self._probes() if not p.carrier)
         verdict = EvalExpr(self.gen).confirm(
             Observation(200, f"out {probe.expected} end", control_body="idle"), probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
         self.assertNotIn("carrier", verdict.evidence)
 
     def test_a_digit_grouping_engine_confirms_only_through_its_carrier(self):
@@ -8029,7 +8199,7 @@ class EvalCarrierTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?t=FUZZ", methods=["eval"])
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, "the carrier must reach a digit-grouping engine")
         self.assertTrue(all("freemarker carrier" in r["detail"] for r in confirmed))
 
@@ -8037,7 +8207,7 @@ class EvalCarrierTestCase(unittest.TestCase):
         with local_target(lambda *a: (200, "<html>static 3979016000</html>")) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?t=FUZZ", methods=["eval"])
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class SinkShapeLadderTestCase(unittest.TestCase):
@@ -8329,9 +8499,9 @@ class SinkShapeLadderTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
                 config=config, timeout=15)
 
-        self.assertFalse([r for r in without if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in without if r["verdict"] == "executed"],
                          "precondition: without the substitution rung this sink reads clean")
-        confirmed = [r for r in with_ladder if r["verdict"] == "confirmed"]
+        confirmed = [r for r in with_ladder if r["verdict"] == "executed"]
         self.assertTrue(confirmed, "the substitution rung must reach a quote-filtered sink")
         self.assertTrue({r["context"] for r in confirmed} <= rcekit.SUBSTITUTION_CONTEXTS)
 
@@ -8340,7 +8510,7 @@ class SinkShapeLadderTestCase(unittest.TestCase):
         with local_target(lambda *a: (200, "<html>static 12345678</html>")) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/?host=FUZZ", methods=["reflected"])
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class ResponseChannelTestCase(unittest.TestCase):
@@ -8478,7 +8648,7 @@ class ResponseChannelTestCase(unittest.TestCase):
                                     ("header X-Debug-Result", f"out={probe.expected}")],
                           control_channels=[("response body", "idle")])
         verdict = self.method.confirm(obs, probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
         # Reproducible by hand: the evidence must say where to look.
         self.assertIn("header X-Debug-Result", verdict.evidence)
 
@@ -8488,7 +8658,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         probe = self._probe()
         verdict = self.method.confirm(
             Observation(200, f"out {probe.expected}", control_body="idle"), probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
         self.assertNotIn(" in ", verdict.evidence.split("(")[0])
 
     def test_confirms_a_value_nested_in_a_json_error_envelope(self):
@@ -8500,10 +8670,10 @@ class ResponseChannelTestCase(unittest.TestCase):
         verdict = EvalExpr(self.gen).confirm(
             Observation(500, body, control_body="{}", channels=channels,
                         control_channels=[("response body", "{}")]), probe)
-        self.assertEqual(verdict.status, "confirmed")
+        self.assertEqual(verdict.status, "executed")
 
     def test_control_carrying_the_value_in_any_channel_blocks_confirmation(self):
-        # Invariant: `confirmed` requires the value to be absent from the
+        # Invariant: `executed` requires the value to be absent from the
         # payload-free control. A control that already carries it means the value
         # is not attributable to execution, wherever it surfaced.
         probe = self._probe()
@@ -8545,7 +8715,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         self.assertEqual(
             self.method.confirm(
                 Observation(200, f"x {probe.expected} y", control_body="idle"), probe).status,
-            "confirmed")
+            "executed")
 
     def test_file_method_control_differential_covers_every_channel(self):
         import random as _random
@@ -8572,7 +8742,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/hdr?host=FUZZ", methods=["reflected"])
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, "a header-only sink must confirm")
         self.assertTrue(any("header X-Cmd-Out" in r["detail"] for r in confirmed))
 
@@ -8590,7 +8760,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/err?host=FUZZ", methods=["reflected"])
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "a 500 response carrying the computed value must confirm")
 
     def test_deeply_nested_json_does_not_silence_detection_end_to_end(self):
@@ -8612,7 +8782,7 @@ class ResponseChannelTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/deep?host=FUZZ", methods=["reflected"])
         self.assertFalse([r for r in results if r["verdict"] == "error"],
                          "a delivered response must never be reported as a delivery failure")
-        self.assertTrue([r for r in results if r["verdict"] == "confirmed"],
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
                         "the body channel still carries the computed value")
 
     def test_a_clean_target_stays_negative_across_all_channels(self):
@@ -8625,7 +8795,7 @@ class ResponseChannelTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/safe?host=FUZZ", methods=["reflected", "eval"])
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in results if r["verdict"] == "executed"],
                          "a non-executing target must not confirm through any channel")
 
 
@@ -8861,9 +9031,9 @@ class SinkEnvDialectTestCase(unittest.TestCase):
         with local_target(route) as base:
             results = self.gen.run_detection(
                 [record], url=f"{base}/lookup?host=FUZZ", methods=["reflected"])
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, results)
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
 
         # And the same target, told the sink is POSIX: the probes are then
         # written in a dialect this sink does not evaluate, so nothing confirms.
@@ -8872,7 +9042,7 @@ class SinkEnvDialectTestCase(unittest.TestCase):
             unix_results = self.gen.run_detection(
                 [unix_record], url=f"{base}/lookup?host=FUZZ", methods=["reflected"],
                 config={"sink_env": "unix"})
-        self.assertFalse([r for r in unix_results if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in unix_results if r["verdict"] == "executed"],
                          "a POSIX probe must not confirm on a sink that only "
                          "evaluates PowerShell")
 
@@ -8979,7 +9149,7 @@ class WriteThenExecuteTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/upload?content=FUZZ", methods=["write"],
                 config={"write_read_url": base + self.read_url})
         self.assertEqual(
-            rcekit.overall_detection_verdict(results), "confirmed",
+            rcekit.overall_detection_verdict(results), "executed",
             "a target whose ints are 32 bits did not confirm: "
             + "; ".join(r.get("detail", "") for r in results))
 
@@ -9157,8 +9327,8 @@ class WriteThenExecuteTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/upload?content=FUZZ", methods=["write"],
                 config={"write_read_url": base + self.read_url})
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed)
         self.assertIn("EXECUTED", confirmed[0]["detail"])
         self.assertIn("remove the file", confirmed[0]["cleanup"])
@@ -9167,21 +9337,58 @@ class WriteThenExecuteTestCase(unittest.TestCase):
         """The distinction the method exists for.
 
         An upload directory that is served but not interpreted is a real
-        finding and is not remote code execution. Calling it `confirmed` would
+        finding and is not remote code execution. Calling it `executed` would
         break the guarantee the whole tool rests on; calling it `negative`
-        would throw away an arbitrary file write."""
+        would throw away an arbitrary file write.
+
+        It is `file-write` and not `needs-review`: the file is on the target and
+        RCEKit read it back, so there is nothing here under review. Until 3.0.0
+        this reported `needs-review` while its own evidence line opened with the
+        word "executed"."""
         with local_target(self._store_target("verbatim")) as base:
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/upload?content=FUZZ", methods=["write"],
                 config={"write_read_url": base + self.read_url})
-        self.assertEqual(rcekit.overall_detection_verdict(results), "needs-review")
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
-        review = [r for r in results if r["verdict"] == "needs-review"]
-        self.assertTrue(review)
-        self.assertIn("ARBITRARY FILE WRITE", review[0]["detail"])
+        self.assertEqual(rcekit.overall_detection_verdict(results), "file-write")
+        self.assertFalse([r for r in results if r["verdict"] == rcekit.EXECUTION_TIER])
+        self.assertFalse([r for r in results if r["verdict"] == "needs-review"],
+                         "a write RCEKit read back is not a candidate")
+        written = [r for r in results if r["verdict"] == "file-write"]
+        self.assertTrue(written)
+        self.assertIn("ARBITRARY FILE WRITE", written[0]["detail"])
+        # And the evidence no longer contradicts its own status. The string used
+        # to open "ARBITRARY FILE WRITE confirmed" under a `needs-review`
+        # verdict -- the tool's own prose disagreeing with the tool's own tier.
+        # Pinned on the exact opening, because the words "not executed" appear
+        # later in the same sentence and legitimately so.
+        self.assertTrue(written[0]["detail"].startswith("ARBITRARY FILE WRITE --"),
+                        written[0]["detail"])
         # The artifact is on the target either way, so the cleanup line rides
         # with this tier too.
-        self.assertIn("remove the file", review[0]["cleanup"])
+        self.assertIn("remove the file", written[0]["cleanup"])
+
+    def test_the_verbatim_finding_prints_its_cleanup_line_through_the_cli(self):
+        """The regression that moving this tier could have introduced.
+
+        A `cleanup` key in the result dict is not the operator seeing it. The
+        line was printed in two places in the whole report -- the execution
+        section, and the NEEDS-REVIEW block this verdict used to share with
+        `time`, `boolean` and `deser`'s fingerprint. Moving it to its own tier
+        moved it out of the only block that printed it, and the file is on the
+        target: an unmentioned artifact is the thing the cleanup line exists to
+        prevent. Driven through the real CLI, because that is where the gap
+        would have been."""
+        with local_target(self._store_target("verbatim")) as base:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-url", f"{base}/upload?content=FUZZ",
+                 "--methods", "write", "--verify-active-risk", "stateful",
+                 "--write-url-template", base + self.read_url,
+                 "--environments", "unix", "--contexts", "raw"],
+                capture_output=True, text=True, timeout=300)
+        self.assertIn("ARBITRARY FILE WRITE", result.stdout, result.stdout[-2000:])
+        self.assertIn("cleanup:", result.stdout, result.stdout[-2000:])
+        self.assertNotIn("NEEDS-REVIEW", result.stdout)
 
     def test_a_target_that_stores_nothing_is_negative(self):
         with local_target(self._store_target("nowrite")) as base:
@@ -9228,7 +9435,7 @@ class ObservedChannelTestCase(unittest.TestCase):
     the target was.
 
     It stays fully differential — which is why it can legitimately reach
-    `confirmed` — and the rule that keeps it so is that a probe's value is
+    `executed` — and the rule that keeps it so is that a probe's value is
     looked for on the observed channel **only when the payload does not already
     carry it**. Without that rule, `file` and `oob` (whose expected value is a
     token sitting verbatim in the payload) would confirm on any target that
@@ -9283,7 +9490,7 @@ class ObservedChannelTestCase(unittest.TestCase):
                 max_payloads=12,
                 config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
                         "observe_timeout": 0.5})
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"],
+        self.assertFalse([r for r in results if r["verdict"] == "executed"],
                          "a target that only echoes the payload must not confirm")
         self.assertEqual({r["observe_status"] for r in results}, {"polled"})
 
@@ -9302,11 +9509,11 @@ class ObservedChannelTestCase(unittest.TestCase):
                 max_payloads=12,
                 config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
                         "observe_timeout": 1.0})
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, results)
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
         self.assertIn("OBSERVED channel", confirmed[0]["detail"])
-        self.assertEqual(confirmed[0]["observe_status"], "confirmed")
+        self.assertEqual(confirmed[0]["observe_status"], "executed")
 
     def test_an_appending_channel_confirms_after_the_batch(self):
         with local_target(self._stored_route(self._render_ssti, store="append")) as base:
@@ -9315,7 +9522,7 @@ class ObservedChannelTestCase(unittest.TestCase):
                 max_payloads=12,
                 config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
                         "observe_timeout": 1.0})
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
 
     # -- the differential ----------------------------------------------------
 
@@ -9357,7 +9564,7 @@ class ObservedChannelTestCase(unittest.TestCase):
         # No observe bookkeeping at all, and no second-order confirmation: the
         # in-band response says "saved" and nothing else.
         self.assertFalse([r for r in results if "observe_status" in r])
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
     def test_an_in_band_confirmation_is_never_downgraded(self):
         # Only a non-confirmed verdict can be upgraded, so observing can add
@@ -9373,7 +9580,7 @@ class ObservedChannelTestCase(unittest.TestCase):
                 max_payloads=12,
                 config={"observe_url": f"{base}/observe", "observe_poll": 0.2,
                         "observe_timeout": 0.5})
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed)
         for result in confirmed:
             self.assertNotIn("OBSERVED", result["detail"])
@@ -9614,9 +9821,9 @@ class QueryLanguageBridgeTestCase(unittest.TestCase):
             results = self.gen.run_detection(
                 [self.rec], url=f"{base}/s?name=FUZZ", methods=["reflected"],
                 config={"bridges": ("postgres_copy_program",), "max_safety": "stateful"})
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        confirmed = [r for r in results if r["verdict"] == "executed"]
         self.assertTrue(confirmed, results)
-        self.assertEqual(rcekit.overall_detection_verdict(results), "confirmed")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
         self.assertIn("postgres_copy_program", confirmed[0]["detail"])
         self.assertIn("DROP TABLE IF EXISTS", confirmed[0]["cleanup"])
 
@@ -9628,7 +9835,7 @@ class QueryLanguageBridgeTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/s?name=FUZZ", methods=["reflected"],
                 config={"bridges": ("postgres_copy_program",), "max_safety": "stateful"})
         self.assertTrue(results)
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
 class DeserializationSinkTestCase(unittest.TestCase):
@@ -9636,7 +9843,7 @@ class DeserializationSinkTestCase(unittest.TestCase):
 
     The verdict boundary is the whole deliverable. Deserialization RCE depends
     on gadgets in the target's classpath, which RCEKit cannot see, so this
-    method must never say `confirmed` — that word is reserved for execution and
+    method must never say `executed` — that word is reserved for execution and
     has to stay that way to mean anything. Its strongest outcome is its own
     verdict, `deserialization-sink`, which is a real proven finding about a
     different property."""
@@ -9655,19 +9862,27 @@ class DeserializationSinkTestCase(unittest.TestCase):
     def test_the_method_can_never_report_confirmed(self):
         self.assertEqual(rcekit.DeserSink.tier, "deserialization-sink")
         source = inspect.getsource(rcekit.DeserSink)
-        self.assertNotIn('Verdict("confirmed"', source,
+        self.assertNotIn('Verdict("executed"', source,
                          "reaching RCE from a deserialization sink depends on classpath "
-                         "gadgets RCEKit cannot see; `confirmed` means executed")
+                         "gadgets RCEKit cannot see; `executed` is for execution")
 
-    def test_the_new_tier_sits_below_both_rce_tiers(self):
-        # A proven non-RCE finding must not outrank a suspected RCE in triage,
-        # and must not be lost behind a plain negative either.
+    def test_the_new_tier_sits_below_execution_and_above_a_guess(self):
+        # A proven non-RCE finding must not outrank execution in triage, and
+        # must not be lost behind a plain negative either.
         self.assertEqual(rcekit.overall_detection_verdict(
-            [{"verdict": "deserialization-sink"}, {"verdict": "confirmed"}]), "confirmed")
-        self.assertEqual(rcekit.overall_detection_verdict(
-            [{"verdict": "deserialization-sink"}, {"verdict": "needs-review"}]), "needs-review")
+            [{"verdict": "deserialization-sink"}, {"verdict": "executed"}]), "executed")
         self.assertEqual(rcekit.overall_detection_verdict(
             [{"verdict": "deserialization-sink"}, {"verdict": "negative"}]),
+            "deserialization-sink")
+        # It used to sit below `needs-review` as well, on the argument that a
+        # suspected RCE outranks a proven non-RCE. That held while `time`,
+        # `boolean` and `write`'s uninterpreted file all reported there. Since
+        # 3.0.0 each has its own tier and the only thing left under
+        # `needs-review` is this method's own shape fingerprint -- a suspected
+        # *deserialization*. Ranking that above `deserialization-sink` put a
+        # guess above the proof of the same thing.
+        self.assertEqual(rcekit.overall_detection_verdict(
+            [{"verdict": "deserialization-sink"}, {"verdict": "needs-review"}]),
             "deserialization-sink")
 
     def test_a_dns_hit_reports_a_sink_and_says_it_is_not_rce(self):
@@ -9843,7 +10058,7 @@ class DeserializationSinkTestCase(unittest.TestCase):
         self.assertEqual([r["verdict"] for r in java], ["needs-review"])
         self.assertIn("NOT proof", java[0]["detail"])
         # A fingerprint is never promoted, however suggestive.
-        self.assertFalse([r for r in results if r["verdict"] == "confirmed"])
+        self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
     def test_an_endpoint_that_only_stores_the_value_is_negative(self):
         with local_target(self._shape_target(False)) as base:
@@ -10313,13 +10528,13 @@ class BooleanOracleTestCase(unittest.TestCase):
     def test_a_sink_that_evaluates_the_predicate_is_reported(self):
         targets = BooleanTargets()
         _gen, results = self._run(targets.evaluating)
-        self.assertEqual([r["verdict"] for r in results], ["needs-review"])
+        self.assertEqual([r["verdict"] for r in results], ["evaluation-sink"])
         self.assertIn("partitioned", results[0]["detail"])
 
     def test_a_json_sink_is_reported_too(self):
         targets = BooleanTargets()
         _gen, results = self._run(targets.evaluating_json)
-        self.assertEqual([r["verdict"] for r in results], ["needs-review"])
+        self.assertEqual([r["verdict"] for r in results], ["evaluation-sink"])
 
     def test_a_target_that_only_reflects_is_negative(self):
         targets = BooleanTargets()
@@ -10341,14 +10556,27 @@ class BooleanOracleTestCase(unittest.TestCase):
 class BooleanNeverConfirmsTestCase(unittest.TestCase):
     """The tier ceiling, stated as behaviour rather than as an attribute.
 
-    `confirmed` means the target executed the input. This oracle cannot show
+    `executed` means the target executed the input. This oracle cannot show
     that: it reports a differential, and a query engine comparing two numbers
-    produces the same differential. Widening `confirmed` to include it would
+    produces the same differential. Widening `executed` to include it would
     end the one guarantee the tool rests on.
+
+    The ceiling is `evaluation-sink`, which is a *proven* finding about
+    something narrower -- an evaluator consumed the input. It reported
+    `needs-review` until 3.0.0, which named the tool's confidence rather than
+    the target's behaviour and read as though the measurement had not settled.
     """
 
-    def test_the_class_declares_a_ceiling_below_confirmed(self):
-        self.assertEqual(rcekit.DETECTION_METHODS["boolean"].tier, "needs-review")
+    def test_the_class_declares_a_ceiling_below_execution(self):
+        self.assertEqual(rcekit.DETECTION_METHODS["boolean"].tier, "evaluation-sink")
+        self.assertNotEqual(rcekit.DETECTION_METHODS["boolean"].tier,
+                            rcekit.EXECUTION_TIER)
+
+    def test_the_ceiling_is_not_a_confidence_word(self):
+        """The whole point of the rename: a settled measurement does not report
+        under a tier that says it needs reviewing."""
+        self.assertNotEqual(rcekit.DETECTION_METHODS["boolean"].tier,
+                            "needs-review")
 
     def test_no_series_of_any_shape_produces_confirmed(self):
         """Drive `confirm_series` directly across the whole space of answers a
@@ -10366,20 +10594,20 @@ class BooleanNeverConfirmsTestCase(unittest.TestCase):
                 elif trial == 0:
                     # The perfect answer: every true one way, every false the
                     # other. This is the series that earns the method's best
-                    # verdict, and its best verdict is still not `confirmed`.
+                    # verdict, and its best verdict is still not `executed`.
                     body = bodies[0] if probe.phase == "yes" else bodies[1]
                 else:
                     body = rng.choice(bodies)
                 series.append((probe, Observation(status=200, body=body)))
             verdict = meth.confirm_series(series)
             with self.subTest(trial=trial):
-                self.assertNotEqual(verdict.status, "confirmed")
+                self.assertNotEqual(verdict.status, rcekit.EXECUTION_TIER)
         # And the perfect series really did reach the ceiling, so the assertion
         # above is not passing because nothing was ever found.
         best = [(probe, Observation(status=200,
                                     body=bodies[0] if probe.phase != "no" else bodies[1]))
                 for probe in probes]
-        self.assertEqual(meth.confirm_series(best).status, "needs-review")
+        self.assertEqual(meth.confirm_series(best).status, "evaluation-sink")
 
 
 class BooleanUnreadableChannelTestCase(unittest.TestCase):

@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "2.45.7"
+__version__ = "3.0.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -261,6 +261,18 @@ def split_command_word(body: str, opens_closed: bool = False) -> str:
     if index - start < 2:
         return body
     return body[:start + 1] + "$@" + body[start + 1:]
+
+
+# The one tier that means the target executed the input. Every other tier is
+# named for something else the target did, and none is ever promoted into this
+# one -- which is the claim the whole tool rests on.
+#
+# Named here because four places compare against it: the claim sentence the
+# advice prints, the head of the collapsed-verdict order, the benchmark's rule
+# that a negative control may expect any tier but this one, and the
+# documentation test that holds a recording's alt text to its heading. All four
+# spelled it out, and this release moved what it is spelled.
+EXECUTION_TIER = "executed"
 
 
 def detection_question(name: str) -> str:
@@ -521,7 +533,7 @@ def _inflate_bounded(raw: bytes, wbits: int) -> Tuple[bytes, bool]:
     kept rather than discarded: the value the oracle wants is short and near
     where the target wrote it, so searching 32 MB is a far better answer than
     searching nothing, and the only risk the ceiling carries is a false
-    negative -- never a false ``confirmed``.
+    negative -- never a false ``executed``.
 
     Multi-member streams are followed, because ``gzip.decompress`` followed them
     and a ceiling must not quietly become a truncation for a server that
@@ -2161,7 +2173,7 @@ class RCEKit:
                          control_body: str = "", elapsed_confirm: Optional[float] = None) -> Tuple[str, str]:
         """Apply the payload's built-in oracle to a target response.
 
-        The verdicts are *differential* so ``confirmed`` means execution, not
+        The verdicts are *differential* so ``executed`` means execution, not
         coincidence:
 
         * **timing** — a candidate delay must clear ``baseline`` by ``margin``
@@ -2174,7 +2186,7 @@ class RCEKit:
           ``error`` — since the timeout may be the expected delay.
         * **reflection** — a ``match`` that is also present in ``control_body``
           is not evidence of execution, so it is reported ``inconclusive``
-          rather than a false ``confirmed``. For a canary token the caller
+          rather than a false ``executed``. For a canary token the caller
           supplies a *same-token* control (the token in an inert, non-executing
           carrier), so a target that merely echoes input cannot masquerade as
           execution; for a command-output signature the control is the
@@ -2199,7 +2211,7 @@ class RCEKit:
             if elapsed_confirm is not None and elapsed_confirm - baseline < margin:
                 return "no-delay", (f"delay {elapsed:.1f}s did not reproduce on re-fire "
                                     f"({elapsed_confirm:.1f}s vs baseline {baseline:.1f}s)")
-            return "confirmed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s (margin {margin:.1f}s)"
+            return "executed", f"delay {elapsed:.1f}s vs baseline {baseline:.1f}s (margin {margin:.1f}s)"
         if status is None:
             return "error", body[:80]
         if record.match:
@@ -2209,7 +2221,7 @@ class RCEKit:
                         return "inconclusive", ("canary reflected by the target in an inert control "
                                                 "(no execution needed), so the match is not proof")
                     return "inconclusive", f"signature /{record.match}/ also present without the payload"
-                return "confirmed", f"matched /{record.match}/"
+                return "executed", f"matched /{record.match}/"
             return "no-match", ""
         return "no-signature", "no machine-readable oracle for this payload"
 
@@ -3080,8 +3092,8 @@ class RCEKit:
         applicable records, fire them through the shared delivery layer
         (:meth:`_fire`), optionally fetch a followup (file-based methods), and
         confirm each against a single payload-free control body. Every result
-        carries ``method`` and ``tier`` so the two tiers (``confirmed`` vs
-        ``needs-review``) are never collapsed in reporting.
+        carries ``method`` and ``tier`` so ``executed`` and the weaker tiers
+        are never collapsed into each other in reporting.
 
         This is additive: it does not alter the classic ``run_verification``
         oracle path, and only runs when the operator opts in via ``--methods``.
@@ -3470,7 +3482,7 @@ class RCEKit:
                     # request, and only for a probe that could actually be
                     # judged there: already-confirmed probes and probes whose
                     # value rides in their own payload are skipped.
-                    if (observe is not None and verdict.status != "confirmed"
+                    if (observe is not None and verdict.status != "executed"
                             and self._observable(result)):
                         o_status, o_body, o_chans, _ = self._fire_observed(observe, timeout)
                         if o_status is not None:
@@ -3484,7 +3496,7 @@ class RCEKit:
                     # reading the pre-poll verdict left the carrier running
                     # after it had in fact confirmed -- spending the budget the
                     # stop exists to hand to carriers not yet examined.
-                    if result["verdict"] == "confirmed" and confirm_depth == "first":
+                    if result["verdict"] == "executed" and confirm_depth == "first":
                         carrier_settled = True
                         label = f"{meth.name}/{record.environment}/{record.context}"
                         self.settled_carriers[label] = self.settled_carriers.get(label, 0) + 1
@@ -3533,12 +3545,12 @@ class RCEKit:
         `negative` however exploitable the target was.
 
         Additive by construction. The in-band verdict is computed exactly as
-        before and only a non-`confirmed` one can be upgraded here, so a run
+        before and only a non-`executed` one can be upgraded here, so a run
         without ``--observe-url`` behaves identically and a run with it can only
         gain findings.
 
         Still fully differential, which is why this can legitimately reach
-        `confirmed`: the value was computed locally from random operands, it is
+        `executed`: the value was computed locally from random operands, it is
         absent from the endpoint's pre-injection control, and (see
         :meth:`_observable`) it cannot have arrived by the payload being stored
         and echoed. Each probe carries its own operands, so a value left behind
@@ -3549,7 +3561,7 @@ class RCEKit:
         for result in results:
             result.setdefault("observe_status", "not-observed")
         pending = [r for r in results
-                   if r["verdict"] != "confirmed" and self._observable(r)
+                   if r["verdict"] != "executed" and self._observable(r)
                    and r.get("observe_status") != "in-control"]
         # `or` would be wrong here and was: a deliberate --observe-timeout 0
         # ("read it once, do not wait") is falsy, so it fell through to the
@@ -3600,8 +3612,8 @@ class RCEKit:
             result["observe_status"] = "in-control"
             return False
         channel_note = "" if where == "response body" else f" in {where}"
-        result["verdict"] = "confirmed"
-        result["observe_status"] = "confirmed"
+        result["verdict"] = "executed"
+        result["observe_status"] = "executed"
         result["detail"] = (
             f"target computed {result['expected']!r} on the OBSERVED channel"
             f"{channel_note} ({observe_url}) -- second-order execution: the value is absent "
@@ -3737,7 +3749,7 @@ class RCEKit:
                 pending_oob.append({"record": record, "token": token})
                 verdict, detail = "oob-pending", f"awaiting callback token {token}"
             elif record.match and self._encoded_search(record.match, confirm_body):
-                verdict, detail = "confirmed", f"matched /{record.match}/"
+                verdict, detail = "executed", f"matched /{record.match}/"
             elif record.match:
                 verdict, detail = "no-match", ""
             else:
@@ -3760,7 +3772,7 @@ class RCEKit:
             hit_tokens = {h.get("token") for h in listener.hits}
             for result in results:
                 if result["token"] in hit_tokens and result["verdict"] == "oob-pending":
-                    result["verdict"] = "confirmed"
+                    result["verdict"] = "executed"
                     result["detail"] = f"OOB callback received for token {result['token']}"
                 elif result["verdict"] == "oob-pending":
                     result["detail"] = f"no callback received for token {result['token']}"
@@ -4001,14 +4013,14 @@ class OOBListener:
 #
 # A small, additive oracle abstraction layered on top of the existing verify
 # machinery. Each method turns a target response into a Verdict whose
-# ``confirmed`` tier means the target *computed or executed* a value RCEKit
+# ``executed`` tier means the target *computed or executed* a value RCEKit
 # chose at random — never a literal the payload already carried (the
 # confirmation invariant). Every confirmation is differenced against a
 # payload-free control, exactly as _evaluate_verify already does.
 #
 # Methods are opt-in via ``--methods``; the classic --verify-url path is
-# unchanged when no method is selected. Confirmed-tier (execution proven) and
-# needs-review-tier (candidate) verdicts are never merged.
+# unchanged when no method is selected. `executed` (execution proven) and the
+# weaker tiers are never merged into each other.
 # ===========================================================================
 
 # Shell environments whose payloads ReflectedMath can force to compute a value.
@@ -4042,7 +4054,7 @@ SHELL_CAPABLE_ENVIRONMENTS = UNIX_SHELL_ENVIRONMENTS | {"windows"} | {
 # expected value is a bare boundary-fenced number (the `expr` shape computes a
 # 6-7 digit sum) can collide with an equally numeric Content-Length or Age, and
 # that collision would read as a confirmation the target never earned. The
-# guarantee that `confirmed` means executed outranks the last few percent of
+# guarantee that `executed` means executed outranks the last few percent of
 # channel coverage.
 NON_APPLICATION_HEADERS = frozenset({
     "content-length", "content-range", "content-encoding", "transfer-encoding",
@@ -4095,19 +4107,33 @@ class Probe:
 
 @dataclass
 class Verdict:
-    """A method's decision. ``status`` is one of ``confirmed`` (execution
+    """A method's decision. ``status`` is one of ``executed`` (execution
     proven), ``needs-review`` (candidate), ``negative`` (reached the target, no
     evidence), ``inconclusive`` (evidence not attributable to execution), or
     ``error`` (the request never reached the target — a delivery/TLS failure,
     which is deliberately NOT a ``negative`` so a connectivity problem is never
     read as 'not vulnerable').
 
-    Two further statuses are *proven findings about something other than
-    execution*, and exist so neither has to be squeezed into one of the above:
-    ``deserialization-sink`` (the endpoint reconstructed an attacker-supplied
-    object graph) and ``lookup-sink`` (the sink resolved a URI the tool chose).
-    Both outrank ``negative``, and neither ever becomes ``confirmed`` -- which
-    stays reserved for execution."""
+    Five further statuses are *proven findings about something other than
+    execution*, and exist so none has to be squeezed into one of the above:
+
+    * ``timing-sink`` -- the target honoured a delay RCEKit injected
+    * ``file-write`` -- the target stored a file at a path RCEKit chose and
+      serves it back uninterpreted
+    * ``evaluation-sink`` -- an evaluator consumed the input and partitioned on
+      it; which evaluator is not shown
+    * ``deserialization-sink`` -- the endpoint reconstructed an
+      attacker-supplied object graph
+    * ``lookup-sink`` -- the sink resolved a URI the tool chose
+
+    All five outrank ``negative``, and none ever becomes ``executed`` -- which
+    stays reserved for execution.
+
+    Each is named for what the *target* did rather than for how sure RCEKit is,
+    and that is the distinction ``needs-review`` was carrying badly: three of
+    these five used to report under it, so a measurement that had settled read
+    as one that had not. ``needs-review`` is left with the one verdict that
+    really is a candidate -- ``deser``'s shape fingerprint."""
     status: str
     evidence: str
 
@@ -4137,7 +4163,7 @@ class DetectionMethod:
     an Observation into a Verdict. Kept deliberately plain (no ABC) so it runs
     unchanged on Python 3.8."""
     name = "base"
-    tier = "confirmed"
+    tier = "executed"
     # Which question this method asks, independent of the tier its answer
     # earns. Two methods asking the same question are one finding under two
     # names, so the second is skipped once the first has proven it; two asking
@@ -4155,8 +4181,9 @@ class DetectionMethod:
     # confirm_series, instead of one Verdict per probe.
     aggregate = False
     # Tiers this method really emits *below* ``tier``, which is a ceiling rather
-    # than its only answer: ``write`` reports ``needs-review`` for a file that
-    # is served but not interpreted, and ``deser`` for a shape fingerprint.
+    # than its only answer: ``write`` reports ``file-write`` for a file that
+    # is served but not interpreted, and ``deser`` reports ``needs-review``
+    # for a shape fingerprint.
     # Declared because three separate places had to know it and each kept its
     # own list -- the documentation tests, the benchmark's expectation
     # whitelist, and the advice printed after a clean in-band run.
@@ -4446,7 +4473,7 @@ class DetectionMethod:
                     "(random operands, absent from control)")
         if probe.forbidden and self._search_channels(probe.forbidden, channels):
             evidence += "; target also reflects the payload verbatim"
-        return Verdict("confirmed", evidence)
+        return Verdict("executed", evidence)
 
     def _tag(self, rng: "random.Random") -> str:
         """A distinctive letters-only boundary marker. Letters keep it from
@@ -4756,7 +4783,7 @@ class ReflectedMath(DetectionMethod):
     subexpression — otherwise the two OS families the corpus generates payloads
     for are families this method cannot confirm on."""
     name = "reflected"
-    tier = "confirmed"
+    tier = "executed"
 
     def applicable(self, record: "PayloadRecord") -> bool:
         return record.environment in SHELL_CAPABLE_ENVIRONMENTS
@@ -4924,7 +4951,7 @@ class FileBased(DetectionMethod):
     on the operator naming both halves, and every finding carries an explicit
     cleanup command."""
     name = "file"
-    tier = "confirmed"
+    tier = "executed"
     costly = True          # a second fetch reads the written token back
     # It writes a file to the target, and its own configuration is what gates
     # that: naming the directory and the read-back URL says more than the rung.
@@ -5025,7 +5052,7 @@ class FileBased(DetectionMethod):
         if self._search_channels(probe.expected,
                                  self._channels_of(obs.control_body, obs.control_channels)):
             return Verdict("inconclusive", "token also present without the payload")
-        return Verdict("confirmed",
+        return Verdict("executed",
                        f"target wrote and served token {probe.expected!r} (execution + write primitive)")
 
 
@@ -5049,8 +5076,8 @@ class WriteThenExecute(DetectionMethod):
     ==============================  ===============  ==================================
     fetched file contains           verdict          means
     ==============================  ===============  ==================================
-    the product                     ``confirmed``    the file was written AND executed
-    the one-liner, verbatim         ``needs-review`` arbitrary file write, no execution
+    the product                     ``executed``     the file was written AND executed
+    the one-liner, verbatim         ``file-write``   arbitrary file write, no execution
     neither                         ``negative``     no write, or it is not served here
     ==============================  ===============  ==================================
 
@@ -5065,11 +5092,11 @@ class WriteThenExecute(DetectionMethod):
     ``--write-url-template`` says where that lands. One artifact per run rather
     than one per probe is also the right trade for a state-changing method."""
     name = "write"
-    tier = "confirmed"
+    tier = "executed"
     costly = True          # uploads, then fetches the file back
     # A write that is served but not interpreted is a real finding about a
     # different property, and it is this method that reports it.
-    also_reports = ("needs-review",)
+    also_reports = ("file-write",)
     safety = "stateful"
     gated_by_config = True
 
@@ -5237,15 +5264,24 @@ class WriteThenExecute(DetectionMethod):
                                      self._channels_of(obs.control_body, obs.control_channels)):
                 return Verdict("inconclusive",
                                "the computed value is also present without the payload")
-            return Verdict("confirmed",
+            return Verdict("executed",
                            f"target wrote and then EXECUTED a {probe.carrier} file: it computed "
                            f"{probe.expected!r} from random operands the file itself carried")
         if probe.forbidden and self._search(probe.forbidden, obs.followup_body):
             # Deliberately not merged into either neighbour. The write landed
             # and is served, which is a real finding; the interpreter did not
             # run it, which means this is not remote code execution.
-            return Verdict("needs-review",
-                           "ARBITRARY FILE WRITE confirmed -- the written file is served back "
+            #
+            # `file-write` and not `needs-review`: the file is on the target
+            # and RCEKit read it back, so nothing here is under review. This
+            # evidence string used to open with the word "confirmed" while the
+            # status said the opposite -- which is what a tier naming the
+            # tool's confidence rather than the target's behaviour costs.
+            #
+            # No `-sink` suffix, unlike the neighbouring tiers: a sink in this
+            # vocabulary *evaluated* what it was handed. This target stored it.
+            return Verdict("file-write",
+                           "ARBITRARY FILE WRITE -- the written file is served back "
                            f"verbatim ({probe.carrier} source, not executed), so the upload "
                            "directory is reachable but not interpreted")
         return Verdict("negative",
@@ -5276,12 +5312,23 @@ class ParametricTime(DetectionMethod):
       model as a nuisance term, so drift loads onto the drift coefficient rather
       than masquerading as a sleep.
 
-    Timing has no value the target *computed*, so by design this never confirms
-    on its own — its ceiling is ``needs-review``. Pair it with ``--methods
-    reflected`` for an execution proof; a linear timing response then corroborates
-    the results-based confirmation."""
+    Timing has no value the target *computed*, so by design this never reaches
+    ``executed`` on its own. What it does reach is proven, and has its own
+    name: ``timing-sink`` says the target honoured a delay RCEKit injected. A
+    clean regression is not a hedge — a slope near one second per injected
+    second, through a randomised order, with the request index modelled out and
+    the delay term standing clear of the residual by a factor of three, is not
+    something jitter or drift produces. This reported ``needs-review`` for two
+    releases, which said the tool was unsure of something it had measured.
+
+    What holds it at its own tier rather than joining the execution channels is
+    narrower than uncertainty: a delay honoured is not necessarily a *shell*
+    honouring it. A sandbox that implements ``sleep`` itself, or anything in the
+    path that waits, answers the regression the same way. So pair it with
+    ``--methods reflected`` for an execution proof; a linear timing response
+    then corroborates the results-based one."""
     name = "time"
-    tier = "needs-review"
+    tier = "timing-sink"
     costly = True          # every probe is a real sleep
     aggregate = True
     # Per-carrier state, set by build_probes before next_probes/confirm_series
@@ -5494,10 +5541,11 @@ class ParametricTime(DetectionMethod):
         # slope is an artefact of a handful of jittery samples.
         if stderr_delay > 0 and b_delay < 3 * stderr_delay:
             return Verdict("negative", f"delay term not separable from noise ({summary})")
-        return Verdict("needs-review",
-                       f"response time tracks the controlled delay with drift modelled out "
-                       f"({summary}); blind timing candidate — pair with --methods reflected "
-                       "for an execution proof")
+        return Verdict("timing-sink",
+                       f"the target honoured a delay RCEKit injected: response time tracks the "
+                       f"controlled series with the request index modelled out ({summary}). What "
+                       "waited is not shown — a sandbox that implements sleep answers this the "
+                       "same way — so pair with --methods reflected for an execution proof")
 
 
 class EvalExpr(DetectionMethod):
@@ -5512,7 +5560,7 @@ class EvalExpr(DetectionMethod):
     injection context (not the environment), so the engine's per-payload
     de-duplication fires each syntax once per context."""
     name = "eval"
-    tier = "confirmed"
+    tier = "executed"
 
     # Delimiters for the common expression/template evaluators, plus a bare form
     # for raw eval() sinks. {expr} is substituted with the random arithmetic.
@@ -5624,8 +5672,8 @@ class OobCallback(DetectionMethod):
     """Out-of-band confirmation for a target that returns nothing at all.
 
     A fully blind sink -- no command output in the response, no writable web
-    root -- had no path to a ``confirmed`` verdict: ``time`` tops out at
-    ``needs-review`` by design, and ``file`` needs somewhere to write that the
+    root -- had no path to an ``executed`` verdict: ``time`` tops out at
+    ``timing-sink`` by design, and ``file`` needs somewhere to write that the
     target also serves. This closes that gap by making the target reach *out*.
 
     Each probe carries its own random token and asks the target to resolve or
@@ -5646,7 +5694,7 @@ class OobCallback(DetectionMethod):
     is delegated) to this listener. It makes the target open outbound
     connections, so it never runs unless the operator names that host."""
     name = "oob"
-    tier = "confirmed"
+    tier = "executed"
     costly = True          # waits for a callback to arrive
     # It makes the target open outbound connections.
     safety = "intrusive"
@@ -5852,7 +5900,7 @@ class OobCallback(DetectionMethod):
                 computed = getattr(self, "_computed", None)
                 if computed is not None and str(computed) in (hit.get("host") or ""):
                     detail += f"; the callback label carries the computed value {computed}"
-                out.append((probe, Verdict("confirmed", detail)))
+                out.append((probe, Verdict("executed", detail)))
             elif obs.status is None:
                 out.append((probe, Verdict("error",
                                            f"request never reached the target ({obs.body[:120]})")))
@@ -5864,9 +5912,9 @@ class OobCallback(DetectionMethod):
         # confirm_each carries the real logic; this only runs if an engine calls
         # the series form, and must agree with it.
         each = self.confirm_each(series) or []
-        confirmed = [v for _, v in each if v.status == "confirmed"]
-        if confirmed:
-            return confirmed[0]
+        executed = [v for _, v in each if v.status == "executed"]
+        if executed:
+            return executed[0]
         return Verdict("negative", "no out-of-band callback received for any probe")
 
 
@@ -5925,11 +5973,11 @@ class LookupCallback(DetectionMethod):
     # choose is not, and rides at `stateful` on the probes that do it.
     safety = "intrusive"
     needs_oob_host = True
-    # NOT `confirmed`. A callback proves the sink resolved a URI RCEKit chose --
+    # NOT `executed`. A callback proves the sink resolved a URI RCEKit chose --
     # that it evaluated the expression it was handed. It does not prove the
     # target ran attacker code: Log4Shell becomes RCE when the LDAP server
     # answers with a malicious class, and this listener answers with nothing.
-    # `confirmed` is reserved for execution and has to stay that way to mean
+    # `executed` is reserved for execution and has to stay that way to mean
     # anything, so this gets its own proven-sink tier beside
     # `deserialization-sink` -- the same distinction, drawn for the same reason.
     tier = "lookup-sink"
@@ -6073,17 +6121,24 @@ class BooleanDifferential(DetectionMethod):
     carries is one bit. That makes this the weakest oracle in the tool, and
     this docstring is mostly about the ways it can lie.
 
-    **It never confirms, and the reason is not the obvious one.** The obvious
-    reason is that no computed value reaches the response, so there is nothing
-    reflection would be unable to forge. The real reason is worse: against a
-    sandboxed ``eval`` sink and against a plain SQLite predicate, this oracle
-    produced an identical clean differential in 40 runs each. It cannot tell
-    *code executed* from *a query engine compared two numbers*, and the second
-    is not RCE. Extracting a locally computed product bit by bit through the
-    channel does not fix that -- it was tried, and recovered the product
-    through both sinks alike, for about 80 requests and a string function a
-    sandbox may well deny. The ceiling is ``needs-review``, and there is no
-    path from here to ``confirmed``.
+    **It never reaches ``executed``, and the reason is not the obvious one.**
+    The obvious reason is that no computed value reaches the response, so there
+    is nothing reflection would be unable to forge. The real reason is worse:
+    against a sandboxed ``eval`` sink and against a plain SQLite predicate,
+    this oracle produced an identical clean differential in 40 runs each. It
+    cannot tell *code executed* from *a query engine compared two numbers*, and
+    the second is not RCE. Extracting a locally computed product bit by bit
+    through the channel does not fix that -- it was tried, and recovered the
+    product through both sinks alike, for about 80 requests and a string
+    function a sandbox may well deny.
+
+    That limit is about *which* evaluator, not about *whether* one ran. So the
+    ceiling is ``evaluation-sink`` -- an evaluator consumed the input and
+    partitioned on it, proven; which evaluator, not shown -- and there is no
+    path from here to ``executed``. This reported ``needs-review`` for two
+    releases, which named the tool's confidence instead of the target's
+    behaviour and so read as a measurement that had not settled, when in fact
+    every guard below holds in 100 runs of 100.
 
     **The naive form of this oracle is unusable**, which is why none of it is
     naive. Sending ``1==1`` against ``1==2`` and calling a changed response a
@@ -6108,12 +6163,11 @@ class BooleanDifferential(DetectionMethod):
       answered the opening one -- provided the closing anchor is a *different*
       predicate, since a cache keyed on the query string would otherwise replay
       the opening answer and the check would measure the cache. With every
-      guard on, a genuinely evaluating
-      target still read as a differential in 100 runs of 100 -- the guards cost
-      nothing they were not meant to cost.
+      guard on, a genuinely evaluating target still read as a differential in
+      100 runs of 100 -- the guards cost nothing they were not meant to cost.
     """
     name = "boolean"
-    tier = "needs-review"
+    tier = "evaluation-sink"
     aggregate = True
     # Nothing here sleeps, waits for a callback or fetches anything back: every
     # probe is one ordinary request. What makes it costly is that no single one
@@ -6280,7 +6334,7 @@ class BooleanDifferential(DetectionMethod):
                 continue
             if len(yes) == 1 and len(no) == 1 and yes != no:
                 return Verdict(
-                    "needs-review",
+                    "evaluation-sink",
                     f"the response shape partitioned exactly along "
                     f"{min(len(true_probes), len(false_probes))} "
                     f"randomised true/false predicates via the {name} connective, and held "
@@ -6303,10 +6357,10 @@ class DeserSink(DetectionMethod):
     at all, which is a real, reportable finding and the prerequisite for every
     gadget chain.
 
-    So this method never emits ``confirmed``. Its strongest outcome is its own
+    So this method never emits ``executed``. Its strongest outcome is its own
     verdict, ``deserialization-sink``, and the report says outright that
     reaching RCE from there depends on classpath gadgets. Collapsing it into
-    ``confirmed`` would break the one guarantee the whole tool rests on;
+    ``executed`` would break the one guarantee the whole tool rests on;
     collapsing it into ``needs-review`` would throw away a proven finding.
 
     Two oracles, of deliberately different strength:
@@ -7030,8 +7084,8 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     """The one verdict that describes a whole detection run.
 
     Ordered by what the operator must not miss, and deliberately not by
-    frequency: one ``confirmed`` among a hundred negatives is the finding, so it
-    wins. ``needs-review`` outranks ``negative`` for the same reason.
+    frequency: one ``executed`` among a hundred negatives is the finding, so it
+    wins, and every weaker tier outranks ``negative`` for the same reason.
 
     ``error`` is reported only when *nothing* reached the target. A run that
     reached the target and found nothing is a real negative even if some probes
@@ -7045,14 +7099,27 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     if not results:
         return "nothing-tested"
     verdicts = {result["verdict"] for result in results}
-    # `deserialization-sink` sits below both RCE tiers on purpose. It is a
-    # *proven* finding, but about a different property -- the endpoint parses
-    # attacker-controlled object data -- and a suspected RCE outranks a proven
-    # non-RCE in triage. It never becomes `confirmed`, which is reserved for
+    # Ordered by what the operator must not miss. `executed` first; then the
+    # proven non-execution findings, closest-to-RCE first -- a delay honoured
+    # means something ran, a file written is a concrete primitive an attacker
+    # can build on, an evaluator consuming a predicate is the weakest of those
+    # three; then the two sinks whose remediation is a different subsystem
+    # entirely. None of them ever becomes `executed`, which is reserved for
     # execution and has to stay that way to mean anything.
-    # `lookup-sink` joins it on the same terms: proven, about a different
-    # property, and never folded into execution.
-    for tier in ("confirmed", "needs-review", "deserialization-sink", "lookup-sink"):
+    #
+    # `needs-review` is last, and it used to be second. The defence for second
+    # was that a suspected RCE outranks a proven non-RCE in triage, and that
+    # held while `time`, `boolean` and `write`'s uninterpreted file all
+    # reported here. They do not any more, and the one verdict left under it is
+    # `deser`'s shape fingerprint -- a suspected *deserialization*. Ranking
+    # that above `deserialization-sink` puts a guess above the proof of the
+    # same thing.
+    #
+    # So this order depends on which methods report `needs-review`. A method
+    # added later that reports it for a suspected *execution* belongs higher,
+    # and moving it is part of adding that method.
+    for tier in (EXECUTION_TIER, "timing-sink", "file-write", "evaluation-sink",
+                 "deserialization-sink", "lookup-sink", "needs-review"):
         if tier in verdicts:
             return tier
     if verdicts == {"error"}:
@@ -7067,6 +7134,34 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
         # is a real negative: the sink saw those and did nothing.
         return "blocked"
     return "negative"
+
+
+# The sections the text report prints for in-band verdicts that are NOT
+# execution, in triage order: (verdict, heading, what it does and does not say).
+#
+# `deserialization-sink` and `lookup-sink` keep their own hand-written blocks
+# because each closes on a paragraph about its own remediation path. The four
+# here are table-driven because three of them used to report as `needs-review`
+# and shared one block -- which is how the cleanup line came to be printed in
+# exactly two places in the whole report, under EXECUTED and under
+# NEEDS-REVIEW. A `file-write` finding has left a file on the target, so a
+# fourth hand-written block would have had to remember that a fourth time.
+IN_BAND_SECTIONS = (
+    ("timing-sink", "TIMING SINK(S)",
+     "the target honoured a delay RCEKit injected, so something on it waited. What "
+     "waited is not shown -- a sandbox that implements sleep answers the same way -- "
+     "so add --methods reflected for an execution proof."),
+    ("file-write", "ARBITRARY FILE WRITE(S)",
+     "the file is on the target and RCEKit read it back verbatim, so the directory is "
+     "reachable but not interpreted. A real finding, and not RCE."),
+    ("evaluation-sink", "EVALUATION SINK(S)",
+     "an evaluator consumed the input and partitioned the response on it. Which "
+     "evaluator is not shown: a query engine comparing two numbers produces this same "
+     "differential, so it is not execution."),
+    ("needs-review", "NEEDS-REVIEW candidate(s)",
+     "a real signal that is not proof on its own. Review it by hand; do not report it "
+     "as proven."),
+)
 
 
 def write_detection_json(path: str, results: List[Dict[str, Any]], target: str,
@@ -7170,16 +7265,19 @@ def method_claim(name: str) -> str:
 
     Read from the class, because written out by hand it drifted: the advice
     offered `--methods lookup` as one that "confirms" while the method reported
-    `lookup-sink`, in the same list where `oob` and `file` do mean confirmed
-    execution and `time` is marked needs-review only. A tier that moves has to
-    move in the sentence an operator acts on, and the only way to be sure of
-    that is to not write the sentence twice."""
+    `lookup-sink`, in the same list where `oob` and `file` do prove execution.
+    A tier that moves has to move in the sentence an operator acts on, and the
+    only way to be sure of that is to not write the sentence twice.
+
+    The weaker tiers are named verbatim rather than described. An operator
+    reading this is about to run the command and then read the verdict, and the
+    string they will see there is the useful thing to print."""
     cls = DETECTION_METHODS[name]
-    if cls.tier == "confirmed":
-        return "confirms"
+    if cls.tier == EXECUTION_TIER:
+        return "proves execution"
     if cls.tier == "needs-review":
-        return "needs-review only"
-    return "proves a %s, NOT execution" % cls.tier.replace("-", " ")
+        return "reports a candidate only, never execution"
+    return "reports %s, NOT execution" % cls.tier
 
 
 def method_rung_flag(name: str) -> str:
@@ -7196,7 +7294,7 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
     A sink that returns no output at all cannot be confirmed by a results-based
     method — there is nowhere for the computed value to appear. That is not a
     limitation to work around, it is what 'blind' means. But a run that only
-    prints "no execution confirmed" reads exactly like a clean target, and the
+    prints "no execution proven" reads exactly like a clean target, and the
     operator is left to remember unprompted which methods can still reach one.
     So name them, and only the ones not already tried."""
     in_band = {ReflectedMath.name, EvalExpr.name}
@@ -8310,22 +8408,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "computed product); file (self-OOB write+read-back, needs --file-write-path "
                              "and --file-read-url, or the --webroot/--web-base-url alias); write (the inverse "
                              "of file — your request stores a file and RCEKit executes it, needs "
-                             "--write-url-template; needs-review for a write that is served but not "
+                             "--write-url-template; file-write for a write that is served but not "
                              "interpreted); oob (DNS/HTTP callback to the built-in listener, needs "
                              "--oob-host — confirms a sink with no output channel and no writable web root); "
                              "lookup (an expression-lookup sink in Log4Shell's shape, which resolves a "
                              "${jndi:...} URI rather than shelling out, needs a DNS name delegated to the "
                              "listener for --oob-host and builds nothing from an address literal — "
-                             "reaches lookup-sink, never confirmed); "
-                             "time (hardened blind-timing regression, needs-review only); "
+                             "reaches lookup-sink, never executed); "
+                             "time (hardened blind-timing regression, reaches timing-sink, never executed); "
                              "deser (proves the endpoint deserializes attacker data — deserialization-sink "
                              "via a non-executing DNS gadget, which needs the same delegated --oob-host "
-                             "name lookup does, needs-review for the listener-free shape differential, "
-                             "never confirmed); "
+                             "name lookup does, and needs-review for the listener-free shape "
+                             "differential, which is a fingerprint and not a proven sink, "
+                             "never executed); "
                              "boolean (a sink that evaluates a predicate and renders nothing of it, "
                              "read from a response-shape differential across randomised true/false "
-                             "predicates — needs-review only, because a query engine comparing two "
-                             "numbers produces the same differential). "
+                             "predicates — reaches evaluation-sink, never executed, because a query engine "
+                             "comparing two numbers produces the same differential). "
                              "Opt-in and additive: when omitted, verification keeps its existing behaviour "
                              "unchanged.")
     parser.add_argument("--detect-json", default=None, metavar="PATH",
@@ -8425,7 +8524,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "happens on a different request than injection -- stored SSTI "
                              "rendered on a profile page, a payload written to a log a template "
                              "later renders, a queued job. Still differential, so it reaches "
-                             "confirmed: the value must be absent from this endpoint's "
+                             "executed: the value must be absent from this endpoint's "
                              "pre-injection control.")
     parser.add_argument("--observe-request", default=None, metavar="FILE",
                         help="(--methods) Raw HTTP request for the observed endpoint, instead of "
@@ -8684,15 +8783,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         by_verdict: Dict[str, int] = {}
         for result in results:
             by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        executed = [r for r in results if r["verdict"] == "executed"]
         print(f"[verify-chain] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
-        if confirmed:
-            print(f"\n[verify-chain] CONFIRMED execution ({len(confirmed)}):")
-            for result in confirmed:
+        if executed:
+            print(f"\n[verify-chain] EXECUTED ({len(executed)}):")
+            for result in executed:
                 print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
         else:
-            print("\n[verify-chain] No execution confirmed.")
+            print("\n[verify-chain] No execution proven.")
         return 0
 
     if args.verify_url or args.request_file:
@@ -8841,8 +8940,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "fire reverse shells, download-execute, credential access, lateral movement and OOB.")
         print(f"[verify] {method} {verify_url}  (authorised target)")
         # Opt-in, method-driven detection. Additive: without --methods the
-        # classic per-payload oracle below runs exactly as before. Confirmed and
-        # needs-review tiers are reported separately and never merged.
+        # classic per-payload oracle below runs exactly as before. `executed`
+        # and the weaker tiers are reported separately and never merged.
         if args.methods:
             method_names = [m.strip() for m in args.methods.split(",") if m.strip()]
             unknown = [m for m in method_names if m not in DETECTION_METHODS]
@@ -9013,9 +9112,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"[detect] write method STORES a file on the target (written by your own "
                       f"request) and reads it back from {writer._channel()}; "
                       f"language(s): {', '.join(languages)}. Every finding lists a cleanup line.")
-                print("[detect]   a computed value in the fetched file is CONFIRMED execution; "
-                      "the source coming back verbatim is NEEDS-REVIEW (arbitrary file write, "
-                      "not proven RCE) -- the two are never merged.")
+                print("[detect]   a computed value in the fetched file is EXECUTED -- proven "
+                      "execution; the source coming back verbatim is FILE-WRITE -- an arbitrary "
+                      "file write, also proven, and not RCE. The two are never merged.")
                 if injection_runs:
                     # Enumeration multiplies a read-only probe by the candidate
                     # count; multiplying a *write* by it is a different kind of
@@ -9041,7 +9140,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if with_dns and not args.oob_host:
                     print(f"[!] {', '.join(with_dns)} also has a non-executing DNS gadget, which "
                           "needs --oob-host and a listener. Without it only the error-shape "
-                          "oracle runs, and that reaches needs-review at best.")
+                          "oracle runs, and that reaches needs-review at best -- a parser "
+                          "fingerprint, not a proven sink.")
             if bridges:
                 declared = getattr(generator, "bridges", None) or {}
                 if bridges == ("auto",):
@@ -9175,7 +9275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # same number only while every method answers from each
                     # probe.
                     point_started = generator.delivered_probes
-                    confirmed_here = False
+                    executed_here = False
                     # `--max-payloads` is spent per question, not per wave and
                     # not per candidate. Per wave, splitting the methods in two
                     # quietly doubled it: a run capped at 5 sent 10 probes to
@@ -9186,7 +9286,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # which is the same finding lost by a different route.
                     spent: Dict[str, int] = {}
                     for question, wave in waves:
-                        if confirmed_here and question == "execution":
+                        if executed_here and question == "execution":
                             # Execution is proven here. Another method would put
                             # a second name on one finding. A different question
                             # is never skipped for this, however thorough the
@@ -9210,12 +9310,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         )
                         point_results.extend(wave_results)
                         spent[question] = spent.get(question, 0) + len(wave_results)
-                        confirmed_here = confirmed_here or any(
-                            r["verdict"] == "confirmed" for r in wave_results)
+                        executed_here = executed_here or any(
+                            r["verdict"] == "executed" for r in wave_results)
                     for result in point_results:
                         result["point"] = label
                     verdict = overall_detection_verdict(point_results)
-                    marker = "  <-- CONFIRMED" if verdict == "confirmed" else ""
+                    marker = "  <-- EXECUTED" if verdict == "executed" else ""
                     print(f"[detect]   {label}: {verdict} "
                           f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
@@ -9306,7 +9406,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "--confirm-depth every to map every shape the sink accepts:")
                 for label, count in sorted(generator.settled_carriers.items(),
                                            key=lambda item: (-item[1], item[0])):
-                    print(f"[detect]   {label} confirmed and stopped")
+                    print(f"[detect]   {label} executed and stopped")
             if generator.reach_noted_probes:
                 # Not held back -- disclosed. The operator asked for a tier and
                 # got reach past it, so the run says which shapes and how far,
@@ -9371,10 +9471,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                               f"({', '.join(sorted(generator.transport_contexts))}); a --contexts "
                               "narrowed past those leaves it nothing to write.")
                 return 1
-            confirmed = [r for r in results if r["verdict"] == "confirmed"]
-            if confirmed:
-                print(f"\n[detect] CONFIRMED execution ({len(confirmed)}):")
-                for result in confirmed:
+            executed = [r for r in results if r["verdict"] == "executed"]
+            if executed:
+                print(f"\n[detect] EXECUTED ({len(executed)}):")
+                for result in executed:
                     at = f" at {result['point']}" if result.get("point") else ""
                     print(f"  [{result['method']}/{result['environment']}/{result['context']}]{at} "
                           f"{result['payload']}   ({result['detail']})")
@@ -9382,7 +9482,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         print(f"      cleanup: {result['cleanup']}")
             deser_sinks = [r for r in results if r["verdict"] == "deserialization-sink"]
             if deser_sinks:
-                # Its own section, never folded into CONFIRMED. The finding is
+                # Its own section, never folded into EXECUTED. The finding is
                 # real and proven; what it proves is not execution.
                 print(f"\n[detect] {len(deser_sinks)} DESERIALIZATION SINK(S) — "
                       "NOT proof of RCE:")
@@ -9407,20 +9507,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "expressions it is given. Reaching RCE from here needs a server that "
                       "answers the lookup with a loadable class; this listener answers with "
                       "nothing, which is why the tier stops short of execution.")
-            needs_review = [r for r in results if r["verdict"] == "needs-review"]
-            if needs_review:
-                print(f"\n[detect] {len(needs_review)} NEEDS-REVIEW candidates "
-                      "(not proof of execution — review manually):")
-                for result in needs_review:
+            for verdict_name, heading, closing in IN_BAND_SECTIONS:
+                rows = [r for r in results if r["verdict"] == verdict_name]
+                if not rows:
+                    continue
+                print(f"\n[detect] {len(rows)} {heading} — NOT proof of execution:")
+                for result in rows:
                     at = f" at {result['point']}" if result.get("point") else ""
                     print(f"  [{result['method']}/{result['environment']}/{result['context']}]{at} "
                           f"{result['payload']}   ({result['detail']})")
-                    # A needs-review from a state-changing method still left the
-                    # artifact behind: `write` reaching this tier means the file
-                    # IS on the target, just not interpreted. Printing cleanup
-                    # only under CONFIRMED would leave it there unmentioned.
+                    # Any of these can come from a state-changing method:
+                    # `write` reaching `file-write` means the file IS on the
+                    # target, just not interpreted. Printed for every section
+                    # rather than per block, so a tier added later cannot
+                    # arrive without it.
                     if result.get("cleanup"):
                         print(f"      cleanup: {result['cleanup']}")
+                print(f"  → {closing}")
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
                 # verdicts below were decided without ever reading the place the
@@ -9428,7 +9531,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"\n[!] The OBSERVED endpoint ({observe_url}) never answered, so nothing "
                       "was read from it. Any negative below was decided from the injected "
                       "response alone — that is not a second-order result.")
-            if not confirmed:
+            if not executed:
                 errored = [r for r in results if r["verdict"] == "error"]
                 if errored:
                     print(f"\n[detect] {len(errored)} of {len(results)} probe(s) NEVER REACHED THE TARGET "
@@ -9451,7 +9554,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # "the target may be patched" about a run a filter answered,
                     # and then listing methods that will be refused the same
                     # way, is advice pointing at the wrong thing entirely.
-                    print("\n[detect] No execution confirmed. The target may be patched, or the probes "
+                    print("\n[detect] No execution proven. The target may be patched, or the probes "
                           "may not fit its sink/context (try --environments/--contexts).")
                     for line in blind_sink_advice(method_names, args):
                         print(line)
@@ -9468,12 +9571,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         by_verdict: Dict[str, int] = {}
         for result in results:
             by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
-        confirmed = [r for r in results if r["verdict"] == "confirmed"]
+        executed = [r for r in results if r["verdict"] == "executed"]
         print(f"[verify] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
-        if confirmed:
-            print(f"\n[verify] CONFIRMED execution ({len(confirmed)}):")
-            for result in confirmed:
+        if executed:
+            print(f"\n[verify] EXECUTED ({len(executed)}):")
+            for result in executed:
                 print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
         inconclusive = [r for r in results if r["verdict"] == "inconclusive"]
         if inconclusive:
@@ -9490,8 +9593,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "expected delay — raise --verify-timeout above it to confirm):")
             for result in timing_candidates:
                 print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
-        if not confirmed and not oob_pending:
-            print("\n[verify] No execution confirmed. The target may be patched, or the payloads "
+        if not executed and not oob_pending:
+            print("\n[verify] No execution proven. The target may be patched, or the payloads "
                   "may not fit its sink/context (try --target-profile or a different --environments/--contexts).")
         return 0
 
