@@ -4244,33 +4244,46 @@ class TierVocabularyTestCase(unittest.TestCase):
                          f"vocabulary does not name")
 
 
-class InBandSectionTestCase(unittest.TestCase):
-    """The text report's sections for verdicts that are proven and are not
-    execution, held against the tiers the engine can actually emit.
+class NonExecutionSectionTestCase(unittest.TestCase):
+    """The report's sections for verdicts that are proven and are not
+    execution: that each tier has one, that none describes a tier nothing
+    emits, and that there is exactly one thing deciding their order.
 
-    This exists for one regression. The cleanup line was printed in exactly two
-    places in the whole report -- under the execution section and under
-    NEEDS-REVIEW -- because `write`'s uninterpreted file shared the latter with
-    `time`, `boolean` and `deser`'s fingerprint. Giving it its own tier moved
-    it out of that block, and a `file-write` finding has left a file on the
-    target: a section without the cleanup line leaves the artifact there
-    unmentioned.
+    Two regressions live here.
+
+    The first: the cleanup line was printed in exactly two places in the whole
+    report -- the execution section, and the NEEDS-REVIEW block `write`'s
+    uninterpreted file shared with `time`, `boolean` and `deser`'s fingerprint.
+    Giving it its own tier moved it out of the only block that printed it, and
+    a `file-write` finding has left a file on the target.
+
+    The second, and the reason this class was rewritten: `deserialization-sink`
+    and `lookup-sink` were hand-written blocks *above* the table holding the
+    other four. Where they sat was an ordering claim, and nothing compared it
+    to `overall_detection_verdict` -- which ranks the four above them. A run
+    reporting both `timing-sink` and `deserialization-sink` collapsed to the
+    first and led the report with the second.
+
+    The order test that was here did not catch it, and the way it failed is
+    the point: it looped over the table and checked each pair against the
+    collapsed verdict, so it checked three quarters of the sequence and read as
+    though it checked the sequence. Both now come off one table, which makes
+    that comparison vacuous, so the order is pinned two other ways -- written
+    out by hand below, and structurally, by there being nowhere else for a
+    section to be rendered from.
     """
 
     def _sections(self):
-        return {verdict: (heading, closing)
-                for verdict, heading, closing in rcekit.IN_BAND_SECTIONS}
+        return {verdict: (heading, closing, compact)
+                for verdict, heading, closing, compact in rcekit.NON_EXECUTION_SECTIONS}
 
-    def test_every_weaker_tier_the_engine_emits_has_a_section(self):
+    def test_every_non_execution_tier_the_engine_emits_has_a_section(self):
         """Written from the classes, so a tier added later cannot report into a
         run that prints no section for it."""
         emitted = set()
         for method in rcekit.DETECTION_METHODS.values():
             emitted |= {method.tier} | set(method.also_reports)
         emitted -= {rcekit.EXECUTION_TIER}
-        # `deser` and `lookup` keep hand-written blocks, each closing on its own
-        # remediation paragraph.
-        emitted -= {"deserialization-sink", "lookup-sink"}
         missing = sorted(emitted - set(self._sections()))
         self.assertEqual(missing, [],
                          f"no report section for {missing}, which a method emits")
@@ -4285,34 +4298,82 @@ class InBandSectionTestCase(unittest.TestCase):
         self.assertEqual(stale, [],
                          f"the report has a section for {stale}, which nothing emits")
 
-    def test_the_sections_are_in_the_collapsed_verdict_order(self):
-        """One order, read two ways. A report that lists the weakest finding
-        first while the collapsed verdict names the strongest disagrees with
-        itself about what the operator must not miss."""
-        listed = [verdict for verdict, _h, _c in rcekit.IN_BAND_SECTIONS]
-        ranked = []
-        for verdict in listed:
-            others = [v for v in listed if v != verdict]
-            # Against every other section's verdict, the collapsed answer has
-            # to prefer whichever of the two this order puts first.
-            for other in others:
-                winner = rcekit.overall_detection_verdict(
-                    [{"verdict": verdict}, {"verdict": other}])
-                expected = verdict if listed.index(verdict) < listed.index(other) else other
-                self.assertEqual(winner, expected,
-                                 f"the report lists {listed} but the collapsed "
-                                 f"verdict prefers {winner} of {verdict}/{other}")
-            ranked.append(verdict)
-        self.assertEqual(ranked, listed)
+    # The triage order, written out. Not derived from anything the
+    # implementation uses, because `VERDICT_PRIORITY` and the report now read
+    # the same table -- so a test comparing those two agrees with itself.
+    EXPECTED_PRIORITY = (
+        "executed",
+        "timing-sink",
+        "file-write",
+        "evaluation-sink",
+        "deserialization-sink",
+        "lookup-sink",
+        "needs-review",
+    )
+
+    def test_the_priority_is_the_one_written_out_here(self):
+        self.assertEqual(tuple(rcekit.VERDICT_PRIORITY), self.EXPECTED_PRIORITY)
+
+    def test_each_adjacent_pair_collapses_to_the_stronger_finding(self):
+        """The order as behaviour, pair by pair, against the hand-written list.
+
+        `executed` over a delay honoured; a delay honoured over a file written;
+        a file written over an evaluator; an evaluator over a deserialization
+        sink; that over a lookup sink; and every one of them over the single
+        candidate `deser` reports without a listener."""
+        for stronger, weaker in zip(self.EXPECTED_PRIORITY,
+                                    self.EXPECTED_PRIORITY[1:]):
+            with self.subTest(stronger=stronger, weaker=weaker):
+                self.assertEqual(
+                    rcekit.overall_detection_verdict(
+                        [{"verdict": weaker}, {"verdict": stronger}]),
+                    stronger)
+
+    def test_the_report_renders_every_section_from_the_one_table(self):
+        """The structural half, and the one that would have caught the bug.
+
+        A hand-written block for a particular verdict is an ordering claim
+        expressed as the position of a statement, which no test can compare to
+        anything. So there must not be one: inside `main`, the only verdict
+        compared against a literal is the execution tier, whose section is
+        deliberately separate because its heading takes a different shape and
+        it closes on no sentence about what it fails to prove. Every other
+        verdict is reached by iterating the table, in the table's order."""
+        source = Path(rcekit.__file__).read_text(encoding="utf-8")
+        main = next(node for node in ast.parse(source).body
+                    if isinstance(node, ast.FunctionDef) and node.name == "main")
+        sectioned = set(self._sections())
+        hand_written = {}
+        for node in ast.walk(main):
+            if isinstance(node, ast.Compare) and isinstance(node.ops[0], ast.Eq):
+                for operand in node.comparators:
+                    if isinstance(operand, ast.Constant) and operand.value in sectioned:
+                        hand_written.setdefault(operand.value, []).append(node.lineno)
+        self.assertEqual(
+            hand_written, {},
+            f"main() singles out {sorted(hand_written)} by name, so where that "
+            f"block sits decides where it prints -- which is the claim "
+            f"NON_EXECUTION_SECTIONS exists to hold instead")
 
     def test_each_section_says_what_it_does_not_prove(self):
-        for verdict, (heading, closing) in self._sections().items():
+        for verdict, (heading, closing, _compact) in self._sections().items():
             with self.subTest(verdict=verdict):
                 self.assertTrue(heading.strip(), verdict)
                 # The closing sentence is what stops a proven non-execution
                 # finding being read as RCE, which is the whole reason these
                 # are separate sections rather than one list.
                 self.assertTrue(len(closing) > 40, f"{verdict}: {closing!r}")
+
+    def test_only_the_two_blob_carrying_tiers_truncate_their_payload(self):
+        """`compact` is a formatting flag and stays a flag.
+
+        It exists because `deser` sends base64 object streams and `lookup`
+        sends JNDI URIs, and because neither has an `environment` worth
+        printing. Anything more would be a formatting language in a table,
+        which is how the last attempt at this grew out of hand."""
+        compact = {verdict for verdict, (_h, _c, flag) in self._sections().items()
+                   if flag}
+        self.assertEqual(compact, {"deserialization-sink", "lookup-sink"})
 
 
 class OobCallbackTestCase(unittest.TestCase):

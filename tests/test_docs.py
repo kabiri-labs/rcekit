@@ -1255,5 +1255,90 @@ class CLIDocumentationTestCase(unittest.TestCase):
         )
 
 
+class SampleTranscriptTestCase(unittest.TestCase):
+    """A sample run in the docs is a claim about what the tool prints.
+
+    This exists because renaming a verdict broke two transcripts and the rename
+    did not notice. The counts line in the quick-start example was updated to
+    `executed=4` while the section heading two lines below it still read
+    `CONFIRMED execution`, so no 3.0.0 invocation could produce the documented
+    output. A case-sensitive search for the lowercase status name found the
+    first and not the second.
+
+    The docs have thorough machinery holding their *tables* to the engine --
+    the verdict table, the methods table, the coverage ledger -- and nothing
+    held their transcripts to the vocabulary the code emits.
+
+    Deliberately narrow, and deliberately not a check that a transcript is
+    reproducible: a report line carries probe counts, random tokens and ports
+    that cannot be known from here. What it checks is the vocabulary, in the
+    two places a transcript states it -- a retired verdict name anywhere in the
+    line, and the verdict names in a counts line.
+
+    A scrape of every ALL-CAPS run in the module was tried as the oracle for
+    section headings and withdrawn: the payload corpus and the help text put
+    `NOT`, `NONE`, `FILE` and 200 more in that set, so it would have admitted
+    almost any wrong heading. It caught `CONFIRMED` only because that word
+    happened to leave the source entirely. An oracle that answers correctly for
+    the wrong reason is worse than no oracle, because it reads as coverage.
+    """
+
+    # Verdict names this project has retired. Checked here against the docs and
+    # in TierVocabularyTestCase against the module, so one rename updates one
+    # list and every stale transcript fails.
+    RETIRED = ("confirmed",)
+
+    FENCE = re.compile(r"```.*?```", re.DOTALL)
+    # A report line, and only from inside a fenced block.
+    REPORT_LINE = re.compile(r"^\[(?:detect|verify|verify-chain)\]\s+(.*)$", re.M)
+    # `verdict=n` pairs from a run summary.
+    COUNT = re.compile(r"(?<![\w-])([a-z][a-z-]{2,})=[0-9]+")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.verdicts = set(rcekit.VERDICT_PRIORITY) | {
+            "negative", "inconclusive", "blocked", "error", "nothing-tested",
+            "oob-pending", "timing-candidate-on-timeout", "no-match",
+            "no-signature", "no-delay",
+        }
+
+    def _report_lines(self):
+        for path in [README] + sorted(DOCS_DIR.glob("*.md")):
+            for block in self.FENCE.findall(path.read_text(encoding="utf-8")):
+                for body in self.REPORT_LINE.findall(block):
+                    yield path.name, body
+
+    def test_there_are_transcripts_to_check(self):
+        # Without this the two below pass vacuously the moment the fence or the
+        # line pattern stops matching, which is how a docs check dies quietly.
+        self.assertGreaterEqual(len(list(self._report_lines())), 10)
+
+    def test_no_transcript_names_a_retired_verdict(self):
+        for name, body in self._report_lines():
+            # The report still uses "confirmed" as a verb where it disclaims:
+            # "cannot be confirmed by reflected/eval" is a real line. The same
+            # denial pattern the tier checks use takes that out first.
+            claim = DENIAL_RE.sub("", body).lower()
+            for retired in self.RETIRED:
+                with self.subTest(doc=name, retired=retired):
+                    self.assertNotIn(
+                        retired, claim,
+                        f"{name} shows a run printing {retired!r}, a verdict "
+                        f"name this project retired -- the transcript documents "
+                        f"output no run can produce: {body}")
+
+    def test_every_verdict_counted_in_a_transcript_is_a_real_verdict(self):
+        checked = 0
+        for name, body in self._report_lines():
+            for verdict in self.COUNT.findall(body):
+                checked += 1
+                with self.subTest(doc=name, verdict=verdict):
+                    self.assertIn(
+                        verdict, self.verdicts,
+                        f"{name} counts {verdict!r} in a run summary, which is "
+                        f"not a verdict the engine emits")
+        self.assertGreaterEqual(checked, 5, "no counts lines were checked")
+
+
 if __name__ == "__main__":
     unittest.main()

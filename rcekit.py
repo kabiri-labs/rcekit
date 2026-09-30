@@ -7118,8 +7118,12 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     # So this order depends on which methods report `needs-review`. A method
     # added later that reports it for a suspected *execution* belongs higher,
     # and moving it is part of adding that method.
-    for tier in (EXECUTION_TIER, "timing-sink", "file-write", "evaluation-sink",
-                 "deserialization-sink", "lookup-sink", "needs-review"):
+    #
+    # Read from VERDICT_PRIORITY rather than written out here, because the text
+    # report orders its sections by the same judgement and the two used to be
+    # stated separately -- one as this tuple, the other as the order of print
+    # statements in `main()`. They disagreed.
+    for tier in VERDICT_PRIORITY:
         if tier in verdicts:
             return tier
     if verdicts == {"error"}:
@@ -7136,32 +7140,58 @@ def overall_detection_verdict(results: List[Dict[str, Any]]) -> str:
     return "negative"
 
 
-# The sections the text report prints for in-band verdicts that are NOT
-# execution, in triage order: (verdict, heading, what it does and does not say).
+# Every section the text report prints for a verdict that is NOT execution, in
+# the order it prints them: (verdict, heading, what it does and does not say,
+# compact rows).
 #
-# `deserialization-sink` and `lookup-sink` keep their own hand-written blocks
-# because each closes on a paragraph about its own remediation path. The four
-# here are table-driven because three of them used to report as `needs-review`
-# and shared one block -- which is how the cleanup line came to be printed in
-# exactly two places in the whole report, under EXECUTED and under
-# NEEDS-REVIEW. A `file-write` finding has left a file on the target, so a
-# fourth hand-written block would have had to remember that a fourth time.
-IN_BAND_SECTIONS = (
+# One table, because the order *is* the content. `deserialization-sink` and
+# `lookup-sink` used to be hand-written blocks above a table holding the other
+# four, and their physical position in `main()` was an ordering claim that
+# nothing compared against `overall_detection_verdict`. It disagreed: a run
+# reporting both `timing-sink` and `deserialization-sink` collapsed to the
+# first and led the report with the second. A statement order is not data and
+# cannot be checked, so the order moved here and the collapsed verdict reads it
+# from the same place -- see VERDICT_PRIORITY.
+#
+# `compact` is the one formatting difference in the whole report, and it is two
+# renderers rather than a formatting language on purpose: `deser` and `lookup`
+# carry base64 object streams and JNDI URIs, which are truncated, and their
+# `environment` says nothing a reader needs.
+#
+# EXECUTED is deliberately not in here. It is the one section that *is*
+# execution: its heading takes a different shape and it closes on no sentence
+# about what it fails to prove.
+NON_EXECUTION_SECTIONS = (
     ("timing-sink", "TIMING SINK(S)",
      "the target honoured a delay RCEKit injected, so something on it waited. What "
      "waited is not shown -- a sandbox that implements sleep answers the same way -- "
-     "so add --methods reflected for an execution proof."),
+     "so add --methods reflected for an execution proof.", False),
     ("file-write", "ARBITRARY FILE WRITE(S)",
      "the file is on the target and RCEKit read it back verbatim, so the directory is "
-     "reachable but not interpreted. A real finding, and not RCE."),
+     "reachable but not interpreted. A real finding, and not RCE.", False),
     ("evaluation-sink", "EVALUATION SINK(S)",
      "an evaluator consumed the input and partitioned the response on it. Which "
      "evaluator is not shown: a query engine comparing two numbers produces this same "
-     "differential, so it is not execution."),
+     "differential, so it is not execution.", False),
+    ("deserialization-sink", "DESERIALIZATION SINK(S)",
+     "the endpoint reconstructs attacker-supplied object graphs. Reaching RCE from "
+     "here depends on gadgets in the target's classpath, which is outside what RCEKit "
+     "proves.", True),
+    ("lookup-sink", "EXPRESSION-LOOKUP SINK(S)",
+     "the sink resolved a URI RCEKit chose, so it evaluates the expressions it is "
+     "given. Reaching RCE from here needs a server that answers the lookup with a "
+     "loadable class; this listener answers with nothing, which is why the tier stops "
+     "short of execution.", True),
     ("needs-review", "NEEDS-REVIEW candidate(s)",
      "a real signal that is not proof on its own. Review it by hand; do not report it "
-     "as proven."),
+     "as proven.", False),
 )
+
+# The collapsed verdict's order, stated once. `executed` heads it; the rest is
+# the report's own section order, so the summary and the report cannot disagree
+# about what the operator must not miss.
+VERDICT_PRIORITY = (EXECUTION_TIER,) + tuple(
+    verdict for verdict, _heading, _closing, _compact in NON_EXECUTION_SECTIONS)
 
 
 def write_detection_json(path: str, results: List[Dict[str, Any]], target: str,
@@ -9480,42 +9510,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                           f"{result['payload']}   ({result['detail']})")
                     if result.get("cleanup"):
                         print(f"      cleanup: {result['cleanup']}")
-            deser_sinks = [r for r in results if r["verdict"] == "deserialization-sink"]
-            if deser_sinks:
-                # Its own section, never folded into EXECUTED. The finding is
-                # real and proven; what it proves is not execution.
-                print(f"\n[detect] {len(deser_sinks)} DESERIALIZATION SINK(S) — "
-                      "NOT proof of RCE:")
-                for result in deser_sinks:
-                    at = f" at {result['point']}" if result.get("point") else ""
-                    print(f"  [{result['method']}/{result['context']}]{at} "
-                          f"{result['payload'][:100]}   ({result['detail']})")
-                print("  → the endpoint reconstructs attacker-supplied object graphs. Reaching "
-                      "RCE from here depends on gadgets in the target's classpath, which is "
-                      "outside what RCEKit confirms.")
-            lookup_sinks = [r for r in results if r["verdict"] == "lookup-sink"]
-            if lookup_sinks:
-                # Its own section for the same reason `deser` has one: the
-                # finding is proven and the thing it proves is not execution.
-                print(f"\n[detect] {len(lookup_sinks)} EXPRESSION-LOOKUP SINK(S) \u2014 "
-                      "NOT proof of RCE:")
-                for result in lookup_sinks:
-                    at = f" at {result['point']}" if result.get("point") else ""
-                    print(f"  [{result['method']}/{result['context']}]{at} "
-                          f"{result['payload'][:100]}   ({result['detail']})")
-                print("  \u2192 the sink resolved a URI RCEKit chose, so it evaluates the "
-                      "expressions it is given. Reaching RCE from here needs a server that "
-                      "answers the lookup with a loadable class; this listener answers with "
-                      "nothing, which is why the tier stops short of execution.")
-            for verdict_name, heading, closing in IN_BAND_SECTIONS:
+            # Every proven-but-not-execution section, in one pass over one
+            # table. `deserialization-sink` and `lookup-sink` were hand-written
+            # blocks here, above a table holding the rest, and where they sat
+            # was an ordering claim nothing checked: a run reporting both
+            # `timing-sink` and `deserialization-sink` collapsed to the first
+            # and led the report with the second. The order is data now, and
+            # the collapsed verdict reads it from the same table.
+            for verdict_name, heading, closing, compact in NON_EXECUTION_SECTIONS:
                 rows = [r for r in results if r["verdict"] == verdict_name]
                 if not rows:
                     continue
                 print(f"\n[detect] {len(rows)} {heading} — NOT proof of execution:")
                 for result in rows:
                     at = f" at {result['point']}" if result.get("point") else ""
-                    print(f"  [{result['method']}/{result['environment']}/{result['context']}]{at} "
-                          f"{result['payload']}   ({result['detail']})")
+                    if compact:
+                        # A base64 object stream or a JNDI URI, and an
+                        # `environment` that tells the reader nothing.
+                        print(f"  [{result['method']}/{result['context']}]{at} "
+                              f"{result['payload'][:100]}   ({result['detail']})")
+                    else:
+                        print(f"  [{result['method']}/{result['environment']}/"
+                              f"{result['context']}]{at} "
+                              f"{result['payload']}   ({result['detail']})")
                     # Any of these can come from a state-changing method:
                     # `write` reaching `file-write` means the file IS on the
                     # target, just not interpreted. Printed for every section

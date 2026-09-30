@@ -203,7 +203,7 @@ real finding and the prerequisite for every gadget chain.
 is its own verdict:
 
 ```
-[detect] 1 DESERIALIZATION SINK(S) — NOT proof of RCE:
+[detect] 1 DESERIALIZATION SINK(S) — NOT proof of execution:
   [deser/raw] rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA...   (java: the target resolved
       rk7f2a91c3b8.oob.example, so it reconstructed an attacker-supplied object graph …)
   → the endpoint reconstructs attacker-supplied object graphs. Reaching RCE from
@@ -430,7 +430,7 @@ separator, RCEKit used to report:
 
 ```
 [detect] sent 10 probes (10 result(s)): negative=10
-[detect] No execution confirmed. The target may be patched...
+[detect] No execution proven. The target may be patched...
 ```
 
 `negative` asserts that the probes **reached** the target. They reached a
