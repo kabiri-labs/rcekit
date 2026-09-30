@@ -334,6 +334,20 @@ formats, or the template schema.
   `timing-sink`, `file-write`, `evaluation-sink`, `deserialization-sink`,
   `lookup-sink`, `needs-review`.
 
+  That order is stated once, in `NON_EXECUTION_SECTIONS`, and both the
+  collapsed verdict and the text report read it from there. They used to state
+  it separately -- one as a tuple, the other as the order of print statements
+  in `main()` -- and they disagreed: `deserialization-sink` and `lookup-sink`
+  were hand-written blocks above the table holding the rest, so a run
+  reporting both `timing-sink` and `deserialization-sink` collapsed to the
+  first and led the report with the second. A statement order is not data and
+  cannot be checked against anything.
+
+  Folding those two in unifies their heading with the others: `NOT proof of
+  RCE` becomes `NOT proof of execution`, which is what the other four already
+  said. Their rows keep the compact form they had -- truncated payload, no
+  `environment` -- because they carry base64 object streams and JNDI URIs.
+
 - The classic `--verify-url` path renamed its `confirmed` verdict too, and its
   section headings with it. It has no sinks and no `needs-review`, so nothing
   there was mis-tiered; a tool printing `[verify] CONFIRMED` beside `[detect]

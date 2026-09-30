@@ -167,7 +167,7 @@ rcekit --acknowledge-consent \
 [detect] methods: reflected, eval
 [detect] sent 13 probes (13 result(s)): executed=4, negative=9
 
-[detect] CONFIRMED execution (4):
+[detect] EXECUTED (4):
   [reflected/unix/raw] ; echo RKYZRIP$((540141+314681))RKFWVFS$(echo RKBWOOC)RKYZRIP
       (target computed 'RKYZRIP854822RKFWVFSRKBWOOCRKYZRIP' — random operands, absent from control)
 ```
@@ -188,7 +188,7 @@ rcekit --acknowledge-consent \
 ```
 [detect] sent 4 probes (4 result(s)): executed=3, negative=1
 
-[detect] CONFIRMED execution (3):
+[detect] EXECUTED (3):
   [reflected/unix/raw] ; echo RKHWNHK$((114157+752773))RKXGFIH$(echo RKHSEIF)RKHWNHK
       (target computed 'RKHWNHK866930RKXGFIHRKHSEIFRKHWNHK' — random operands, absent from control)
 ```
