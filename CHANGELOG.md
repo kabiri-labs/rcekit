@@ -354,6 +354,26 @@ formats, or the template schema.
   EXECUTED` would just be two vocabularies. That path has no machine-readable
   output, so this is text only.
 
+### Benchmark
+
+Three cases were re-run against their vulhub builds at 3.0.0, on three
+independent targets, and all three passed under the new names:
+
+| Case | Vulnerable half | Negative control |
+|---|---|---|
+| `struts2-s2-001` | `executed` | `negative` |
+| `webmin-cve-2019-15107` | `executed` | `timing-sink` |
+| `opentsdb-cve-2023-25826` | `executed` | `timing-sink` |
+
+The two `timing-sink` controls carry the weight. On a Webmin 1.910 and an
+OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its own proven
+tier and still does not reach `executed` -- the retier holding against real
+software and not against a fixture.
+
+The remaining 6 cases were not re-run. `runner.py --list` loads and validates
+all 9 under the new names, and nothing a case sends or measures changed, but
+neither of those is a run.
+
 ### Migration
 
 `--detect-json` changes values, not keys. `verdict`, the keys of `counts`, each
