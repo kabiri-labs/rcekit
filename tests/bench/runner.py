@@ -9,7 +9,7 @@ README claims.
 
 Every case carries a **negative control** — a build or an endpoint that is not
 vulnerable and must come back clean. That is not paperwork. A benchmark without
-negative controls measures nothing: a tool that shouted `confirmed` at every
+negative controls measures nothing: a tool that shouted `executed` at every
 target would score full marks on the vulnerable half and the harness would call
 it progress. A case passes only when both halves land.
 
@@ -79,7 +79,7 @@ VALID_EXPECTATIONS = tuple(sorted(_reported_tiers() | set(_OUTCOMES_WITHOUT_A_ME
 # `error` and `nothing-tested` both mean the run never exercised the target, so a
 # control expecting either proves nothing about false confirmation -- it would
 # stay green with the detection engine entirely broken, which is the one thing a
-# control exists to catch. `confirmed` is excluded as a contradiction.
+# control exists to catch. `executed` is excluded as a contradiction.
 #
 # The vulnerable half may still expect them: "an unreachable target reports
 # `error`, not `negative`" is a real property worth pinning.
@@ -88,9 +88,9 @@ VALID_EXPECTATIONS = tuple(sorted(_reported_tiers() | set(_OUTCOMES_WITHOUT_A_ME
 # says the target was exercised and the tool did *not* claim execution, which is
 # exactly what a tier-ceiling control measures -- "this endpoint deserializes
 # attacker data and RCEKit still would not call it RCE" is a control, not a
-# contradiction. Only `confirmed` is excluded.
+# contradiction. Only `executed` is excluded.
 CONTROL_EXPECTATIONS = tuple(sorted(
-    (_reported_tiers() - {"confirmed"}) | {"negative", "inconclusive"}))
+    (_reported_tiers() - {rcekit.EXECUTION_TIER}) | {"negative", "inconclusive"}))
 
 
 # What a control proves, as `tests/bench/README.md` documents it. Checked for
@@ -220,8 +220,8 @@ def validate_case(case: Dict[str, Any], source: str = "<case>") -> Dict[str, Any
         raise CaseError(f"{source}: negative_control 'kind' must be one of "
                         f"{', '.join(CONTROL_KINDS)}; got {kind!r}")
     control_expect = control.get("expect", "negative")
-    if control_expect == "confirmed":
-        raise CaseError(f"{source}: a negative control expecting 'confirmed' is a contradiction")
+    if control_expect == rcekit.EXECUTION_TIER:
+        raise CaseError(f"{source}: a negative control expecting 'executed' is a contradiction")
     if control_expect not in CONTROL_EXPECTATIONS:
         raise CaseError(f"{source}: negative_control 'expect' must be one of "
                         f"{', '.join(CONTROL_EXPECTATIONS)} — an outcome that means the target "
@@ -665,14 +665,14 @@ def render_markdown(outcomes: List[Dict[str, Any]]) -> str:
     """The coverage table, ready to paste into the README.
 
     The control column is part of the table on purpose: a reader can see that
-    every confirmed row was checked against something that must stay clean,
+    every executed row was checked against something that must stay clean,
     rather than taking the claim on trust."""
     lines = ["| RCE class | Target | Method | Verdict | Control | Result |",
              "|---|---|---|---|---|---|"]
     for outcome in outcomes:
         methods = ", ".join(f"`{m}`" for m in outcome.get("methods", []) if "/" not in m) or "—"
         verdict = outcome.get("verdict", "—")
-        cell = f"**`{verdict}`**" if verdict == "confirmed" else f"`{verdict}`"
+        cell = f"**`{verdict}`**" if verdict == rcekit.EXECUTION_TIER else f"`{verdict}`"
         control = f"`{outcome.get('control_verdict', '—')}`"
         result = "pass" if outcome.get("passed") else "**FAIL**"
         lines.append(f"| {outcome['rce_class']} | {outcome['target']} | {methods} | "

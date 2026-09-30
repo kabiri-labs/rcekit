@@ -78,15 +78,15 @@ starting point — this page is for looking things up once you know what you wan
 
 | `--methods` value | Confirms | Rung | Tier it can reach |
 |---|---|---|---|
-| `reflected` | OS command injection, via computed arithmetic | `safe` | `confirmed` |
-| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `safe` | `confirmed` |
-| `file` | Execution + a write primitive, via write-and-fetch | `stateful` † | `confirmed` |
-| `write` | A write primitive proven to be RCE, by executing the written file | `stateful` † | `confirmed`, or `needs-review` for a write that is served but not interpreted |
-| `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `intrusive` | `confirmed` |
+| `reflected` | OS command injection, via computed arithmetic | `safe` | `executed` |
+| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `safe` | `executed` |
+| `file` | Execution + a write primitive, via write-and-fetch | `stateful` † | `executed` |
+| `write` | A write primitive proven to be RCE, by executing the written file | `stateful` † | `executed`, or `file-write` for a write that is served but not interpreted |
+| `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `intrusive` | `executed` |
 | `lookup` | An **expression-lookup** sink (Log4Shell's shape): the sink resolves a `${jndi:…}` URI rather than running a command, and calls back carrying a per-probe token. Sends `dns://` at `intrusive`, and `ldap://` / `rmi://` as well at `stateful`. Needs a **name** for `--oob-host`; an address literal carries no token, so it builds nothing | `intrusive` | `lookup-sink` |
-| `time` | Blind execution, via a `0/N/2N` regression | `safe` | `needs-review` only |
+| `time` | Blind execution, via a `0/N/2N` regression | `safe` | `timing-sink` only — proven, and not execution |
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
-| `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `needs-review` only |
+| `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `evaluation-sink` only — proven, and not execution |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
 run's tier is refused **by name** rather than skipped, because a run that
@@ -199,7 +199,7 @@ jars RCEKit cannot see. That stays out of scope. What is *in* scope is the
 honest middle step — showing the endpoint parses the data at all, which is a
 real finding and the prerequisite for every gadget chain.
 
-`--methods deser` therefore **never emits `confirmed`**. Its strongest outcome
+`--methods deser` therefore **never emits `executed`**. Its strongest outcome
 is its own verdict:
 
 ```
@@ -211,9 +211,16 @@ is its own verdict:
     RCEKit confirms.
 ```
 
-`deserialization-sink` sits below both RCE tiers in the collapsed verdict: it is
-*proven*, but a suspected RCE (`needs-review`) outranks a proven non-RCE in
-triage, and `confirmed` stays reserved for execution.
+`deserialization-sink` sits below `executed` in the collapsed verdict: it is
+*proven*, and `executed` stays reserved for execution.
+
+It used to sit below `needs-review` too, on the argument that a suspected
+RCE outranks a proven non-RCE in triage. That argument held while `time`,
+`boolean` and `write`'s uninterpreted file all reported `needs-review`. Since
+3.0.0 each of those has its own tier, and the one verdict left under
+`needs-review` is this method's own shape fingerprint — a suspected
+*deserialization*. So `deserialization-sink` now outranks it: the proof of a
+thing outranks the guess at the same thing.
 
 Two oracles, of deliberately different strength:
 
@@ -349,7 +356,7 @@ python rcekit.py --acknowledge-consent \
   --verify-url 'https://target.example/search?q=FUZZ' --methods boolean
 ```
 
-**It is reported `needs-review` and it will never be anything else.** Not because
+**It is reported `evaluation-sink` and it will never reach `executed`.** Not because
 the signal is weak — it is the strongest weak signal in the tool — but because of
 what it cannot distinguish. Against a sandboxed `eval` sink and against a plain
 SQLite comparison, this oracle produced an identical clean differential in 40
@@ -529,7 +536,7 @@ python rcekit.py --acknowledge-consent \
 ```
 
 **It is still fully differential**, which is why it can legitimately reach
-`confirmed` rather than `needs-review`:
+`executed` rather than a weaker tier:
 
 - the value was computed by RCEKit from operands random to this probe;
 - it is absent from a snapshot of that endpoint taken **before any probe was
@@ -560,9 +567,9 @@ are eligible at all and not already confirmed in-band, so `file` and `oob` add
 nothing.
 
 Observing is **additive**: the in-band verdict is computed exactly as before and
-only a non-`confirmed` one can be upgraded, so a run without the flag is
+only a non-`executed` one can be upgraded, so a run without the flag is
 unchanged and a run with it can only gain findings. Each probe's result carries
-an `observe_status` in `--detect-json` — `confirmed`, `polled` (read, value not
+an `observe_status` in `--detect-json` — `executed`, `polled` (read, value not
 there), `in-control`, `not-observed` (not eligible) or `unreachable`. If the
 endpoint never answered, the run says so outright: negatives decided without ever
 reading the observed channel are not second-order negatives.
@@ -584,8 +591,8 @@ file and reads the answer in three tiers:
 
 | The fetched file contains | Verdict | Means |
 |---|---|---|
-| the product | `confirmed` | the file was written **and** executed |
-| the one-liner, verbatim | `needs-review` | arbitrary file write; the directory is served but not interpreted |
+| the product | `executed` | the file was written **and** executed |
+| the one-liner, verbatim | `file-write` | arbitrary file write; the directory is served but not interpreted |
 | neither | `negative` | no write, or the file is not served at that URL |
 
 The middle row is the reason the method exists, and it is never merged into
@@ -625,7 +632,7 @@ on spaces was never going to carry one.
 
 Like `file`, this method changes target state, so it stays gated on the read-back
 URL being named, prints what it is about to do first, and attaches a cleanup line
-to **both** the `confirmed` and the `needs-review` tiers — a `needs-review` here
+to **both** the `executed` and the `file-write` tiers — a `file-write` here
 means the file is on the target, just not interpreted.
 
 ### Enumerating injection points
@@ -691,7 +698,7 @@ already-laddered probe count by the number of candidates:
 [detect] enumerating 6 injection point(s) x 1 method(s)
 [detect] cost: 6 points x ~61 probes = at least 372 requests (each point carries its own payload-free control)
 [detect]   query param 'view': negative (61 probes)
-[detect]   header 'User-Agent': confirmed (61 probes)  <-- CONFIRMED
+[detect]   header 'User-Agent': executed (61 probes)  <-- EXECUTED
 ```
 
 Each candidate gets **its own** payload-free control: differencing a header
@@ -842,7 +849,7 @@ be written**:
   builtin (`mul` comes from sprig, which the application must register). The
   only forms that do return the product — `{{printf "%d" <product>}}` and
   `{{<product>}}` — **hand the target the answer**, so a target that merely
-  echoed them would read as `confirmed`.
+  echoed them would read as `executed`.
 
 That last one is the rule a carrier lives under: **a carrier may not carry its
 own result.** A test holds every shipped carrier to it. An evaluating target on
@@ -978,9 +985,9 @@ not say which OS it runs on.
   "rcekit_version": "2.25.0",
   "target": "https://target.example/lookup?host=FUZZ",
   "methods": ["reflected"],
-  "verdict": "confirmed",
-  "counts": {"confirmed": 4, "negative": 9},
-  "probes": [{"verdict": "confirmed", "method": "reflected", "environment": "unix",
+  "verdict": "executed",
+  "counts": {"executed": 4, "negative": 9},
+  "probes": [{"verdict": "executed", "method": "reflected", "environment": "unix",
               "context": "raw", "payload": "...", "detail": "target computed ..."}]
 }
 ```
@@ -991,7 +998,7 @@ a real one — so line-oriented parsing splits a payload in half, and the
 detection path exits 0 whether it confirmed or came back clean.
 
 The top-level `verdict` collapses the run, ordered by what you must not miss
-rather than by what is most frequent: one `confirmed` among a hundred negatives
+rather than by what is most frequent: one `executed` among a hundred negatives
 is the finding. `error` appears only when *nothing* reached the target, and a run
 that built no probes is `nothing-tested` — never `negative`, which would read as
 "not vulnerable".
@@ -1002,9 +1009,9 @@ verdicts against real vulnerable targets.
 ### Out-of-band detection
 
 `--methods oob` starts the built-in HTTP+DNS listener in-process and asks the
-target to resolve or fetch `<token>.<oob-host>`. It is the only `confirmed`-tier
+target to resolve or fetch `<token>.<oob-host>`. It is the only `executed`-tier
 method for a sink that returns nothing and has no writable web root — `time`
-tops out at `needs-review` by design, and `file` needs somewhere to write that
+tops out at `timing-sink` by design, and `file` needs somewhere to write that
 the target also serves.
 
 Each probe carries its own token, so the finding names the break-out that

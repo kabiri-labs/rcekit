@@ -83,12 +83,16 @@ in the clearly separated **Detection methods** section of `rcekit.py`
 
 To add one:
 
-1. Subclass `DetectionMethod`: set `name` and `tier` (`confirmed` for
-   execution-proven methods, `needs-review` for candidates — the two tiers are
-   never merged), then implement `applicable`, `build_probes`, and `confirm`.
+1. Subclass `DetectionMethod`: set `name` and `tier` (`executed` for
+   execution-proven methods; otherwise a tier named for what the target did,
+   like `timing-sink`, and `needs-review` only when the signal really is a
+   candidate — tiers are never merged), then implement `applicable`,
+   `build_probes`, and `confirm`. Also set `question`, which says whether this
+   asks *did the target execute my input* or something else; it does not follow
+   from the tier.
 2. Compute the expected value **locally** with random inputs and compare it
    against the payload-free control (reuse `self._search`, which is
-   encoding-aware). A verdict is `confirmed` only when the computed value is
+   encoding-aware). A verdict is `executed` only when the computed value is
    present and absent from the control.
 3. **Declare what the method costs and what it says.** `safety` is the
    `--verify-active-risk` rung it needs: `safe` when it only makes the target
@@ -162,7 +166,7 @@ New detection coverage should arrive with a case. Every case needs a **negative
 control** — the runner refuses to load one without it — because a benchmark with
 no controls rewards aggressive probing instead of measuring accuracy. The
 control may be a patched build, the same target probed for the wrong class, or a
-weaker method that must stay below `confirmed` on a target where it happens to
+weaker method that must stay below `executed` on a target where it happens to
 be right.
 
 Run your case against the real target before submitting, and update the README

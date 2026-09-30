@@ -83,7 +83,7 @@ so the flag also lowers the security level and protocol floor to reach it.
 RCEKit will also warn that the capture carries a `Cookie` header, because pinning
 the scheme is what keeps it off the wire in cleartext.
 
-You should see `confirmed` probes, each evidence line naming the value the shell
+You should see `executed` probes, each evidence line naming the value the shell
 computed from operands RCEKit picked at random for that run — a number that
 cannot appear in a response unless something executed.
 
@@ -99,10 +99,11 @@ python rcekit.py --acknowledge-consent \
 ```
 
 This is the part worth watching. The sink is genuinely vulnerable, the timing
-regression fits — and RCEKit still reports it as **`needs-review`**, never
-`confirmed`. Timing produces no computed value, so it cannot prove execution on
-its own, and RCEKit will not promote it just because it happens to be right this
-time. That ceiling is the whole design.
+regression fits — and RCEKit still reports it as **`timing-sink`**, never
+`executed`. That tier is not a hedge: the regression is proven, and what it
+proves is that the target honoured a delay RCEKit injected. What waited is not
+shown, so it is not execution, and RCEKit will not promote it just because it
+happens to be right this time. That ceiling is the whole design.
 
 ```bash
 docker compose down -v
@@ -220,9 +221,9 @@ from a screenshot:
 1. **The evidence is a value the target computed**, from operands chosen freshly
    each run. Re-run demo 1 and the numbers change — a hardcoded signature or a
    replayed response cannot produce them.
-2. **Tiers are not merged.** The same Webmin sink returns `confirmed` under
-   `reflected` and `needs-review` under `time`. RCEKit will not upgrade a timing
-   fit into proof.
+2. **Tiers are not merged.** The same Webmin sink returns `executed` under
+   `reflected` and `timing-sink` under `time`. RCEKit will not upgrade a timing
+   fit into proof of execution.
 3. **The class is attributed, not guessed.** Demo 2 confirms under `eval` and
    not `reflected`, against a target where both were tried.
 

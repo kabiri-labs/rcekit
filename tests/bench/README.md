@@ -35,14 +35,14 @@ Docker.
 ## Every case has a control
 
 A benchmark without negative controls measures nothing. A tool that shouted
-`confirmed` at every target would score full marks on the vulnerable half, and
+`executed` at every target would score full marks on the vulnerable half, and
 the harness would report that as progress. So a case passes only when **both**
 halves land, and `negative_control` is a required key.
 
 The runner refuses to load a case whose control cannot measure anything:
 
 - **No control at all.**
-- **A control that expects `confirmed`** — a contradiction.
+- **A control that expects `executed`** — a contradiction.
 - **A control that runs the identical invocation against an identical target.**
   Judged on what it would actually run, not on which keys it declares: copying
   the vulnerable `invocation` into the control is the same non-control as
@@ -52,12 +52,12 @@ The runner refuses to load a case whose control cannot measure anything:
 - **A control that expects `error` or `nothing-tested`.** Both mean the run never
   exercised the target, so such a control would stay green with the detection
   engine entirely broken — exactly what a control exists to catch. A control may
-  expect `negative`, `inconclusive`, or `needs-review`. (The vulnerable half may
+  expect `negative`, `inconclusive`, or any weaker tier. (The vulnerable half may
   still expect `error`: "an unreachable target reports `error`, not `negative`"
   is a real property worth pinning.)
 
 Controls come in 4 kinds, and all of them share one invariant: the control must
-not reach `confirmed`. `kind` is **required**, and the runner checks that it is
+not reach `executed`. `kind` is **required**, and the runner checks that it is
 one of the values below -- presence and membership, and that is the whole of the
 check. That the label *describes* the control is the case author's claim, and a
 reviewer is what establishes it.
@@ -78,12 +78,12 @@ work, not a condition on a label.
 |---|---|---|
 | `patched-build` | The tool does not confirm on a fixed version | same case against a patched image |
 | `class-attribution` | The tool names the class, rather than flagging the parameter | S2-001 probed with `reflected` → `negative` |
-| `tier-ceiling` | A weaker signal is not promoted on a target where it happens to be right | Webmin probed with `time` → `needs-review` |
+| `tier-ceiling` | A weaker signal is not promoted on a target where it happens to be right | Webmin probed with `time` → `timing-sink` |
 | `channel-isolation` | The verdict rests on the method's own channel, not on the target merely reacting | Webmin's `file` probe writing to an unserved path → `negative` |
 
 `tier-ceiling` is the one people skip, and it is the one that protects the tool's
 central promise. Timing produces no computed value; if it were ever promoted to
-`confirmed` on a genuinely vulnerable sink, the erosion would look like a
+`executed` on a genuinely vulnerable sink, the erosion would look like a
 success.
 
 ## Case format
@@ -96,9 +96,9 @@ success.
   "vulhub_path": "webmin/CVE-2019-15107",
   "wait_for": {"url": "https://127.0.0.1:10000/", "status": 200, "timeout": 180},
   "invocation": ["-r", "{bench}/requests/webmin.txt", "-p", "old", "--methods", "reflected"],
-  "expect": "confirmed",
+  "expect": "executed",
   "expect_method": "reflected",
-  "negative_control": {"kind": "tier-ceiling", "invocation": ["..."], "expect": "needs-review"}
+  "negative_control": {"kind": "tier-ceiling", "invocation": ["..."], "expect": "timing-sink"}
 }
 ```
 
@@ -111,7 +111,7 @@ success.
 | `share_target` | Optional, default `false`. Bring the container up **once** for both halves instead of once each. The teardown between them is `down -v`, so by default the control meets a *fresh* target -- set this only when neither half changes the target's state, and never for a case whose vulnerable half writes a file or plants a shell. The runner rejects it on a case whose control brings up a different target |
 | `timeout` | Seconds one run may take (default 900). `negative_control` may set its own, and usually needs to: the method a tier-ceiling control exercises is the expensive one |
 | `invocation` | RCEKit arguments; `--acknowledge-consent` and `--detect-json` are added by the runner |
-| `expect` | `confirmed`, `needs-review`, `negative`, `inconclusive`, `error`, `nothing-tested` |
+| `expect` | `executed`, `timing-sink`, `file-write`, `evaluation-sink`, `deserialization-sink`, `lookup-sink`, `needs-review`, `negative`, `inconclusive`, `error`, `nothing-tested` — read off the classes, so a new tier is valid the moment a method reports it |
 | `expect_method` | Optional. `reflected`, or the full carrier `reflected/unix/raw` |
 | `negative_control` | Required. Its own `invocation` and/or `compose`, plus its `expect` and its `kind` |
 
@@ -131,7 +131,7 @@ a payload in half, and the detection path exits 0 whether it confirmed or came
 back clean.
 
 The overall verdict follows what an operator must not miss, not what is most
-frequent: one `confirmed` among a hundred negatives is the finding. `error` is
+frequent: one `executed` among a hundred negatives is the finding. `error` is
 reported only when *nothing* reached the target, and a run that built no probes
 is `nothing-tested` — never `negative`, which would read as "not vulnerable".
 
@@ -139,7 +139,7 @@ is `nothing-tested` — never `negative`, which would read as "not vulnerable".
 
 New detection coverage should arrive with a bench case. Write the case, run it
 against the real target, and paste the generated table row into the README next
-to the claim it supports. If a class only reaches `needs-review`, say so — the
+to the claim it supports. If a class only reaches a weaker tier, say so — the
 README table must not outrun the engine.
 
 ## Status
@@ -159,7 +159,7 @@ its class-attribution control stays clean at 844 probes.
 `webmin-cve-2019-15107` confirmed on the vulnerable half but its control was cut
 short: a timing regression sends real sleeps, and 1174s of them did not fit the
 900s default. The control now carries its own `timeout`, and the case reaches
-`needs-review` there as it always should have.
+`timing-sink` there as it always should have.
 
 Reaching Webmin at all needed a fix in the tool rather than the case — a current
 OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
@@ -176,7 +176,7 @@ software, then or at 2.45.7.
 Both of those cases set `share_target`, because neither half writes anything: the
 vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
 the controls probe for a class that is not there or hold a timing signal at
-`needs-review`. Measured on `struts2-s2-001` against vulhub on Docker: **33.8s**
+its own tier. Measured on `struts2-s2-001` against vulhub on Docker: **33.8s**
 bringing the container up for each half, **22.9s** sharing it, with both halves
 reaching the same verdicts either way. That is the container start, which on a
 fast case is most of the run.
@@ -184,14 +184,14 @@ fast case is most of the run.
     | RCE class | Target | Method | Verdict | Control | Result |
     |---|---|---|---|---|---|
     | Deserialization sink (fastjson autoType) | Spring Boot on fastjson 1.2.83 | `deser` | `deserialization-sink` | `negative` | pass |
-    | Expression injection (Gremlin/Groovy) | Apache HugeGraph 1.2.0 | `eval` | **`confirmed`** | `negative` | pass |
-    | OS command injection | Apache HugeGraph 1.2.0 | `reflected` | **`confirmed`** | `negative` | pass |
+    | Expression injection (Gremlin/Groovy) | Apache HugeGraph 1.2.0 | `eval` | **`executed`** | `negative` | pass |
+    | OS command injection | Apache HugeGraph 1.2.0 | `reflected` | **`executed`** | `negative` | pass |
     | Expression-lookup sink (Log4Shell/JNDI) | Apache Solr 8.11.0 -- CVE-2021-44228 | `lookup` | `lookup-sink` | `negative` | pass |
-    | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`confirmed`** | `needs-review` | pass |
-    | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`confirmed`** | `negative` | pass |
-    | Write primitive (PUT a JSP) | Apache Tomcat 8.5.19 -- CVE-2017-12615 | `write` | **`confirmed`** | `negative` | pass |
-    | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`confirmed`** | `negative` | pass |
-    | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`confirmed`** | `needs-review` | pass |
+    | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`executed`** | `timing-sink` | pass |
+    | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`executed`** | `negative` | pass |
+    | Write primitive (PUT a JSP) | Apache Tomcat 8.5.19 -- CVE-2017-12615 | `write` | **`executed`** | `negative` | pass |
+    | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
+    | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
 
 That is every row in the repository README's coverage ledger. 9 cases cover its
 11 rows, because the two `time` rows are the *control* halves of the Webmin and
@@ -407,7 +407,7 @@ between two requests to carry one bit" is exactly the question a fixture cannot
 settle, and it is the one this method lives or dies on.
 
 The control, when the case is written, is the point of it. A vulnerable
-`$where` endpoint must reach `needs-review`, and a patched build of the same
+`$where` endpoint must reach `evaluation-sink`, and a patched build of the same
 application must come back `negative` rather than `inconclusive` -- because an
 `inconclusive` from a stable target would mean the signature is reading noise
 that is not there.

@@ -9,7 +9,7 @@ would add is `docker compose up` — the one step these tests skip.
 
 The properties locked in are the ones that decide whether the benchmark measures
 anything at all: a case without a negative control is rejected, a control that
-expects `confirmed` is rejected, and a run that never tested anything is never
+expects `executed` is rejected, and a run that never tested anything is never
 reported as a clean negative.
 """
 
@@ -30,6 +30,7 @@ sys.path.insert(0, str(TESTS_DIR.parent))
 sys.path.insert(0, str(TESTS_DIR))
 sys.path.insert(0, str(TESTS_DIR / "bench"))
 
+import rcekit  # noqa: E402
 import runner  # noqa: E402
 from test_generator import local_target, sh_popen  # noqa: E402
 
@@ -54,7 +55,7 @@ def minimal_case(**overrides):
         # Tests that override `invocation` with a live target are unaffected.
         "invocation": ["--verify-url", "http://127.0.0.1:1/?x=FUZZ", "--methods", "reflected",
                        "--max-payloads", "3", "--verify-timeout", "1"],
-        "expect": "confirmed",
+        "expect": "executed",
         # A *different* method, which is what makes the `class-attribution`
         # label below honest. The first version of this fixture ran `reflected`
         # in both halves and called the control class attribution anyway -- the
@@ -283,8 +284,8 @@ class CaseValidationTestCase(unittest.TestCase):
         case = minimal_case(
             expect="needs-review",
             negative_control={"invocation": list(minimal_case()["invocation"]),
-                              "kind": "class-attribution", 
-                              "expect": "needs-review"})
+                              "kind": "class-attribution",
+                              "expect": "timing-sink"})
         with self.assertRaises(runner.CaseError) as ctx:
             runner.validate_case(case)
         self.assertIn("measures nothing", str(ctx.exception))
@@ -304,7 +305,7 @@ class CaseValidationTestCase(unittest.TestCase):
         # control would stay green with the detection engine entirely broken.
         for expectation in ("error", "nothing-tested"):
             case = minimal_case(negative_control={"invocation": ["--bogus"],
-                                                  "kind": "class-attribution", 
+                                                  "kind": "class-attribution",
                                                   "expect": expectation})
             with self.assertRaises(runner.CaseError, msg=expectation) as ctx:
                 runner.validate_case(case)
@@ -313,7 +314,7 @@ class CaseValidationTestCase(unittest.TestCase):
     def test_a_control_may_expect_any_exercised_outcome(self):
         for expectation in runner.CONTROL_EXPECTATIONS:
             case = minimal_case(negative_control={"invocation": ["--other"],
-                                                  "kind": "class-attribution", 
+                                                  "kind": "class-attribution",
                                                   "expect": expectation})
             self.assertEqual(runner.validate_case(case)["name"], "example", expectation)
 
@@ -331,8 +332,10 @@ class CaseValidationTestCase(unittest.TestCase):
         self.assertEqual(invocation, ["--other"])
         self.assertEqual(runner.target_setup(setup), runner.target_setup(case))
 
-    def test_a_control_expecting_confirmed_is_rejected(self):
-        case = minimal_case(negative_control={"invocation": ["--x"], "kind": "class-attribution", "expect": "confirmed"})
+    def test_a_control_expecting_the_execution_tier_is_rejected(self):
+        case = minimal_case(negative_control={
+            "invocation": ["--x"], "kind": "class-attribution",
+            "expect": rcekit.EXECUTION_TIER})
         with self.assertRaises(runner.CaseError) as ctx:
             runner.validate_case(case)
         self.assertIn("contradiction", str(ctx.exception))
@@ -363,16 +366,16 @@ class ReportCheckingTestCase(unittest.TestCase):
     """Turning one RCEKit run into pass/fail."""
 
     def test_matching_verdict_passes(self):
-        ok, detail = runner.check_report({"verdict": "confirmed", "counts": {"confirmed": 2}},
-                                         "confirmed")
+        ok, detail = runner.check_report({"verdict": "executed", "counts": {"executed": 2}},
+                                         "executed")
         self.assertTrue(ok)
-        self.assertIn("confirmed", detail)
+        self.assertIn("executed", detail)
 
     def test_mismatched_verdict_fails_with_the_counts(self):
         ok, detail = runner.check_report(
-            {"verdict": "negative", "counts": {"negative": 9}}, "confirmed")
+            {"verdict": "negative", "counts": {"negative": 9}}, "executed")
         self.assertFalse(ok)
-        self.assertIn("expected confirmed, got negative", detail)
+        self.assertIn("expected executed, got negative", detail)
         self.assertIn("negative=9", detail)
 
     def test_nothing_tested_is_not_a_negative(self):
@@ -381,13 +384,13 @@ class ReportCheckingTestCase(unittest.TestCase):
         ok, _ = runner.check_report({"verdict": "nothing-tested", "counts": {}}, "negative")
         self.assertFalse(ok)
 
-    def test_expect_method_pins_the_method_that_confirmed(self):
-        report = {"verdict": "confirmed", "counts": {"confirmed": 1},
-                  "probes": [{"verdict": "confirmed", "method": "eval",
+    def test_expect_method_pins_the_method_that_proved_it(self):
+        report = {"verdict": "executed", "counts": {"executed": 1},
+                  "probes": [{"verdict": "executed", "method": "eval",
                               "environment": "unix", "context": "raw"}]}
-        self.assertTrue(runner.check_report(report, "confirmed", "eval")[0])
-        self.assertTrue(runner.check_report(report, "confirmed", "eval/unix/raw")[0])
-        ok, detail = runner.check_report(report, "confirmed", "reflected")
+        self.assertTrue(runner.check_report(report, "executed", "eval")[0])
+        self.assertTrue(runner.check_report(report, "executed", "eval/unix/raw")[0])
+        ok, detail = runner.check_report(report, "executed", "reflected")
         self.assertFalse(ok, "a confirmation from the wrong method must not satisfy the case")
         self.assertIn("not 'reflected'", detail)
 
@@ -396,13 +399,13 @@ class MarkdownTableTestCase(unittest.TestCase):
     def test_table_shows_verdict_control_and_result(self):
         table = runner.render_markdown([
             {"name": "a", "rce_class": "OS command injection", "target": "Webmin 1.910",
-             "verdict": "confirmed", "control_verdict": "needs-review",
+             "verdict": "executed", "control_verdict": "timing-sink",
              "methods": ["reflected", "reflected/unix/raw"], "passed": True},
             {"name": "b", "rce_class": "Expression injection", "target": "Struts2",
              "verdict": "negative", "control_verdict": "negative",
              "methods": [], "passed": False},
         ])
-        self.assertIn("| Webmin 1.910 | `reflected` | **`confirmed`** | `needs-review` | pass |",
+        self.assertIn("| Webmin 1.910 | `reflected` | **`executed`** | `timing-sink` | pass |",
                       table)
         self.assertIn("**FAIL**", table)
         # The composite signature is detail for a failure message, not for the
@@ -583,12 +586,12 @@ class ContainerisedRunTestCase(unittest.TestCase):
         for name, method in rcekit.DETECTION_METHODS.items():
             with self.subTest(method=name):
                 self.assertIn(method.tier, runner.VALID_EXPECTATIONS)
-                if method.tier != "confirmed":
+                if method.tier != rcekit.EXECUTION_TIER:
                     # A control may expect it: the target was exercised and the
                     # tool did not claim execution, which is what a control
                     # measures.
                     self.assertIn(method.tier, runner.CONTROL_EXPECTATIONS)
-        self.assertNotIn("confirmed", runner.CONTROL_EXPECTATIONS)
+        self.assertNotIn(rcekit.EXECUTION_TIER, runner.CONTROL_EXPECTATIONS)
 
 
 class SharedTargetTestCase(unittest.TestCase):
@@ -818,7 +821,7 @@ class HarnessEndToEndTestCase(unittest.TestCase):
         self.assertTrue(outcome["vulnerable_ok"], outcome["vulnerable_detail"])
         self.assertTrue(outcome["control_ok"], outcome["control_detail"])
         self.assertTrue(outcome["passed"])
-        self.assertEqual(outcome["verdict"], "confirmed")
+        self.assertEqual(outcome["verdict"], "executed")
         self.assertIn("reflected", outcome["methods"])
 
     def test_a_control_that_starts_confirming_fails_the_case(self):
@@ -896,11 +899,11 @@ class DetectJsonTestCase(unittest.TestCase):
         import rcekit
         many_negatives = [{"verdict": "negative"}] * 99
         self.assertEqual(
-            rcekit.overall_detection_verdict(many_negatives + [{"verdict": "confirmed"}]),
-            "confirmed")
+            rcekit.overall_detection_verdict(many_negatives + [{"verdict": "executed"}]),
+            "executed")
         self.assertEqual(
-            rcekit.overall_detection_verdict(many_negatives + [{"verdict": "needs-review"}]),
-            "needs-review")
+            rcekit.overall_detection_verdict(many_negatives + [{"verdict": "timing-sink"}]),
+            "timing-sink")
 
     def test_no_probes_is_nothing_tested_not_negative(self):
         import rcekit
@@ -917,7 +920,7 @@ class DetectJsonTestCase(unittest.TestCase):
 
     def test_written_file_carries_the_verdict_counts_and_probes(self):
         import rcekit
-        probes = [{"verdict": "confirmed", "method": "reflected", "environment": "unix",
+        probes = [{"verdict": "executed", "method": "reflected", "environment": "unix",
                    "context": "raw", "payload": "; id", "detail": "computed"},
                   {"verdict": "negative", "method": "reflected", "environment": "unix",
                    "context": "raw", "payload": "| id", "detail": ""}]
@@ -926,8 +929,8 @@ class DetectJsonTestCase(unittest.TestCase):
             rcekit.write_detection_json(path, probes, "http://t/FUZZ", ["reflected"])
             with open(path, encoding="utf-8") as handle:
                 written = json.load(handle)
-        self.assertEqual(written["verdict"], "confirmed")
-        self.assertEqual(written["counts"], {"confirmed": 1, "negative": 1})
+        self.assertEqual(written["verdict"], "executed")
+        self.assertEqual(written["counts"], {"executed": 1, "negative": 1})
         self.assertEqual(written["target"], "http://t/FUZZ")
         self.assertEqual(written["methods"], ["reflected"])
         self.assertEqual(len(written["probes"]), 2)
@@ -941,7 +944,7 @@ class DetectJsonTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = str(Path(tmp) / "out.json")
             rcekit.write_detection_json(
-                path, [{"verdict": "confirmed", "method": "reflected", "environment": "unix",
+                path, [{"verdict": "executed", "method": "reflected", "environment": "unix",
                         "context": "raw", "payload": payload, "detail": ""}],
                 "http://t", ["reflected"])
             with open(path, encoding="utf-8") as handle:

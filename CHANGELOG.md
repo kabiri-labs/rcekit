@@ -290,6 +290,87 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.0.0] — 2026-09-30
+
+### Changed
+
+- **BREAKING: `confirmed` is now `executed`, and three settled measurements
+  stopped reporting as `needs-review`.** Every verdict is now named for what the
+  *target* did, never for how sure RCEKit is.
+
+  Two problems, one vocabulary. `confirmed` was the only verdict that described
+  RCEKit's own confidence while every sibling described the target's behaviour,
+  and next to it a `lookup-sink` -- proven on a callback carrying a token only
+  that probe held -- read as something unconfirmed. And `needs-review` had four
+  users, of which three had measured their answer:
+
+  | Verdict | Was | What it says |
+  |---|---|---|
+  | `executed` | `confirmed` | the target executed the input |
+  | `timing-sink` | `needs-review` | the target honoured a delay RCEKit injected |
+  | `file-write` | `needs-review` | the target stored a file at a path RCEKit chose and serves it back uninterpreted |
+  | `evaluation-sink` | `needs-review` | an evaluator consumed the input and partitioned on it; which evaluator is not shown |
+  | `needs-review` | `needs-review` | unchanged, and now with one user: `deser`'s parser fingerprint, the one signal that really is a candidate |
+
+  `write`'s middle verdict is the clearest case: its evidence line opened with
+  the words "ARBITRARY FILE WRITE confirmed" under a status that said
+  `needs-review`. The tool's own prose contradicted the tool's own status,
+  because the status was naming a confidence the measurement did not have a
+  reason to lack -- the file was on the target and RCEKit had read it back.
+
+  Nothing was promoted. `executed` still rests on exactly the three channels it
+  did before, and none of the five weaker tiers has a path into it. `time` in
+  particular stays out: a delay honoured is not necessarily a *shell* honouring
+  it, since a sandbox that implements `sleep` answers the regression the same
+  way. What changed is the direction of the reporting error -- three proven
+  findings were being under-reported.
+
+- **`overall_detection_verdict` ranks `needs-review` last instead of second.**
+  Its position was argued from "a suspected RCE outranks a proven non-RCE in
+  triage", which held while `time`, `boolean` and `write`'s uninterpreted file
+  all reported there. The one verdict left under it is a suspected
+  *deserialization*, so ranking it above `deserialization-sink` put the guess
+  above the proof of the same thing. The full order is now `executed`,
+  `timing-sink`, `file-write`, `evaluation-sink`, `deserialization-sink`,
+  `lookup-sink`, `needs-review`.
+
+- The classic `--verify-url` path renamed its `confirmed` verdict too, and its
+  section headings with it. It has no sinks and no `needs-review`, so nothing
+  there was mis-tiered; a tool printing `[verify] CONFIRMED` beside `[detect]
+  EXECUTED` would just be two vocabularies. That path has no machine-readable
+  output, so this is text only.
+
+### Migration
+
+`--detect-json` changes values, not keys. `verdict`, the keys of `counts`, each
+probe's `verdict`, and `observe_status` take the new names per the table above.
+A consumer keyed on `"confirmed"` must read `"executed"`; one keyed on
+`"needs-review"` should decide which of the four it actually meant. No CLI flag,
+no JSON key, no template-schema field and no exit code changed.
+
+No backward-compatible alias is shipped. Two accepted spellings for one field is
+a second source of truth, and the point of this release is that there is one.
+
+### Fixed
+
+- **A method's question was derived from its tier, which does not determine
+  it.** `detection_question` decided whether a method asks *did the target
+  execute my input* by looking up its tier in a set of two names. A tier says
+  how strong an answer a method can reach; `time` asks the execution question
+  and cannot reach the strongest answer to it, while `lookup` reaches a
+  definitive answer to a different question.
+
+  Left alone, renaming `time`'s tier in this release would have moved it out of
+  the execution group and out of the dedup that skips it on a candidate
+  `reflected` has already proven -- so the most expensive method in the tool
+  would have run to put a second name on a finding. `question` is now declared
+  on the class, `EXECUTION_TIERS` is gone, and the partition is unchanged.
+
+  The test covering this recomputed the derivation rule it was checking, so it
+  agreed with the rule whatever the rule became. Three tests replace it: the
+  partition written out, the one case where question and tier disagree, and the
+  `time`-leaves-the-group regression by name.
+
 ## [2.45.7] — 2026-09-26
 
 ### Fixed
@@ -2578,6 +2659,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.0.0]: https://github.com/kabiri-labs/rcekit/compare/v2.45.7...v3.0.0
 [2.45.7]: https://github.com/kabiri-labs/rcekit/compare/v2.45.6...v2.45.7
 [2.45.6]: https://github.com/kabiri-labs/rcekit/compare/v2.45.5...v2.45.6
 [2.45.5]: https://github.com/kabiri-labs/rcekit/compare/v2.45.4...v2.45.5

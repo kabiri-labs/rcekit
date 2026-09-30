@@ -60,8 +60,8 @@ python rcekit.py --acknowledge-consent \
   --methods reflected,eval,time --time-base 3
 ```
 
-**4. Read the tier, not just the word.** `confirmed` goes in the report as proven
-execution. `needs-review` goes in your notes for manual follow-up. See
+**4. Read the tier, not just the word.** `executed` goes in the report as proven
+execution. A weaker tier goes in your notes for what it actually proves. See
 [Reading the results](#reading-the-results).
 
 ---
@@ -376,7 +376,7 @@ nowhere for the computed value to appear, so a negative here does not rule out e
 Methods that reach a blind sink:
 [detect]   --methods oob --oob-host HOST --verify-active-risk intrusive   (needs egress from the target; confirms)
 [detect]   --methods file --webroot DIR --web-base-url URL   (needs a writable web root; confirms)
-[detect]   --methods time                     (no egress and no web root needed; needs-review only)
+[detect]   --methods time                     (no egress and no web root needed; reports timing-sink, NOT execution)
 ```
 
 RCEKit screens each candidate separator with one cheap probe, then fires a
@@ -395,12 +395,13 @@ python rcekit.py --acknowledge-consent \
 
 Two things worth internalising:
 
-- **Timing never self-confirms.** There is no computed value to check, so a
-  positive timing result is reported `needs-review`, always. That is not RCEKit
-  hedging — it is the honest ceiling of the evidence.
+- **Timing never proves execution.** There is no computed value to check, so a
+  positive timing result is reported `timing-sink`, always. That tier is proven
+  — jitter and drift are modelled out — and what it proves is that the target
+  honoured an injected delay, not that a shell ran.
 - **Always pair it with a results-based method.** Listing `reflected` alongside
-  `time` costs almost nothing and, if any output channel exists at all, upgrades
-  the finding from `needs-review` to `confirmed`.
+  `time` costs almost nothing and, if any output channel exists at all, carries
+  the finding from `timing-sink` to `executed`.
 
 Raise `--time-base` on a slow or noisy target; the regression gets easier to
 separate from background variance as `N` grows, at the cost of a slower run.
@@ -445,8 +446,8 @@ product, then fetches the file back and reads which of three things happened:
 
 | The fetched file contains | Verdict | What you have |
 |---|---|---|
-| the product | `confirmed` | remote code execution |
-| the one-liner, verbatim | `needs-review` | arbitrary file write — served, not interpreted |
+| the product | `executed` | remote code execution |
+| the one-liner, verbatim | `file-write` | arbitrary file write — served, not interpreted |
 | neither | `negative` | no write, or the file is not served there |
 
 That middle row is the one to know about. An upload directory that is served but
@@ -497,7 +498,7 @@ python rcekit.py --acknowledge-consent \
   --observe-request profile.txt --observe-poll 10 --observe-timeout 120
 ```
 
-This still reaches `confirmed` rather than `needs-review`, and the reason is
+This still reaches `executed` rather than a weaker tier, and the reason is
 worth knowing: the value is computed by RCEKit from operands random to that
 probe, it must be absent from a snapshot of the observed page taken *before any
 probe was sent*, and it is only looked for there when the probe's own payload
@@ -524,7 +525,7 @@ Collaborator. There are two ways to use it.
 `--methods oob` starts the listener in-process and drives the whole loop itself:
 it fires probes that ask the target to resolve or fetch `<token>.<oob-host>`,
 waits for the callbacks, and reports each probe by whether *its own* token came
-back. This is the only method that reaches `confirmed` on a sink that returns
+back. This is the only method that reaches `executed` on a sink that returns
 nothing and has no writable web root.
 
 ```bash
@@ -623,8 +624,9 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 
 | Verdict | What it means | What to do |
 |---|---|---|
-| **`confirmed`** | Execution proven. The evidence line shows the exact value the target computed. | Put it in the report. |
-| **`needs-review`** | A real candidate — e.g. a linear timing response — but not proof on its own. | Manual follow-up. Never report as proven. |
+| **`executed`** | Execution proven. The evidence line shows the exact value the target computed. | Put it in the report. |
+| **`timing-sink`** / **`file-write`** / **`evaluation-sink`** | Proven, and about something other than execution: a delay honoured, a file written, an evaluator that consumed the input. | Report what the tier says. Do not call any of them RCE. |
+| **`needs-review`** | A real candidate that is not proof on its own — `deser`'s parser fingerprint. | Manual follow-up. Never report as proven. |
 | **`negative`** | Reached the target, found no evidence. | Suspect [encoding](#landing-the-payload-intact) or [sink shape](#whole-command-sinks) before concluding it's safe. |
 | **`inconclusive`** | Evidence appeared, but also appears *without* the payload — so it isn't attributable to execution. | Not a finding. This is the false positive that never made it out. |
 | **`error`** | The request never reached the target — a delivery or TLS failure. | Fix connectivity, then re-run. For a self-signed cert, add `--insecure`. |
@@ -633,7 +635,7 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 never read as "not vulnerable".
 
 <details>
-<summary><b>Why a <code>confirmed</code> can't be a false positive</b></summary>
+<summary><b>Why an <code>executed</code> can't be a false positive</b></summary>
 
 <br>
 
