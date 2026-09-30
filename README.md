@@ -56,6 +56,13 @@ a continuous one: the benchmark runs on a cadence, not on every change. A row
 reading *as a control* is reproduced by the control half of another row's case,
 which is the half that describes it.
 
+3.0.0 renamed the verdict every case expects, so **that green run predates the
+names in the table above** and the cases have not been re-run since. Nothing
+about what a case sends or measures changed — only the string it compares
+against — and `runner.py --list` loads and validates all 9 under the new names.
+Read the `Verdict` column as the tier the method reaches, which is what 2.45.7
+measured; read the 9/9 as a claim about 2.45.7 and not about this release.
+
 **Advisory** is empty where the verdict does not depend on the patch. Both
 HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers
 the arithmetic exactly as 1.2.0 does — its Gremlin API evaluates Groovy
