@@ -57,13 +57,19 @@ reading *as a control* is reproduced by the control half of another row's case,
 which is the half that describes it.
 
 3.0.0 renamed the verdict every case expects, so every one of the 9 was re-run
-under the new names and all 9 passed — the `Verdict` and `Control` columns above
-are what that run reported, not a rename applied to an older result.
+under the new names and all 9 passed — the `Verdict` column above is what that
+run reported, not a rename applied to an older result.
 
-The two `timing-sink` controls are the ones worth having: on a Webmin 1.910 and
-an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its own proven
-tier and still does not reach `executed`. That is the tier ceiling holding
-against real software rather than against a fixture.
+What each run's **control** half reported is not in this table, and two of them
+are the reason the run was worth doing. The full 9 rows, controls included, are
+in [`tests/bench/README.md`](tests/bench/README.md#status); the two rows here
+reading *as a control* are the `time` halves of the Webmin and OpenTSDB cases,
+so their `timing-sink` is a control result shown in the `Verdict` column.
+
+Those two are the ones worth having: on a Webmin 1.910 and an OpenTSDB 2.4.1
+that are genuinely vulnerable, `time` reaches its own proven tier and still does
+not reach `executed`. That is the tier ceiling holding against real software
+rather than against a fixture.
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
 HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers

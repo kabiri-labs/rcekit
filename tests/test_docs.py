@@ -1340,5 +1340,119 @@ class SampleTranscriptTestCase(unittest.TestCase):
         self.assertGreaterEqual(checked, 5, "no counts lines were checked")
 
 
+class CrossReferenceTestCase(unittest.TestCase):
+    """Prose that points somewhere has to point somewhere real.
+
+    Two idioms, one root. Both were written from memory rather than read off
+    the document, and both got through a careful read:
+
+    * "the `Verdict` and `Control` columns above" named a `Control` column of
+      the coverage ledger. The ledger has no such column -- that name belongs
+      to the benchmark runner's table, which has a different schema. So the
+      sentence directed a reader to check a claim against a column that does
+      not exist, and the seven `negative` controls it implied were visible are
+      in fact nowhere on that page.
+    * The sentence written to *fix* that one linked
+      `tests/bench/README.md#what-it-found`. There is no such heading; the
+      table is under `## Status`. Same mistake, five minutes later, while
+      correcting it.
+
+    A reader following either one finds nothing and cannot tell whether the
+    claim is wrong or they are looking in the wrong place.
+
+    Narrow on purpose, and the narrowness is what makes it usable: only the
+    "the `X` column" idiom and only cross-file `](path#anchor)` links. Across
+    README.md, CONTRIBUTING.md, tests/bench/README.md and docs/, that is 2
+    column references and 23 anchors -- so a failure here is a real one rather
+    than a line to be tuned out.
+    """
+
+    FENCE = re.compile(r"^\s*```", re.MULTILINE)
+    # "the `X` column", "the `X` and `Y` columns".
+    COLUMN_REF = re.compile(
+        r"`([^`]+)`(?:\s+and\s+`([^`]+)`)?\s+columns?", re.IGNORECASE)
+    LINK = re.compile(r"\]\(([^)\s]+?)#([A-Za-z0-9_-]+)\)")
+    HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*$", re.MULTILINE)
+    TABLE_RULE = re.compile(r"^\|[\s:|-]+\|?$")
+
+    DOCS = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.DOCS = ([REPO_ROOT / "README.md", REPO_ROOT / "CONTRIBUTING.md",
+                     REPO_ROOT / "tests" / "bench" / "README.md"]
+                    + sorted(DOCS_DIR.glob("*.md")))
+
+    @classmethod
+    def _prose(cls, text):
+        """The document with fenced blocks dropped: a sample transcript is not
+        a cross-reference, and a payload may contain anything."""
+        return "".join(cls.FENCE.split(text)[::2])
+
+    @classmethod
+    def _columns(cls, text):
+        """Every column heading of every markdown table in a document."""
+        found = set()
+        lines = cls._prose(text).splitlines()
+        for index, line in enumerate(lines):
+            if (line.startswith("|") and index + 1 < len(lines)
+                    and cls.TABLE_RULE.match(lines[index + 1])):
+                found |= {cell.strip().strip("*` ")
+                          for cell in line.strip("|").split("|")}
+        return found
+
+    @classmethod
+    def _anchors(cls, text):
+        """Heading slugs, the way GitHub builds them: lowercased, punctuation
+        dropped, spaces to hyphens."""
+        slugs = set()
+        for title in cls.HEADING.findall(cls._prose(text)):
+            slug = title.strip().lower()
+            for ch in "`*[](),.:;'\"/\\?!":
+                slug = slug.replace(ch, "")
+            slugs.add(re.sub(r"\s+", "-", slug).strip("-"))
+        return slugs
+
+    def test_there_are_cross_references_to_check(self):
+        # Without this the two below pass vacuously the moment an idiom stops
+        # matching, which is how a docs check dies quietly.
+        columns = anchors = 0
+        for path in self.DOCS:
+            body = self._prose(path.read_text(encoding="utf-8"))
+            columns += len(self.COLUMN_REF.findall(body))
+            anchors += len(self.LINK.findall(body))
+        self.assertGreaterEqual(columns, 1, "no column references found")
+        self.assertGreaterEqual(anchors, 5, "no anchored links found")
+
+    def test_every_named_column_is_a_column_of_a_table_in_that_document(self):
+        for path in self.DOCS:
+            text = path.read_text(encoding="utf-8")
+            columns = self._columns(text)
+            if not columns:
+                continue
+            for match in self.COLUMN_REF.finditer(self._prose(text)):
+                for named in filter(None, match.groups()):
+                    with self.subTest(doc=path.name, column=named):
+                        self.assertIn(
+                            named, columns,
+                            f"{path.name} sends a reader to a `{named}` column; "
+                            f"the tables there have {sorted(columns)}")
+
+    def test_every_anchored_link_names_a_heading_in_the_file_it_points_at(self):
+        for path in self.DOCS:
+            body = self._prose(path.read_text(encoding="utf-8"))
+            for target, anchor in self.LINK.findall(body):
+                destination = (path.parent / target).resolve()
+                if not destination.is_file():
+                    # A link to a directory or a URL fragment is not this
+                    # test's business; the link checker above it owns those.
+                    continue
+                with self.subTest(doc=path.name, link=f"{target}#{anchor}"):
+                    self.assertIn(
+                        anchor, self._anchors(destination.read_text(encoding="utf-8")),
+                        f"{path.name} links {target}#{anchor}, which is not a "
+                        f"heading in that file")
+
+
 if __name__ == "__main__":
     unittest.main()
