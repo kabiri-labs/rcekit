@@ -356,23 +356,30 @@ formats, or the template schema.
 
 ### Benchmark
 
-Three cases were re-run against their vulhub builds at 3.0.0, on three
-independent targets, and all three passed under the new names:
+**`runner.py --all`: 9/9, in 55m50s**, against the same vulhub builds. Every
+case's expected verdict changed in this release, and a rename applied to a
+stored result proves nothing about what the tool now reports, so all 9 ran:
 
-| Case | Vulnerable half | Negative control |
-|---|---|---|
-| `struts2-s2-001` | `executed` | `negative` |
-| `webmin-cve-2019-15107` | `executed` | `timing-sink` |
-| `opentsdb-cve-2023-25826` | `executed` | `timing-sink` |
+| Case | Method | Vulnerable half | Negative control |
+|---|---|---|---|
+| `fastjson-1.2.83` | `deser` | `deserialization-sink` | `negative` |
+| `hugegraph-gremlin-eval` | `eval` | `executed` | `negative` |
+| `hugegraph-gremlin-shell` | `reflected` | `executed` | `negative` |
+| `log4shell-cve-2021-44228` | `lookup` | `lookup-sink` | `negative` |
+| `opentsdb-cve-2023-25826` | `oob` | `executed` | `timing-sink` |
+| `struts2-s2-001` | `eval` | `executed` | `negative` |
+| `tomcat-cve-2017-12615` | `write` | `executed` | `negative` |
+| `webmin-cve-2019-15107-file` | `file` | `executed` | `negative` |
+| `webmin-cve-2019-15107` | `reflected` | `executed` | `timing-sink` |
 
 The two `timing-sink` controls carry the weight. On a Webmin 1.910 and an
 OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its own proven
 tier and still does not reach `executed` -- the retier holding against real
 software and not against a fixture.
 
-The remaining 6 cases were not re-run. `runner.py --list` loads and validates
-all 9 under the new names, and nothing a case sends or measures changed, but
-neither of those is a run.
+Two tiers this release introduced are **not** in that table: `file-write` and
+`evaluation-sink`. The Tomcat `write` case reaches `executed`, and `boolean`
+has no case at all. Both are covered by unit tests only.
 
 ### Migration
 
