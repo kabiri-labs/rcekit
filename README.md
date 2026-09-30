@@ -56,12 +56,24 @@ a continuous one: the benchmark runs on a cadence, not on every change. A row
 reading *as a control* is reproduced by the control half of another row's case,
 which is the half that describes it.
 
-3.0.0 renamed the verdict every case expects, so **that green run predates the
-names in the table above** and the cases have not been re-run since. Nothing
-about what a case sends or measures changed — only the string it compares
-against — and `runner.py --list` loads and validates all 9 under the new names.
-Read the `Verdict` column as the tier the method reaches, which is what 2.45.7
-measured; read the 9/9 as a claim about 2.45.7 and not about this release.
+3.0.0 renamed the verdict every case expects, so **that 9/9 predates the names
+in the table above**. Three cases were re-run at 3.0.0 against the same vulhub
+builds, on three independent targets, and all three passed under the new names:
+
+| Case | Vulnerable half | Negative control |
+|---|---|---|
+| `struts2-s2-001` | `executed` | `negative` |
+| `webmin-cve-2019-15107` | `executed` | `timing-sink` |
+| `opentsdb-cve-2023-25826` | `executed` | `timing-sink` |
+
+The two `timing-sink` controls are the ones worth having: on targets that are
+genuinely vulnerable, `time` reaches its own proven tier and still does not
+reach `executed`. That is the retier holding against real software rather than
+against a fixture.
+
+The other 6 cases have not been re-run at 3.0.0 — only the string they compare
+against changed, and `runner.py --list` loads and validates all 9 under the new
+names, but that is not the same as a run. Read the 9/9 as a claim about 2.45.7.
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
 HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers
