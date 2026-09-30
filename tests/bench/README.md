@@ -166,12 +166,18 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: **9/9, in 1h36m48s, at 2.45.7**
-(2026-09-27). The three cases above were last executed as a set at 2.36.0, and
+`python tests/bench/runner.py --all` is green: **9/9, in 55m50s, at 3.0.0**
+(2026-09-30). The three cases above were last executed as a set at 2.36.0, and
 36 commits touched `rcekit.py` between that run and 2.45.5 — including the
 response decoding rewrite in 2.45.4, which is squarely in the "touching
 delivery" case for re-running this. None of them regressed against real
-software, then or at 2.45.7.
+software, at 2.45.7 or at 3.0.0.
+
+3.0.0 renamed the verdict every case expects, which is the other reason for
+this run: a rename applied to a stored result proves nothing about what the
+tool now reports. The table below is what the 3.0.0 run printed. It came in
+faster than the 1h36m48s at 2.45.7, and none of that is the tool -- most of
+the images were already pulled.
 
 Both of those cases set `share_target`, because neither half writes anything: the
 vulnerable halves compute arithmetic through a shell or an OGNL evaluator, and
