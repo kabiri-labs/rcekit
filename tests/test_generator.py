@@ -6275,12 +6275,57 @@ class DetectionQuestionTestCase(unittest.TestCase):
     expensive side of a cost split, so `lookup` and `deser` were skipped on a
     candidate that had confirmed -- as though a lookup sink were a second name
     for the RCE rather than a separate property with its own remediation.
+
+    Then it decided it from the tier instead, which is the same mistake one
+    step in: a tier says how strong an answer a method can reach, and renaming
+    one moved the method out of the execution group. `time` is what that costs
+    -- it asks the execution question, cannot reach the strongest answer to it,
+    and is the single most expensive method to run for a second name on a
+    finding `reflected` already proved.
     """
 
-    def test_every_method_is_sorted_by_the_tier_it_declares(self):
-        for name, cls in rcekit.DETECTION_METHODS.items():
-            expected = "execution" if cls.tier in rcekit.EXECUTION_TIERS else cls.tier
-            self.assertEqual(rcekit.detection_question(name), expected, name)
+    # The partition itself, written out. Not derived from any attribute the
+    # implementation happens to use, because deriving it is what went wrong
+    # twice: a test that recomputes the grouping rule agrees with the rule
+    # whatever the rule became.
+    EXPECTED_GROUPS = (
+        ("reflected", "eval", "file", "write", "oob", "time", "boolean"),
+        ("lookup",),
+        ("deser",),
+    )
+
+    def test_the_methods_group_into_exactly_these_questions(self):
+        grouped = {}
+        for name in rcekit.DETECTION_METHODS:
+            grouped.setdefault(rcekit.detection_question(name), set()).add(name)
+        self.assertEqual(
+            sorted(map(sorted, grouped.values())),
+            sorted(map(sorted, (set(g) for g in self.EXPECTED_GROUPS))),
+            f"the question partition moved: {grouped}")
+
+    def test_time_asks_the_same_question_as_the_method_that_replaces_it(self):
+        """The regression a declared question exists to prevent.
+
+        `time` sleeps for every probe. Dropping out of `reflected`'s group
+        means a candidate `reflected` has already proven still pays for the
+        sleeps, and the finding gained is a second name for the first one."""
+        for weaker in ("time", "boolean"):
+            self.assertEqual(rcekit.detection_question(weaker),
+                             rcekit.detection_question("reflected"),
+                             f"{weaker} left the execution group")
+
+    def test_a_methods_question_does_not_follow_its_tier(self):
+        """The two axes are independent, and one case of each proves it.
+
+        `time` shares a question with `reflected` and not a tier; `lookup`
+        shares neither. A rework that made the question track the tier again
+        would break exactly one of these two."""
+        methods = rcekit.DETECTION_METHODS
+        self.assertNotEqual(methods["time"].tier, methods["reflected"].tier)
+        self.assertEqual(rcekit.detection_question("time"),
+                         rcekit.detection_question("reflected"))
+        self.assertNotEqual(rcekit.detection_question("lookup"),
+                            rcekit.detection_question("reflected"))
 
     def test_the_sink_methods_ask_something_execution_cannot_answer(self):
         # The counterexample the split exists for.

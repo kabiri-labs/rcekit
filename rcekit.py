@@ -263,29 +263,27 @@ def split_command_word(body: str, opens_closed: bool = False) -> str:
     return body[:start + 1] + "$@" + body[start + 1:]
 
 
-# Tiers that are a name for *execution*: the thing a `confirmed` already
-# establishes, or a weaker claim about the same thing. A method reporting one
-# of these on a candidate that has already confirmed adds a second name for one
-# finding, and skipping it costs nothing.
-#
-# Any other tier is a different property with its own remediation -- a
-# deserialization sink, a lookup sink -- and has not been asked yet, however
-# thoroughly execution is proven. Deciding this from a list of method names is
-# how `lookup` and `deser` came to be skipped for being expensive, when what
-# they report was never the same question.
-EXECUTION_TIERS = {"confirmed", "needs-review"}
-
-
 def detection_question(name: str) -> str:
     """Which question a method answers, so two that answer the same one are not
     counted, budgeted or skipped as though they were separate.
 
-    ``reflected``, ``eval``, ``file``, ``write``, ``oob`` and ``time`` all ask
-    *did this target execute my input* and differ only in how hard they look.
-    ``lookup`` and ``deser`` ask something else entirely and their answers stand
-    whatever execution turned out to be."""
-    tier = DETECTION_METHODS[name].tier
-    return "execution" if tier in EXECUTION_TIERS else tier
+    ``reflected``, ``eval``, ``file``, ``write``, ``oob``, ``time`` and
+    ``boolean`` all ask *did this target execute my input* and differ only in
+    how hard they look. ``lookup`` and ``deser`` ask something else entirely and
+    their answers stand whatever execution turned out to be.
+
+    Read off the class, because this used to be derived from the tier -- a set
+    of tier names that counted as execution, everything else its own question.
+    A tier does not determine a question and never did: ``time`` asks the
+    execution question and earns a weaker answer than ``reflected`` does, while
+    ``lookup`` asks a different question and earns a definitive one. Deriving
+    one from the other meant that renaming a method's tier silently moved it
+    out of the execution group, and out of the dedup that keeps a run from
+    paying for `time`'s sleeps on a candidate `reflected` has already proven.
+    Deciding it from a hand-written list of method names is the older version of
+    the same mistake, and it is how `lookup` and `deser` came to be skipped for
+    being expensive when what they report was never the same question."""
+    return DETECTION_METHODS[name].question
 
 # Methods whose probes are shell commands, and so ride the sink-shape ladder.
 # `eval` and `write` are deliberately absent: their probes are template /
@@ -4140,6 +4138,18 @@ class DetectionMethod:
     unchanged on Python 3.8."""
     name = "base"
     tier = "confirmed"
+    # Which question this method asks, independent of the tier its answer
+    # earns. Two methods asking the same question are one finding under two
+    # names, so the second is skipped once the first has proven it; two asking
+    # different questions are never traded against each other, however
+    # thoroughly the other is answered.
+    #
+    # Declared rather than derived. The tier says how strong an answer this
+    # method can reach, and that is a different axis: `time` asks the execution
+    # question and cannot reach the strongest answer to it, while `lookup`
+    # reaches a definitive answer to a question that is not about execution at
+    # all. See :func:`detection_question`.
+    question = "execution"
     # Aggregate methods observe a whole *set* of probes together (e.g. a timing
     # regression across several controlled delays) and decide once via
     # confirm_series, instead of one Verdict per probe.
@@ -5923,6 +5933,9 @@ class LookupCallback(DetectionMethod):
     # anything, so this gets its own proven-sink tier beside
     # `deserialization-sink` -- the same distinction, drawn for the same reason.
     tier = "lookup-sink"
+    # Not the execution question, so a candidate that has already proven
+    # execution is still asked this one -- the sink has its own remediation.
+    question = "lookup"
     # Callbacks are asynchronous: one can arrive well after the response that
     # triggered it, so no probe can be judged until the batch has been fired.
     aggregate = True
@@ -6342,6 +6355,10 @@ class DeserSink(DetectionMethod):
     # it went. A resolution is a request the target makes and nothing more.
     safety = "safe"
     also_reports = ("needs-review",)
+    # Its own question, for the same reason `lookup` has one: a classpath gadget
+    # chain is a different remediation from a command sink, so proving execution
+    # elsewhere never answers this.
+    question = "deserialization"
     aggregate = True
 
     SHAPE_FORMS = ("wellformed", "truncated", "noise", "noise_again")
