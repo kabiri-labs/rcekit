@@ -1047,19 +1047,46 @@ class ComposeFailureDetailTestCase(unittest.TestCase):
         "f82cecbf9c2c8c66): Bind for 0.0.0.0:8080 failed: port is already allocated\n"
     )
 
-    def test_the_real_port_clash_reads_as_the_reason_and_not_the_chatter(self):
+    def test_the_real_port_clash_ends_on_the_reason(self):
+        """The real sample, asserted on what has to be true rather than on how
+        tidy it looks.
+
+        This used to require that the progress lines be *absent* -- another
+        preference held as a requirement, and the reason a content rule was in
+        here at all. Dropping lines on what they say is what lost the reason
+        when a trailing `warning: ERROR_LOG ...` matched and the actual failure
+        did not. The reason is last in a container-runtime failure, so that is
+        what gets pinned."""
         completed = subprocess.CompletedProcess(
             ["docker", "compose", "up", "-d"], 1, stdout="", stderr=self.REAL_PORT_CLASH)
         detail = runner.failure_detail(completed)
-        self.assertIn("port is already allocated", detail)
-        self.assertTrue(detail.startswith("Error response from daemon"),
-                        f"the reason is not what the detail opens with: {detail}")
-        self.assertNotIn("Creating", detail,
-                         "progress chatter survived ahead of the reason")
+        self.assertTrue(detail.endswith("port is already allocated"),
+                        f"the reason is not what the detail ends on: ...{detail[-80:]}")
+
+    def test_no_line_in_the_kept_window_is_dropped_for_what_it_says(self):
+        """The structural guard, and the one that would have caught this.
+
+        Two reductions remain and both are positional: the last N lines, the
+        last N characters. Nothing may look at a line's content to decide
+        whether it survives -- a rule that does can always be wrong about text
+        from a `compose` entry that is any argv a case gives, and being wrong
+        meant discarding the reason.
+
+        Stated without naming any marker, so it holds against the next marker
+        somebody reaches for."""
+        for marker in ("error", "ERROR_LOG", "Error response", "errno", "no error here"):
+            with self.subTest(marker=marker):
+                lines = ["first line", f"middle mentioning {marker}", "last line"]
+                detail = runner.diagnostic_tail("\n".join(lines))
+                for line in lines:
+                    self.assertIn(
+                        line, detail,
+                        f"{line!r} was dropped because another line said "
+                        f"{marker!r}: {detail}")
 
     def test_a_failure_that_never_says_error_keeps_its_whole_tail(self):
-        """The cut is a starting point, not a parser. A failure that does not
-        announce itself is the one worth reading in full."""
+        """Nothing is read for meaning, so a failure that announces itself in
+        words nobody anticipated is carried like any other."""
         completed = subprocess.CompletedProcess(
             ["docker"], 1, stdout="", stderr="killed\nout of memory\nexiting\n")
         detail = runner.failure_detail(completed)
@@ -1201,6 +1228,20 @@ class DurationReportingTestCase(unittest.TestCase):
         self.assertEqual(runner.format_duration(59.9), "59.9s")
         self.assertEqual(runner.format_duration(60), "1m00s")
         self.assertEqual(runner.format_duration(3600), "1h00m00s")
+
+    def test_the_seam_between_the_units_does_not_print_sixty_seconds(self):
+        """Either side of a boundary is not the boundary.
+
+        This checked 59.9 and 60 and passed while everything between 59.95 and
+        60 printed `60.0s`: the unit was chosen off the raw value and the
+        sub-minute branch then rounded to one decimal. `time.monotonic()` lands
+        in that window as readily as anywhere else, and the near neighbour is
+        where a boundary check breaks -- not at an obvious stranger."""
+        self.assertEqual(runner.format_duration(59.949), "59.9s")
+        self.assertEqual(runner.format_duration(59.95), "1m00s")
+        self.assertEqual(runner.format_duration(59.99), "1m00s")
+        # The same seam an hour up.
+        self.assertEqual(runner.format_duration(3599.95), "1h00m00s")
 
     def test_a_negative_or_zero_elapsed_is_not_rendered_as_a_countdown(self):
         self.assertEqual(runner.format_duration(0), "0.0s")

@@ -279,7 +279,11 @@ def format_duration(seconds: float) -> str:
     the tool -- a file's timestamps -- and then typed into the document by hand.
     A figure a document states about a program should come from the program."""
     seconds = max(0.0, float(seconds))
-    if seconds < 60:
+    # Round first, then pick the unit. Choosing the unit off the raw value and
+    # rounding inside it printed `60.0s` for anything from 59.95 up, because
+    # the sub-minute branch rounds to one decimal and 59.95 rounds to 60.0.
+    # `time.monotonic()` lands there as readily as anywhere else.
+    if round(seconds, 1) < 60:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(int(round(seconds)), 60)
     hours, minutes = divmod(minutes, 60)
@@ -552,35 +556,40 @@ PROBLEM_OUTPUT_CHARS = 600
 def diagnostic_tail(text: Optional[str]) -> str:
     """The end of one stream's output.
 
-    Three reductions, and every one of them keeps the END, because that is
-    where a container-runtime failure puts the thing an operator can act on::
+    Both reductions keep the END, because that is where a container-runtime
+    failure puts the thing an operator can act on::
 
         failed to set up container networking: driver failed programming
         external connectivity on endpoint ...: Bind for 0.0.0.0:8080 failed:
         port is already allocated
 
-    The leaf cause is last. So: the last few lines, starting from the one that
-    announces an error, and -- when that is still too long -- the last
-    characters rather than the first.
+    The leaf cause is last. So: the last few lines, and -- when those are still
+    too long -- the last characters rather than the first. The character budget
+    used to cut the other way; a real clash measured 273 characters with the
+    leaf starting at 218, and three services failing in one `up` comes to about
+    825, so cutting from the left threw away exactly the part naming the port.
 
-    The character budget used to cut the other way. A real clash measured 273
-    characters with the leaf starting at 218, which fits; three services
-    failing in one `up` comes to about 825, and cutting from the left threw
-    away exactly the part naming the port. The next target in the plan has
-    four services.
+    **Nothing is dropped on what a line says.** There was a third reduction
+    here that started the detail at the first line containing `error`, and it
+    discarded everything before it, so::
 
-    The error-line cut is a starting point, not a parser. When nothing says
-    `error` the whole tail is kept, because a failure that does not announce
-    itself is the one worth reading in full."""
+        Bind for 0.0.0.0:5005 failed: port is already allocated
+        warning: ERROR_LOG variable is not set
+
+    reported the warning and lost the reason -- the reason contains no such
+    word, and the warning contains it by accident. The same substring rule was
+    removed from choosing between streams one revision earlier, with the right
+    principle written down and then applied at one of the two places it held.
+
+    What remains is positional and bounded: the last N lines, the last N
+    characters. Both can be reasoned about without reading the text, which is
+    the property that makes them safe on output from a `compose` entry that may
+    be any argv a case gives."""
     text = (text or "").strip()
     if not text:
         return ""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     lines = lines[-PROBLEM_OUTPUT_LINES:]
-    for index, line in enumerate(lines):
-        if "error" in line.lower():
-            lines = lines[index:]
-            break
     detail = " | ".join(lines)
     if len(detail) > PROBLEM_OUTPUT_CHARS:
         detail = "..." + detail[-PROBLEM_OUTPUT_CHARS:]

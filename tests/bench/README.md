@@ -300,7 +300,7 @@ tool did not confirm" should not look alike.
 
 **Fixed.** `bring_up` captured compose's output and read only the return code
 off it, so the reason was in hand and thrown away. A failure now carries the
-last lines compose printed, starting from the one that announces the error:
+last lines compose printed:
 
 ```
 [bench]   -> FAIL
@@ -312,12 +312,24 @@ Measured against a real clash rather than a fixture: two compose projects for
 `struts2-s2-001` brought up against the same 8080, with the resulting stderr
 kept verbatim in the test that pins the trimming.
 
-Both streams are read, and every reduction keeps the **end** -- the last few
-lines, from the one that announces an error, and the last characters when that
-is still too long. Container-runtime errors read outside-in and the actionable
-part is last, so cutting from the left discards the thing worth having: the
-real clash above measured 273 characters with `Bind for ...` starting at 218,
-and three services failing in one `up` comes to about 825.
+Both streams are read, and both reductions keep the **end** -- the last few
+lines, and the last characters when those are still too long. Container-runtime
+errors read outside-in and the actionable part is last, so cutting from the
+left discards the thing worth having: the real clash above measured 273
+characters with `Bind for ...` starting at 218, and three services failing in
+one `up` comes to about 825.
+
+**Nothing is dropped for what it says.** A third reduction used to start the
+detail at the first line containing `error`, which turned
+
+```
+Bind for 0.0.0.0:5005 failed: port is already allocated
+warning: ERROR_LOG variable is not set
+```
+
+into the warning alone -- the reason contains no such word and the warning
+contains it by accident. What is left is positional and bounded, which can be
+reasoned about without reading the text.
 
 **No stream is ever dropped**, and every stream that said anything is
 reported, labelled when there is more than one. Two earlier versions chose a
