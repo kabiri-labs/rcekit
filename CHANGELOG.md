@@ -290,6 +290,57 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.0.1] — 2026-10-01
+
+### Fixed
+
+- **`reflected` named a shell it had not proved.** One of its probe shapes — a
+  bare `expr a + b` at `--probe-depth full`, whose expected value was the sum
+  alone, matched digit-fenced — reported `executed` under
+  `[reflected/<environment>/...]` against targets where nothing executed a
+  command. Groovy reads `expr 548286 + 675041` as the command expression
+  `expr(548286 + 675041)`: it computes the sum, fails to resolve the method, and
+  echoes the result in its error.
+
+  The tier was never wrong. The target did compute a value reflection cannot
+  forge, and `eval` reaches `executed` on such an endpoint honestly. What was
+  wrong is the **class**: a finding printed under `reflected/unix` asserts a
+  POSIX shell ran the input, and in a report a correct proof filed under the
+  wrong class is worse than a miss.
+
+  Measured against a plain Apache HugeGraph 1.2.0 Gremlin endpoint with every
+  shape mapped (`--confirm-depth every`): 42 probes, `executed=3`, all three
+  that one shape, and 0 of 36 tagged probes confirming. Measured against the
+  same build's ProcessBuilder body, where a real `sh -c` runs: 4 tagged shapes
+  confirm — the canonical `$(( ))` plus `$(echo TAG)` collapse, the backtick
+  `expr`, the `${IFS}` space-free form and the comment-terminated collapse — so
+  removing the shape costs nothing on a genuine shell. The remaining shapes all
+  require the target to place RCEKit's random tags *around* the value it
+  computed, which an expression evaluator handed the payload cannot do.
+
+  The shape is removed rather than repaired: `expr` has no portable string
+  concatenation, so there is no way to bracket its result in a tag without
+  reintroducing the `$(` or the `echo` keyword the shape existed to avoid. The
+  substitution-free coverage it shared is carried by `awk` alone, which is
+  unaffected. A sink that filters `$(`, backticks and `awk` at once is now out
+  of `reflected`'s reach and stays reachable through `time`, `oob` and `file`.
+
+  `--probe-depth quick` never sent the shape, so a `quick` run is unchanged.
+  Two guards hold the invariant over every environment, context and depth: no
+  probe's expected value may be the arithmetic alone, and none may match
+  digit-fenced. Both were run against the restored shape and both fail on it,
+  as does a new bench case whose control runs `reflected` against the same
+  Gremlin endpoint and requires `negative` — with the shape restored it reports
+  `executed=30`.
+
+  One second-order effect worth knowing: the retired shape was also the
+  shortest probe `reflected` built, so the shortest is now 41 characters rather
+  than about 20. A `--max-length` below 41 therefore leaves the method with no
+  probe at all. That fails loudly rather than quietly — the run prints
+  `NOTHING WAS TESTED — this is not a negative result`, names
+  `--max-length` as what removed all 36 probes, and says to relax it or treat
+  the sink as one the probe vocabulary cannot reach.
+
 ## [3.0.0] — 2026-09-30
 
 ### Changed
@@ -2700,6 +2751,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.0.1]: https://github.com/kabiri-labs/rcekit/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/kabiri-labs/rcekit/compare/v2.45.7...v3.0.0
 [2.45.7]: https://github.com/kabiri-labs/rcekit/compare/v2.45.6...v2.45.7
 [2.45.6]: https://github.com/kabiri-labs/rcekit/compare/v2.45.5...v2.45.6

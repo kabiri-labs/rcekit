@@ -115,7 +115,7 @@ closes a whole filter class:
 `full` sends three further shapes per sink, each aimed at a filter that silences
 the canonical probes:
 
-- **substitution-free** (`awk`, bare `expr`) — both canonical probes route the
+- **substitution-free** (`awk`) — both canonical probes route the
   arithmetic through `$((…))` or a backtick, so a sink that strips `$(` blocks
   them while remaining exploitable through a plain `;`. The `awk` shape carries
   double quotes, so it is not sent into a context that *wraps* the payload in
@@ -123,7 +123,12 @@ the canonical probes:
   come back negative. Break-out contexts such as `shell_double_quoted` close the
   sink's quote and comment its tail, so they still get it.
 - **keyword-diverse** (`awk` again) — a filter on `echo`/`expr` blocks both
-  canonical probes; `awk` is not on those blocklists.
+  canonical probes; `awk` is not on those blocklists. A bare `expr a + b` used
+  to share both roles and was removed in 3.0.1: its expected value was the sum
+  alone, which anything evaluating arithmetic satisfies, so it reported
+  `executed` under `reflected`'s shell class against targets where no command
+  ran. A sink filtering `$(`, backticks *and* `awk` is therefore out of
+  `reflected`'s reach, and stays reachable through `time`, `oob` and `file`.
 - **comment-terminated** (`… #`) — comments out whatever the application appends
   after the injection point. A trailing redirect or pipe (`ping <input> 2>/dev/null`,
   `<cmd> <input> | grep …`) otherwise swallows the probe's output, so the probe

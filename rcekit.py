@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4781,7 +4781,15 @@ class ReflectedMath(DetectionMethod):
     ``$(( ))`` is POSIX syntax and inert text on Windows, so cmd.exe gets
     ``set /a`` through a ``for /f`` capture and PowerShell gets its ``$( )``
     subexpression — otherwise the two OS families the corpus generates payloads
-    for are families this method cannot confirm on."""
+    for are families this method cannot confirm on.
+
+    Every probe's expected value brackets the computed result in random tags,
+    and that is a *class* guarantee rather than a presentation detail. This
+    method's finding prints as ``[reflected/<environment>/...]`` under
+    EXECUTED, which asserts a shell of that family ran the input — so an
+    expected value the sum alone satisfies would let anything that evaluates
+    arithmetic earn a shell's name. See :meth:`_extended_probes` for the shape
+    that did exactly that, and what it was measured against."""
     name = "reflected"
     tier = "executed"
 
@@ -4900,14 +4908,23 @@ class ReflectedMath(DetectionMethod):
 
         * a sink that strips ``$(`` blocks ``$((`` too (it is a prefix of it) and
           also blocks the backtick, so a target exploitable through a plain
-          ``;`` reports clean. ``awk`` and a bare ``expr`` print the result
-          straight to stdout, needing no substitution at all.
+          ``;`` reports clean. ``awk`` prints the result straight to stdout,
+          needing no substitution at all.
         * a keyword filter on ``echo``/``expr``/``cat``/``id`` blocks both, while
           ``awk`` is not in anyone's blocklist.
 
-        The bare ``expr`` probe's output is an untagged number, so its match is
-        digit-fenced; the control differential still applies, exactly as for the
-        tagged probes."""
+        There used to be a third shape here -- a bare ``expr a + b``, whose
+        expected value was the sum alone, matched digit-fenced -- and it is gone
+        because an untagged sum cannot tell a shell from anything else that does
+        arithmetic. Measured against a plain Gremlin endpoint: Groovy reads
+        ``expr 548286 + 675041`` as the command expression ``expr(548286 +
+        675041)``, computes it, fails to resolve the method and echoes the
+        result in its error, so the probe reported ``executed`` under
+        ``[reflected/unix/...]`` with no shell anywhere in the picture. The
+        remaining shapes all require the target to place RCEKit's random tags
+        *around* the value it computed, which an expression evaluator handed
+        this payload cannot do -- on that same endpoint, 0 of 36 tagged probes
+        confirmed while 3 of 6 bare ones did."""
         probes: List[Probe] = []
         # Substitution-free and keyword-diverse. awk's concatenation binds looser
         # than '+', so `"T1" a+b "T2"` prints T1<sum>T2.
@@ -4915,10 +4932,6 @@ class ReflectedMath(DetectionMethod):
         awk_literal = f"{a}+{b}"
         probes.extend(Probe(payload=payload, expected=f"{t1}{total}{t2}", forbidden=awk_literal)
                       for payload in self._wrap_variants(record, core_awk))
-        core_expr = f"expr {a} + {b}"
-        probes.extend(Probe(payload=payload, expected=str(total), forbidden=f"{a} + {b}",
-                            boundary=True)
-                      for payload in self._wrap_variants(record, core_expr))
         # Comment-terminated: same proofs, but with whatever the application
         # appends after the injection point commented out.
         for terminated, expected, literal in (

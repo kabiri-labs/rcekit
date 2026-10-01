@@ -3698,10 +3698,21 @@ class TargetProfileProbeFilterTestCase(unittest.TestCase):
                         "the arithmetic shape carries no quote and must survive")
 
     def test_max_length_drops_the_long_shapes_and_keeps_the_short_ones(self):
-        built, kept, reasons = self._probes(max_length=40)
+        # The ceiling is read off the shapes that exist rather than written
+        # out. It was 40, picked when a bare `expr a + b` was the shortest
+        # probe at around 20 characters; retiring that shape in 3.0.1 left the
+        # shortest at 41, so the ceiling fell below every probe, the check
+        # partitioned nothing, and it failed on an empty `kept` -- a stale
+        # constant reporting as a filter bug. Taking the shortest length means
+        # the split is real whatever the shape set becomes.
+        lengths = sorted(len(p.payload) for p in self._probes()[0])
+        self.assertLess(lengths[0], lengths[-1],
+                        "a ceiling cannot partition probes that are all one length")
+        ceiling = lengths[0]
+        built, kept, reasons = self._probes(max_length=ceiling)
         self.assertTrue(kept)
         self.assertLess(len(kept), len(built))
-        self.assertTrue(all(len(p.payload) <= 40 for p in kept))
+        self.assertTrue(all(len(p.payload) <= ceiling for p in kept))
         self.assertTrue(all("--max-length" in reason for reason in reasons))
 
     def test_the_literal_form_is_what_is_checked(self):
@@ -3814,8 +3825,14 @@ class ProbeDepthTestCase(unittest.TestCase):
         substitution_free = [p for p in payloads if "$(" not in p and "`" not in p]
         self.assertTrue(substitution_free,
                         "a sink stripping '$(' and backticks would block every probe")
+        # A bare `expr a + b` was asserted here beside `awk` until its expected
+        # value -- the sum alone -- was measured earning `[reflected/unix/...]`
+        # on a Gremlin endpoint with no shell anywhere. The shape is gone, and
+        # what this assertion protects is the substitution-free coverage, which
+        # `awk` carries on its own. The absence is not asserted here: it is a
+        # property of every probe's expected value, and
+        # `ShellClaimTestCase` holds it there rather than pinning payload text.
         self.assertTrue(any("awk " in p for p in substitution_free))
-        self.assertTrue(any(re.search(r"expr \d+ \+ \d+", p) for p in substitution_free))
 
     def test_full_depth_adds_a_shape_free_of_the_usual_keywords(self):
         # A WAF blocking the usual command words must still meet a live probe,
@@ -3915,6 +3932,75 @@ class ProbeDepthTestCase(unittest.TestCase):
                 [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected", "eval"])
         self.assertTrue(results)
         self.assertFalse([r for r in results if r["verdict"] == "executed"])
+
+
+class ShellClaimTestCase(unittest.TestCase):
+    """`reflected` prints its finding as `[reflected/<environment>/...]` under
+    EXECUTED, which asserts a shell of that family ran the input. So every
+    probe it builds has to rest on something only a shell produces.
+
+    One did not. A bare `expr a + b` expected the sum and nothing else, matched
+    digit-fenced, and Groovy reads `expr 548286 + 675041` as the command
+    expression `expr(548286 + 675041)`: it computes the sum, fails to resolve
+    the method, and echoes the result in its error. Measured against a plain
+    Gremlin endpoint with every shape mapped -- 42 probes, `executed=3`, all
+    three that one shape, 0 of 36 tagged probes confirming. The tier was never
+    the problem: the target did compute a value reflection cannot forge, and
+    `eval` reaches `executed` there honestly. The *class* was wrong, which in a
+    report is worse than a miss.
+
+    The invariant, rather than the shape: the tags have to bracket the computed
+    value, because an evaluator handed this payload can arrive at the sum and
+    cannot arrive at `RKXXXXX<sum>RKYYYYY`. Asserted over every environment and
+    context the method is applicable to, at both probe depths, so a shape added
+    later cannot reintroduce a sum-only expectation anywhere.
+
+    `boundary` stays on `Probe` and `EvalExpr` still uses it -- a bare
+    boundary-fenced product is honest for a method whose finding claims an
+    expression evaluator, which is exactly the claim at issue here.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+
+    def _every_probe(self, depth):
+        import random as _random
+        method = ReflectedMath(self.gen, {"probe_depth": depth})
+        for environment in sorted(rcekit.SHELL_CAPABLE_ENVIRONMENTS):
+            for context in sorted(self.gen.contexts):
+                rec = make_record(environment=environment, context=context)
+                if not method.applicable(rec):
+                    continue
+                for probe in method.build_probes(rec, _random.Random(7)):
+                    yield environment, context, probe
+
+    def test_there_are_probes_to_check(self):
+        # Without this the checks below pass vacuously the moment `applicable`
+        # or the record helper stops producing anything.
+        self.assertGreater(len(list(self._every_probe("full"))), 200)
+
+    def test_no_probe_rests_on_the_arithmetic_alone(self):
+        for depth in ("quick", "full"):
+            for environment, context, probe in self._every_probe(depth):
+                with self.subTest(depth=depth, environment=environment, context=context):
+                    self.assertFalse(
+                        probe.expected.strip().isdigit(),
+                        f"the expected value is {probe.expected!r} -- a sum any "
+                        "evaluator of arithmetic can produce, under a verdict "
+                        "that names a shell")
+
+    def test_no_probe_matches_digit_fenced(self):
+        """The other half of the same guarantee, and not implied by it.
+
+        `boundary` is what lets a bare number match at all. A shape could carry
+        a tag in `expected` and still be built with `boundary=True`, and the
+        pair would read as deliberate rather than as the leftover it would be."""
+        for environment, context, probe in self._every_probe("full"):
+            with self.subTest(environment=environment, context=context):
+                self.assertFalse(
+                    probe.boundary,
+                    f"a {environment}/{context} probe matches digit-fenced, which "
+                    "only a sum-only expected value needs")
 
 
 class QuotedShellCarrierTestCase(unittest.TestCase):
@@ -8756,12 +8842,15 @@ class ResponseChannelTestCase(unittest.TestCase):
         self.assertEqual(self.method.confirm(obs, probe).status, "negative")
 
     def test_a_numeric_transport_header_cannot_confirm(self):
-        # The `expr` probe's expected value is a bare boundary-fenced number, and
-        # Content-Length is a bare number too. Excluding transport headers is what
-        # keeps that collision from reading as execution.
-        import random as _random
-        probe = next(p for p in self.method.build_probes(self.rec, _random.Random(21))
-                     if p.boundary)
+        # A boundary-fenced expected value is a bare number, and Content-Length
+        # is a bare number too. Excluding transport headers is what keeps that
+        # collision from reading as execution.
+        #
+        # The probe is built here rather than found among `reflected`'s, which
+        # no longer ships one: `EvalExpr` still matches a bare product
+        # boundary-fenced, so the collision this test exists for is live and
+        # the shape of probe that meets it has to come from somewhere.
+        probe = Probe(payload="whatever", expected="937744", boundary=True)
         channels = self.gen._response_channels(
             [("Content-Length", probe.expected)], "nothing here")
         verdict = self.method.confirm(

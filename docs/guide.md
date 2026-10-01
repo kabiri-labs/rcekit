@@ -193,9 +193,10 @@ canonical ones share two blind spots: they route their arithmetic through a
 command substitution, and they spell the command `echo`/`expr`. A sink that
 strips `$(` blocks both (`$((` starts with `$(`), and so does a keyword filter —
 while the target stays trivially exploitable through a plain `;`. The extra
-shapes use `awk` and a bare `expr`, and one set comments out whatever the
-application appends after the injection point. Pass `--probe-depth quick` on a
-rate-limited target to halve the requests and send only the canonical probes.
+shapes use `awk`, and two sets comment out whatever the application appends
+after the injection point. Pass `--probe-depth quick` on a rate-limited target
+to halve the requests and send only the canonical probes — measured on a Unix
+sink, 36 probes per point at `full` against 18 at `quick`.
 
 It governs probe *shapes* only — never which break-outs are tried. Both depths
 sweep every separator, and both screen every separator in `--methods time`,
