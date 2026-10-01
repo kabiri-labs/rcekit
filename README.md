@@ -271,7 +271,7 @@ What each flag opens up:
 | `--auto-params all` | every query value, JSON leaf, form field, multipart part, cookie and header, instead of one named field |
 | `--point-order thorough` | every non-hop-by-hop header, not just the high-yield ones |
 | `--methods ...,lookup,deser` | expression-lookup and deserialization sinks, which the shell-shaped methods cannot reach |
-| `--oob-host` | a callback host for the blind methods. Needs a domain delegated to you; port 53 needs root |
+| `--oob-host` | a callback host for the blind methods. An IP the target can reach serves `oob`; `lookup` and `deser`'s gadget can only put a token in a DNS label, so both need a domain delegated to you, and port 53 needs root |
 | `--verify-active-risk stateful` | the top rung — adds the probe shapes that make the target fetch from an address RCEKit did not choose |
 | `--probe-depth full` | every break-out shape per sink, not the cheap ones only |
 | `--detect-json` | the same verdicts as machine-readable JSON |

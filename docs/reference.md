@@ -1009,10 +1009,12 @@ verdicts against real vulnerable targets.
 ### Out-of-band detection
 
 `--methods oob` starts the built-in HTTP+DNS listener in-process and asks the
-target to resolve or fetch `<token>.<oob-host>`. It is the only `executed`-tier
-method for a sink that returns nothing and has no writable web root — `time`
-tops out at `timing-sink` by design, and `file` needs somewhere to write that
-the target also serves.
+target to resolve or fetch `<token>.<oob-host>`. For a sink that returns nothing
+it is the `executed`-tier method that asks nothing of the target's filesystem —
+`time` tops out at `timing-sink` by design, `file` needs somewhere writable that
+the target also [reads back](#file-based-confirmation-and-what-counts-as-read-back), and `write` needs
+the request itself to be what stores a file. When the target has egress, this is
+the cheapest of the three.
 
 Each probe carries its own token, so the finding names the break-out that
 actually worked rather than every one that was tried. The DNS shapes matter

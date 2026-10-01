@@ -179,11 +179,11 @@ reported separately.
 | Anything, first pass | `reflected,eval` | cheap, safe, no state change |
 | A shell sink (`system()`, backticks, `exec`) | `reflected` | cheap |
 | A template engine or expression language | `eval` | cheap |
-| No output, but the target has egress | `oob` | one listener, no state change (see [Out-of-band callbacks](#out-of-band-callbacks)) |
-| The sink interpolates an expression rather than shelling out | `lookup` | same listener; `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them. Proves a lookup sink, **not** execution |
-| No output, but you control a web root | `file` | writes files (see [No-egress targets](#no-egress-targets)) |
+| No output, but the target has egress | `oob` | one listener, and an IP the target can reach is enough for it; no state change (see [Out-of-band callbacks](#out-of-band-callbacks)) |
+| The sink interpolates an expression rather than shelling out | `lookup` | a listener too, but only a **delegated name** serves it — the token can ride nowhere but a DNS label, so an address leaves it nothing to resolve and it builds no probes at all. `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them. Proves a lookup sink, **not** execution |
+| No output, and somewhere writable you can also read back | `file` | writes files; the read-back channel can be a web root *or* an LFI, download or export endpoint (see [No-egress targets](#no-egress-targets)) |
 | Your own request stores a file somewhere it is served from | `write` | writes one file, then fetches it (see [Upload and write-primitive targets](#upload-and-write-primitive-targets)) |
-| The parameter takes a serialized object | `deser` | 4 payloads per ecosystem for the shape differential; the DNS gadget needs the same listener `oob` does. Proves the endpoint deserializes attacker data, **not** execution |
+| The parameter takes a serialized object | `deser` | 4 payloads per ecosystem and no listener at all — but that differential is a parser fingerprint, `needs-review`, not proof. `deserialization-sink` comes only from the DNS gadget, which needs a **delegated name** and a listener, and which only `java` and `fastjson` ship (see [Deserialization sinks](reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce)). Either way, **not** execution |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 | The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
 
@@ -362,9 +362,12 @@ injection context or a different separator, not heavier obfuscation.
 
 ## Blind targets
 
-No output channel at all? Reach for `oob` first — it is the only method that can
-*confirm* a blind sink (see [Out-of-band callbacks](#out-of-band-callbacks)).
-Timing is the fallback when the target has no egress either.
+No output channel at all? Two methods still prove execution there, and which one
+you can use depends on what the target gives you. Reach for `oob` first when it
+has egress (see [Out-of-band callbacks](#out-of-band-callbacks)); when it has
+none, `file` proves the same thing through anything writable you can also read
+back (see [No-egress targets](#no-egress-targets)). Timing is the fallback when
+neither holds, and it reports `timing-sink` rather than execution.
 
 **A results-based method cannot confirm a blind sink**, and that is not a
 limitation to route around — there is simply nowhere for the computed value to
@@ -376,9 +379,16 @@ names the methods that could still reach it:
 [detect] A sink that returns NO OUTPUT cannot be confirmed by eval/reflected — there is
 nowhere for the computed value to appear, so a negative here does not rule out execution.
 Methods that reach a blind sink:
-[detect]   --methods oob --oob-host HOST --verify-active-risk intrusive   (needs egress from the target; confirms)
-[detect]   --methods file --webroot DIR --web-base-url URL   (needs a writable web root; confirms)
-[detect]   --methods time                     (no egress and no web root needed; reports timing-sink, NOT execution)
+[detect]   --methods oob --oob-host HOST --verify-active-risk intrusive   (needs egress
+from the target; proves execution)
+[detect]   --methods lookup --oob-host HOST --verify-active-risk intrusive   (same
+listener, for a sink that interpolates ${...} rather than shelling out; reports
+lookup-sink, NOT execution)
+[detect]   --methods file --file-write-path DIR --file-read-url URL   (needs somewhere
+writable the target can also read back -- a web root, an LFI endpoint, a download
+handler; proves execution)
+[detect]   --methods time                     (no egress and no read-back needed; reports
+timing-sink, NOT execution)
 ```
 
 RCEKit screens each candidate separator with one cheap probe, then fires a
@@ -432,6 +442,27 @@ paste it into the report so the client can verify the target was left clean.
 
 A stale file can't produce a false positive: both the filename and the token are
 freshly random each run.
+
+**A web root is the convenient case, not the requirement.** `--webroot` /
+`--web-base-url` is an alias for the two halves the method actually needs — a
+directory it can write into and a URL that returns what it wrote. Name them
+separately and the read-back channel can be anything that hands a file back:
+
+```bash
+python rcekit.py --acknowledge-consent \
+  --verify-url "https://target.example/ping?ip=FUZZ" \
+  --methods file --file-write-path /tmp \
+  --file-read-url "https://target.example/download?f={path_enc}"
+```
+
+`{name}` is the filename, `{path}` the full server-side path and `{path_enc}`
+that path percent-encoded — so an LFI parameter, a download or export handler or
+an attachment fetcher all serve, and `/tmp` is enough to write into.
+
+On a blind target with no egress, `file` and `write` are the two methods that
+still reach `executed` — and `write` needs *your own request* to be the thing
+that stores a file. Where it is not, this is what is left, which is why the
+read-back channel is worth looking for before concluding the sink is clean.
 
 ---
 
@@ -527,8 +558,10 @@ Collaborator. There are two ways to use it.
 `--methods oob` starts the listener in-process and drives the whole loop itself:
 it fires probes that ask the target to resolve or fetch `<token>.<oob-host>`,
 waits for the callbacks, and reports each probe by whether *its own* token came
-back. This is the only method that reaches `executed` on a sink that returns
-nothing and has no writable web root.
+back. On a sink that returns nothing it is the method that asks nothing of the
+target's filesystem — `file` needs somewhere writable it can also read back, and
+`write` needs your own request to be what stores a file — so where the target has
+egress, this is the cheapest of the three ways to reach `executed`.
 
 ```bash
 python rcekit.py --acknowledge-consent \
