@@ -1089,8 +1089,8 @@ class ComposeFailureDetailTestCase(unittest.TestCase):
     # stood when the review arrived.
 
     def test_the_reason_is_found_whichever_stream_carries_it(self):
-        """The promise, stated directly: a stream that announces an error is
-        the answer, even when the other stream is not silent.
+        """The promise, stated directly: the reason reaches the report from
+        whichever stream carries it, whatever the other one holds.
 
         A deprecation warning on stderr used to be enough to hide this -- the
         same swallowing the whole helper exists to stop, one level in."""
@@ -1119,30 +1119,53 @@ class ComposeFailureDetailTestCase(unittest.TestCase):
                         f"the leaf cause was truncated away: ...{detail[-80:]}")
         self.assertLessEqual(len(detail), runner.PROBLEM_OUTPUT_CHARS + 3)
 
-    def test_neither_stream_announcing_reports_both_rather_than_guessing(self):
+    def test_a_reason_that_never_says_error_still_arrives(self):
         """Compose does not always use the word. `Bind for ... failed: port is
-        already allocated` names no error, so there is nothing to choose on --
-        and choosing anyway is what put a warning in front of a reason."""
+        already allocated` names no error at all, which is why every rule that
+        looked for one eventually dropped it."""
         _started, problem = runner.bring_up(
             self._case(err="warning: deprecated option", out=self.PORT), None)
         self.assertIn(self.PORT, problem)
         self.assertIn("warning: deprecated option", problem)
 
-    def test_one_stream_announcing_is_not_padded_with_the_other_s_chatter(self):
-        """The real shape of a compose failure: build progress on stdout, the
-        reason on stderr. Reporting both here would bury the reason in layer
-        names, which is the noise the error-line cut exists to remove."""
+    def test_no_stream_is_dropped_whatever_the_other_one_says(self):
+        """The guarantee, and it replaces a test that traded it away.
+
+        Its predecessor required that a stream announcing an error be reported
+        *alone*, so the common compose failure would read cleanly. That is a
+        preference, and holding it as a requirement is what put a heuristic in
+        front of the guarantee: with selection in place, `warning: ERROR_LOG
+        variable is not set` on one stream was enough to discard `Bind for ...:
+        port is already allocated` on the other, because the reason contains no
+        such word.
+
+        Measured on a real clash, the chatter that test was protecting against
+        is about 60 characters and the reason still comes first. So the rule is
+        now that nothing is dropped, and this asserts it from the side that
+        bites: the incidental match."""
+        _started, problem = runner.bring_up(
+            self._case(err="warning: ERROR_LOG variable is not set",
+                       out=self.PORT),
+            None)
+        self.assertIn(self.PORT, problem,
+                      "an incidental `error` substring discarded the reason")
+        self.assertIn("ERROR_LOG", problem, "the other stream was dropped")
+
+    def test_the_real_compose_shape_still_leads_with_the_reason(self):
+        """Build progress on stdout, the reason on stderr -- the shape measured
+        against a live port clash. Both are kept now, and the readable property
+        that survives is that the reason comes first and whole."""
         _started, problem = runner.bring_up(
             self._case(out="#10 resolving provenance for metadata file\n#10 DONE 0.0s",
                        err=f"Container c Starting\nError response from daemon: {self.PORT}"),
             None)
         self.assertIn(self.PORT, problem)
-        self.assertNotIn("resolving provenance", problem)
-        self.assertNotIn("stdout:", problem)
+        self.assertLess(problem.index(self.PORT), problem.index("resolving provenance"),
+                        f"the build chatter came before the reason: {problem}")
 
-    def test_both_streams_announcing_names_which_said_what(self):
+    def test_two_streams_are_labelled_so_the_reader_knows_which_said_what(self):
         """Two services failing for different reasons, one message on each
-        stream. Nothing here can rank them, so both are kept and labelled."""
+        stream. Nothing here can rank them, and nothing tries to."""
         _started, problem = runner.bring_up(
             self._case(err="Error response from daemon: " + self.POOL,
                        out="Error response from daemon: " + self.PORT), None)

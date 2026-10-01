@@ -588,29 +588,39 @@ def diagnostic_tail(text: Optional[str]) -> str:
 
 
 def failure_detail(completed: "subprocess.CompletedProcess") -> str:
-    """What a failed command said, from whichever stream said it.
+    """Everything a failed command said, from every stream that said anything.
 
-    This used to read stderr and fall back to stdout only when stderr was
-    empty, while claiming to handle compose splitting itself across both. A
-    deprecation warning on stderr was therefore enough to hide a reason sitting
-    on stdout -- the same swallowing this whole helper exists to stop, one
-    level in.
+    No stream is ever dropped, and that is the whole design. Two attempts here
+    chose one instead, and both lost the reason:
 
-    Guessing is what went wrong, so it guesses as little as possible: when
-    exactly one stream announces an error, that one is the answer; otherwise
-    both are reported, labelled. A `compose` entry may be any argv a case
-    chooses, including a wrapper with its own ideas about which stream is for
-    what, and the cost of naming both is some progress chatter, while the cost
-    of picking wrong is the reason."""
+    * stderr first, stdout only when stderr was empty. A deprecation warning on
+      stderr hid a reason on stdout.
+    * the stream whose tail contains `error`. `warning: ERROR_LOG variable is
+      not set` matched, and `Bind for 0.0.0.0:5005 failed: port is already
+      allocated` -- which contains no such word -- did not, so the warning was
+      reported and the reason dropped.
+
+    The second was written as "guessing as little as possible", which moved the
+    guess from position to content rather than removing it. A `compose` entry
+    is whatever argv a case gives -- a wrapper, a script, a Makefile -- so any
+    rule inferring which stream matters from its text can be wrong, and a rule
+    that *discards* on being wrong loses the thing this helper exists to carry.
+
+    What drove both attempts was keeping the common compose failure free of
+    build chatter, which is a preference and was allowed to outrank the
+    guarantee. Measured on a real clash, that chatter is about 60 characters
+    and the reason still comes first. A guarantee is not worth 60 characters.
+
+    Ordering by which stream looks like an error was considered and declined:
+    being wrong would cost only the order, but it brings the same substring
+    back, and fixed order cannot lose anything."""
     tails = [(name, diagnostic_tail(stream)) for name, stream in
              (("stderr", completed.stderr), ("stdout", completed.stdout))]
     tails = [(name, tail) for name, tail in tails if tail]
     if not tails:
         return ""
-    announced = [(name, tail) for name, tail in tails if "error" in tail.lower()]
-    if len(announced) == 1:
-        return announced[0][1]
     if len(tails) == 1:
+        # Nothing to tell apart, so nothing to label.
         return tails[0][1]
     return " || ".join(f"{name}: {tail}" for name, tail in tails)
 
