@@ -601,10 +601,14 @@ which is the same method fighting a filter, a quote or an encoding.
 | The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
 | The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
 
-Only the first four prove execution. The rest are proven findings about
-something else, and [what a verdict means](#what-a-verdict-means) is the
-difference. [Choosing methods](docs/guide.md#choosing-methods) has the costs,
-and the rows below have the worked commands.
+Only the first four reach **`executed`**. `timing-sink`, `lookup-sink`,
+`evaluation-sink` and `deserialization-sink` are proven findings about something
+else. `needs-review` is the exception: it is the parser fingerprint `deser`
+reads when it has no gadget to fire, a real candidate and **not proof** — review
+it by hand rather than reporting it. [What a verdict
+means](#what-a-verdict-means) spells each one out,
+[Choosing methods](docs/guide.md#choosing-methods) has the costs, and the rows
+below have the worked commands.
 
 ### Getting the payload to land
 
