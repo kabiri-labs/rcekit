@@ -660,7 +660,7 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 | Verdict | What it means | What to do |
 |---|---|---|
 | **`executed`** | Execution proven. The evidence line shows the exact value the target computed. | Put it in the report. |
-| **`timing-sink`** / **`file-write`** / **`evaluation-sink`** | Proven, and about something other than execution: a delay honoured, a file written, an evaluator that consumed the input. | Report what the tier says. Do not call any of them RCE. |
+| **`timing-sink`** / **`file-write`** / **`evaluation-sink`** / **`deserialization-sink`** / **`lookup-sink`** | Proven, and about something other than execution: a delay honoured, a file written, an evaluator that consumed the input, an object graph reconstructed, a lookup URI resolved. | Report what the tier says. Do not call any of them RCE. |
 | **`needs-review`** | A real candidate that is not proof on its own — `deser`'s parser fingerprint. | Manual follow-up. Never report as proven. |
 | **`negative`** | Reached the target, found no evidence. | Suspect [encoding](#landing-the-payload-intact) or [sink shape](#whole-command-sinks) before concluding it's safe. |
 | **`inconclusive`** | Evidence appeared, but also appears *without* the payload — so it isn't attributable to execution. | Not a finding. This is the false positive that never made it out. |

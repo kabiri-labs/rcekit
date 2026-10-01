@@ -1455,6 +1455,156 @@ class CrossReferenceTestCase(unittest.TestCase):
                         f"heading in that file")
 
 
+class GuideVerdictTableTestCase(unittest.TestCase):
+    """`docs/guide.md` has a "Reading the results" table, and it was held to
+    nothing.
+
+    `VerdictTableTestCase` says in its own docstring that it checks *the
+    README's* table, and it is the only check of the kind, so the guide's drifted
+    unobserved: it carried `timing-sink`, `file-write` and `evaluation-sink` and
+    not `deserialization-sink` or `lookup-sink`. The same two tiers this branch's
+    selection table started routing readers to -- so the document told somebody
+    to run `deser`, and then had no row explaining the verdict they got back.
+
+    Asks the classes rather than a hand-kept list, like every other table check
+    here. Scoped to the verdicts a *method declares*: the run-level outcomes
+    (`blocked`, `nothing-tested`) are a different claim, and demanding them here
+    would be this test inventing a requirement rather than checking one.
+    """
+
+    GUIDE = DOCS_DIR / "guide.md"
+    HEADING = "## Reading the results"
+    CODE_RE = re.compile(r"`([^`]+)`")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reported = set()
+        for method in rcekit.DETECTION_METHODS.values():
+            cls.reported |= {method.tier} | set(method.also_reports)
+        body = cls.GUIDE.read_text(encoding="utf-8")
+        start = body.index(cls.HEADING)
+        end = body.index("\n## ", start + len(cls.HEADING))
+        cls.rows = [row_cells(line.strip("|"))[0]
+                    for line in body[start:end].splitlines()
+                    if line.startswith("|")]
+
+    def test_the_table_has_rows_at_all(self):
+        # Without this the check below passes vacuously the moment the heading
+        # moves or the rows stop matching.
+        self.assertGreaterEqual(len(self.rows), 6, self.rows)
+
+    def test_every_verdict_a_method_reports_has_a_row(self):
+        """A row may group several verdicts -- they share one instruction, and
+        splitting them would be five rows saying the same thing. So the check
+        reads every verdict named in the leading cell, wherever it sits."""
+        listed = {token for cell in self.rows
+                  for token in self.CODE_RE.findall(cell)}
+        self.assertEqual(
+            sorted(self.reported - listed), [],
+            "verdicts a method reports with no row in the guide's results "
+            "table; a reader routed to that method cannot look up what came "
+            "back")
+
+
+class SelectionSummaryTestCase(unittest.TestCase):
+    """The paragraph under the method-selection table summarises its verdicts,
+    and a summary that says "the rest" sweeps up the one verdict that must not
+    be swept.
+
+    It read: "Only the first four prove execution. The rest are proven findings
+    about something else." Five rows down from a row whose own `Reaches` cell
+    says `needs-review`, and 220 lines from the verdict table calling that one
+    "not proof on its own" -- so the page classified a listener-free `deser`
+    fingerprint as proven, which is the overstatement the whole tier rework
+    exists to prevent.
+
+    The structural cause is the blanket phrase, so the guarantee is that the
+    paragraph **names every verdict the table reaches**. An enumeration cannot
+    quietly include a verdict it does not mention, and a tier added to the table
+    later cannot be absorbed into a group claim. `needs-review` is then derived
+    from the one closing line in `NON_EXECUTION_SECTIONS` that disclaims proof,
+    and checked not to share a sentence with the claim of it.
+    """
+
+    ROW_RE = re.compile(r"^\|(.+)\|\s*$")
+    CODE_RE = re.compile(r"`([^`]+)`")
+    TABLE_HEADING = "### Which method, and what it needs from you"
+    VERDICT_COLUMN = "Reaches"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.body = README.read_text(encoding="utf-8")
+        cls.verdicts = set(rcekit.VERDICT_PRIORITY)
+        # The verdict the report itself tells the operator not to report as
+        # proven, read off the closing line rather than named here. If that
+        # wording moves, this set empties and the floor below fails loudly
+        # instead of the check passing on nothing.
+        cls.candidates = {verdict for verdict, _heading, closing, _compact
+                          in rcekit.NON_EXECUTION_SECTIONS
+                          if "not proof" in closing}
+
+    def _section(self):
+        """The selection table and the prose under it, up to the next heading."""
+        start = self.body.index(self.TABLE_HEADING)
+        end = self.body.index("\n### ", start + len(self.TABLE_HEADING))
+        return self.body[start:end]
+
+    def _table_verdicts(self, section):
+        rows, header = [], None
+        for line in section.splitlines():
+            match = self.ROW_RE.match(line)
+            if not match:
+                continue
+            cells = row_cells(match.group(1))
+            if cells[-1] == self.VERDICT_COLUMN:
+                header = cells
+                continue
+            if header and not set(cells[0]) <= set("- :"):
+                rows.append(dict(zip(header, cells)))
+        return {token for row in rows
+                for token in self.CODE_RE.findall(row[self.VERDICT_COLUMN])
+                if token in self.verdicts}
+
+    def _summary(self, section):
+        """The prose after the table -- every line that is not a table row."""
+        return " ".join(line for line in section.splitlines()
+                        if not line.startswith("|")
+                        and not line.startswith("#"))
+
+    def test_exactly_one_verdict_disclaims_proof(self):
+        # The oracle for the sentence check below. Derived, so it has to be
+        # asserted: an empty set would make that check pass without looking.
+        self.assertEqual(
+            sorted(self.candidates), ["needs-review"],
+            "the verdict whose closing line disclaims proof is no longer "
+            f"needs-review alone: {sorted(self.candidates)}")
+
+    def test_the_summary_names_every_verdict_the_table_reaches(self):
+        section = self._section()
+        reached = self._table_verdicts(section)
+        self.assertTrue(reached, "the selection table's verdict column was not read")
+        named = {token for token in self.CODE_RE.findall(self._summary(section))
+                 if token in self.verdicts}
+        self.assertEqual(
+            sorted(reached - named), [],
+            "the paragraph under the selection table summarises verdicts it "
+            "never names, so a reader cannot tell which claim covers which "
+            "result")
+
+    def test_a_verdict_that_disclaims_proof_does_not_share_a_sentence_with_it(self):
+        summary = self._summary(self._section())
+        for sentence in re.split(r"(?<=[.!?])\s+", summary):
+            if "proven" not in sentence and "prove " not in sentence:
+                continue
+            for candidate in self.candidates:
+                with self.subTest(sentence=sentence[:60], verdict=candidate):
+                    self.assertNotIn(
+                        candidate, sentence,
+                        f"the summary puts `{candidate}` in a sentence claiming "
+                        "proof, and the report says outright not to report it "
+                        "as proven")
+
+
 class BlindSinkAdviceTranscriptTestCase(unittest.TestCase):
     """The guide quotes the tool's own routing advice, and this one *is*
     reproducible.
