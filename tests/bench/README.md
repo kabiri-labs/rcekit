@@ -277,13 +277,20 @@ does, and the ProcessBuilder body reaches a shell on 1.3.0 too — both measured
 against the patched image rather than assumed.
 
 The shell case **must** use the ProcessBuilder body, and writing it against the
-plain endpoint would have produced a green case reproducing a false claim. On the
-plain endpoint `reflected` also confirms, and wrongly: Groovy reads `; expr A + B`
-as the command expression `expr(A + B)`, computes the sum, fails to resolve the
-method and echoes the result in its error. No shell runs. What earns the
-OS-command class is not the arithmetic but the substitution collapse — the
-response carrying `$(echo TAG)` resolved, at HTTP 200, which only a POSIX shell
-produces.
+plain endpoint would have produced a green case reproducing a false claim. Until
+3.0.1 `reflected` confirmed on the plain endpoint too, and wrongly: Groovy reads
+`; expr A + B` as the command expression `expr(A + B)`, computes the sum, fails
+to resolve the method and echoes the result in its error, with no shell
+anywhere. That probe shape is retired, and
+[`hugegraph-gremlin-reflected-class`](cases/hugegraph-gremlin-reflected-class.json)
+is the case that keeps it retired — same request, same endpoint, `reflected`
+required to come back `negative`, and it fails with the shape restored.
+
+What earns the OS-command class here is not the arithmetic but the substitution
+collapse — the response carrying `$(echo TAG)` resolved, at HTTP 200, which only
+a POSIX shell produces. Measured on this target with every shape mapped: the
+ProcessBuilder body confirms through 4 tag-bracketed shapes, the plain endpoint
+through none.
 
 Readiness cost three attempts and is worth writing down. HugeGraph runs two
 servers: the REST API on 8080, and the Gremlin Server — which every probe here

@@ -58,12 +58,14 @@
     "delay here to find and a blind OS-command signal must not appear. Measured:",
     "every separator came back between 0.02s and 0.05s.",
     "That distinction is what makes this control meaningful rather than",
-    "decorative. On this same endpoint `reflected` DOES confirm, and wrongly:",
-    "Groovy reads `; expr A + B` as the command expression `expr(A + B)`,",
-    "computes the sum, fails to resolve the method and echoes the result in its",
-    "error. No shell runs. So the OS-command class is reachable here only",
-    "through the ProcessBuilder body in hugegraph-gremlin-shell, and this",
-    "control is what pins the difference between a method that stays honest on",
-    "an expression evaluator and one that does not."
+    "decorative. It is not the only class boundary on this endpoint: until",
+    "3.0.1 `reflected` confirmed here too, and wrongly, because Groovy reads",
+    "`; expr A + B` as the command expression `expr(A + B)` -- it computes the",
+    "sum, fails to resolve the method and echoes the result in its error, with",
+    "no shell anywhere. Retiring that probe shape fixed it, and",
+    "hugegraph-gremlin-reflected-class is the case that holds it: same request,",
+    "same endpoint, `reflected` required to come back `negative`.",
+    "So the OS-command class is reachable on this target only through the",
+    "ProcessBuilder body in hugegraph-gremlin-shell."
   ]
 }
