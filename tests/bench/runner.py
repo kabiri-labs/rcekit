@@ -549,36 +549,70 @@ PROBLEM_OUTPUT_LINES = 6
 PROBLEM_OUTPUT_CHARS = 600
 
 
+def diagnostic_tail(text: Optional[str]) -> str:
+    """The end of one stream's output.
+
+    Three reductions, and every one of them keeps the END, because that is
+    where a container-runtime failure puts the thing an operator can act on::
+
+        failed to set up container networking: driver failed programming
+        external connectivity on endpoint ...: Bind for 0.0.0.0:8080 failed:
+        port is already allocated
+
+    The leaf cause is last. So: the last few lines, starting from the one that
+    announces an error, and -- when that is still too long -- the last
+    characters rather than the first.
+
+    The character budget used to cut the other way. A real clash measured 273
+    characters with the leaf starting at 218, which fits; three services
+    failing in one `up` comes to about 825, and cutting from the left threw
+    away exactly the part naming the port. The next target in the plan has
+    four services.
+
+    The error-line cut is a starting point, not a parser. When nothing says
+    `error` the whole tail is kept, because a failure that does not announce
+    itself is the one worth reading in full."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = lines[-PROBLEM_OUTPUT_LINES:]
+    for index, line in enumerate(lines):
+        if "error" in line.lower():
+            lines = lines[index:]
+            break
+    detail = " | ".join(lines)
+    if len(detail) > PROBLEM_OUTPUT_CHARS:
+        detail = "..." + detail[-PROBLEM_OUTPUT_CHARS:]
+    return detail
+
+
 def failure_detail(completed: "subprocess.CompletedProcess") -> str:
-    """The last few lines a failed command actually printed.
+    """What a failed command said, from whichever stream said it.
 
-    Prefers stderr and falls back to stdout, because compose splits itself
-    across both and which one carries the reason depends on the failure.
+    This used to read stderr and fall back to stdout only when stderr was
+    empty, while claiming to handle compose splitting itself across both. A
+    deprecation warning on stderr was therefore enough to hide a reason sitting
+    on stdout -- the same swallowing this whole helper exists to stop, one
+    level in.
 
-    Where a line announces an error, the detail starts there. Measured against
-    a real port clash: compose puts five lines of `Creating` / `Created` /
-    `Starting` ahead of `Error response from daemon: ... Bind for
-    0.0.0.0:8080 failed: port is already allocated`, and keeping the tail alone
-    carried the reason buried in progress chatter. This is a starting point,
-    not a parser -- when nothing says `error`, the whole tail is kept, because
-    a failure that does not announce itself is exactly the one worth reading in
-    full."""
-    for stream in (completed.stderr, completed.stdout):
-        text = (stream or "").strip()
-        if not text:
-            continue
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        lines = lines[-PROBLEM_OUTPUT_LINES:]
-        for index, line in enumerate(lines):
-            if "error" in line.lower():
-                lines = lines[index:]
-                break
-        detail = " | ".join(lines)
-        if len(detail) > PROBLEM_OUTPUT_CHARS:
-            detail = detail[:PROBLEM_OUTPUT_CHARS] + "..."
-        if detail:
-            return detail
-    return ""
+    Guessing is what went wrong, so it guesses as little as possible: when
+    exactly one stream announces an error, that one is the answer; otherwise
+    both are reported, labelled. A `compose` entry may be any argv a case
+    chooses, including a wrapper with its own ideas about which stream is for
+    what, and the cost of naming both is some progress chatter, while the cost
+    of picking wrong is the reason."""
+    tails = [(name, diagnostic_tail(stream)) for name, stream in
+             (("stderr", completed.stderr), ("stdout", completed.stdout))]
+    tails = [(name, tail) for name, tail in tails if tail]
+    if not tails:
+        return ""
+    announced = [(name, tail) for name, tail in tails if "error" in tail.lower()]
+    if len(announced) == 1:
+        return announced[0][1]
+    if len(tails) == 1:
+        return tails[0][1]
+    return " || ".join(f"{name}: {tail}" for name, tail in tails)
 
 
 def bring_up(compose_case: Dict[str, Any], cwd: Optional[Path],

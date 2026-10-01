@@ -1076,6 +1076,82 @@ class ComposeFailureDetailTestCase(unittest.TestCase):
         self.assertLess(len(problem), 1000, "the tail was not trimmed")
 
 
+    # --- the promise, not the implementation --------------------------------
+    #
+    # The tests above this point were written from what the code did, and that
+    # is how two defects got through. `test_stdout_is_read_when_stderr_is_silent`
+    # pins the *condition the implementation happened to use* -- stderr empty --
+    # while the docstring promised something wider: that the reason is found
+    # whichever stream carries it. A warning on stderr was enough to break the
+    # promise while leaving that test green.
+    #
+    # These are written from the promise. Each one fails on the code as it
+    # stood when the review arrived.
+
+    def test_the_reason_is_found_whichever_stream_carries_it(self):
+        """The promise, stated directly: a stream that announces an error is
+        the answer, even when the other stream is not silent.
+
+        A deprecation warning on stderr used to be enough to hide this -- the
+        same swallowing the whole helper exists to stop, one level in."""
+        _started, problem = runner.bring_up(
+            self._case(err='time="..." level=warning msg="deprecated option"',
+                       out="Error response from daemon: " + self.PORT),
+            None)
+        self.assertIn(self.PORT, problem,
+                      "a warning on stderr hid the reason on stdout")
+
+    def test_a_long_single_line_keeps_the_leaf_cause(self):
+        """Container-runtime errors read outside-in and the actionable part is
+        last: `failed to set up networking: driver failed ...: Bind for
+        0.0.0.0:8080 failed: port is already allocated`.
+
+        A real clash measured 273 characters with the leaf starting at 218,
+        which fits the budget; three services failing in one `up` comes to
+        about 825, and the budget used to cut from the left -- throwing away
+        exactly the part that names the port. The next target in the plan has
+        four services."""
+        padding = "x" * (runner.PROBLEM_OUTPUT_CHARS + 100)
+        line = (f"Error response from daemon: failed to set up container "
+                f"networking: {padding}: {self.PORT}")
+        detail = runner.diagnostic_tail(line)
+        self.assertTrue(detail.endswith(self.PORT),
+                        f"the leaf cause was truncated away: ...{detail[-80:]}")
+        self.assertLessEqual(len(detail), runner.PROBLEM_OUTPUT_CHARS + 3)
+
+    def test_neither_stream_announcing_reports_both_rather_than_guessing(self):
+        """Compose does not always use the word. `Bind for ... failed: port is
+        already allocated` names no error, so there is nothing to choose on --
+        and choosing anyway is what put a warning in front of a reason."""
+        _started, problem = runner.bring_up(
+            self._case(err="warning: deprecated option", out=self.PORT), None)
+        self.assertIn(self.PORT, problem)
+        self.assertIn("warning: deprecated option", problem)
+
+    def test_one_stream_announcing_is_not_padded_with_the_other_s_chatter(self):
+        """The real shape of a compose failure: build progress on stdout, the
+        reason on stderr. Reporting both here would bury the reason in layer
+        names, which is the noise the error-line cut exists to remove."""
+        _started, problem = runner.bring_up(
+            self._case(out="#10 resolving provenance for metadata file\n#10 DONE 0.0s",
+                       err=f"Container c Starting\nError response from daemon: {self.PORT}"),
+            None)
+        self.assertIn(self.PORT, problem)
+        self.assertNotIn("resolving provenance", problem)
+        self.assertNotIn("stdout:", problem)
+
+    def test_both_streams_announcing_names_which_said_what(self):
+        """Two services failing for different reasons, one message on each
+        stream. Nothing here can rank them, so both are kept and labelled."""
+        _started, problem = runner.bring_up(
+            self._case(err="Error response from daemon: " + self.POOL,
+                       out="Error response from daemon: " + self.PORT), None)
+        self.assertIn(self.POOL, problem)
+        self.assertIn(self.PORT, problem)
+        self.assertIn("stderr:", problem)
+        self.assertIn("stdout:", problem)
+
+
 class DurationReportingTestCase(unittest.TestCase):
     """The runner prints how long it took.
 

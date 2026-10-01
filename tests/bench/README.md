@@ -312,6 +312,19 @@ Measured against a real clash rather than a fixture: two compose projects for
 `struts2-s2-001` brought up against the same 8080, with the resulting stderr
 kept verbatim in the test that pins the trimming.
 
+Both streams are read, and every reduction keeps the **end** -- the last few
+lines, from the one that announces an error, and the last characters when that
+is still too long. Container-runtime errors read outside-in and the actionable
+part is last, so cutting from the left discards the thing worth having: the
+real clash above measured 273 characters with `Bind for ...` starting at 218,
+and three services failing in one `up` comes to about 825.
+
+Where exactly one stream announces an error that one is reported, which keeps
+the common case free of build chatter; where neither does or both do, both are
+reported and labelled. A `compose` entry may be any argv a case chooses, so
+the cost of naming both is some noise, while the cost of picking wrong is the
+reason itself.
+
 The runner also prints how long each case and the whole run took, and
 line-buffers its output. Both were worked around from outside -- a figure read
 off a file's timestamps and typed into this document by hand, and a remembered
