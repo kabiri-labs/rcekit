@@ -319,11 +319,20 @@ part is last, so cutting from the left discards the thing worth having: the
 real clash above measured 273 characters with `Bind for ...` starting at 218,
 and three services failing in one `up` comes to about 825.
 
-Where exactly one stream announces an error that one is reported, which keeps
-the common case free of build chatter; where neither does or both do, both are
-reported and labelled. A `compose` entry may be any argv a case chooses, so
-the cost of naming both is some noise, while the cost of picking wrong is the
-reason itself.
+**No stream is ever dropped**, and every stream that said anything is
+reported, labelled when there is more than one. Two earlier versions chose a
+single stream instead and both lost the reason: first stderr unless it was
+empty, which let a deprecation warning hide a reason on stdout; then whichever
+stream's tail contained `error`, which let `warning: ERROR_LOG variable is not
+set` hide `Bind for 0.0.0.0:5005 failed: port is already allocated` -- a line
+containing no such word.
+
+A `compose` entry is whatever argv a case gives, so no rule can tell from the
+text which stream matters, and a rule that discards on being wrong loses the
+thing this exists to carry. What drove both attempts was keeping the common
+failure free of build chatter, which is a preference that was allowed to
+outrank the guarantee; measured, that chatter is about 60 characters and the
+reason still comes first.
 
 The runner also prints how long each case and the whole run took, and
 line-buffers its output. Both were worked around from outside -- a figure read
