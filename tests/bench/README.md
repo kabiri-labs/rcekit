@@ -298,6 +298,25 @@ each one had to be reproduced by hand to find out. For a harness whose whole job
 is not to mistake one failure for another, "the target could not start" and "the
 tool did not confirm" should not look alike.
 
+**Fixed.** `bring_up` captured compose's output and read only the return code
+off it, so the reason was in hand and thrown away. A failure now carries the
+last lines compose printed, starting from the one that announces the error:
+
+```
+[bench]   -> FAIL
+  compose up failed (exit 1): Error response from daemon: failed to set up
+  container networking: Bind for 0.0.0.0:8080 failed: port is already allocated
+```
+
+Measured against a real clash rather than a fixture: two compose projects for
+`struts2-s2-001` brought up against the same 8080, with the resulting stderr
+kept verbatim in the test that pins the trimming.
+
+The runner also prints how long each case and the whole run took, and
+line-buffers its output. Both were worked around from outside -- a figure read
+off a file's timestamps and typed into this document by hand, and a remembered
+`python -u` -- and neither should have needed remembering.
+
 ### `write` has one now, and it cost two fixes in the tool
 
 `tomcat-cve-2017-12615` is the canonical shape for this method and the one its
