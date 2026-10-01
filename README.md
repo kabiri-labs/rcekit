@@ -51,25 +51,15 @@ method could reach in principle.
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
 control. All 11 rows do; `python tests/bench/runner.py --all` was last green at
-**3.0.0** (2026-09-30), 9/9 cases in 55m50s. That is a point-in-time claim, not
-a continuous one: the benchmark runs on a cadence, not on every change. A row
-reading *as a control* is reproduced by the control half of another row's case,
-which is the half that describes it.
+**3.0.0** (2026-09-30), 9/9 cases in 55m50s. That is a point-in-time claim: the
+benchmark runs on a cadence, not on every change.
 
-3.0.0 renamed the verdict every case expects, so every one of the 9 was re-run
-under the new names and all 9 passed — the `Verdict` column above is what that
-run reported, not a rename applied to an older result.
-
-What each run's **control** half reported is not in this table, and two of them
-are the reason the run was worth doing. The full 9 rows, controls included, are
-in [`tests/bench/README.md`](tests/bench/README.md#status); the two rows here
-reading *as a control* are the `time` halves of the Webmin and OpenTSDB cases,
-so their `timing-sink` is a control result shown in the `Verdict` column.
-
-Those two are the ones worth having: on a Webmin 1.910 and an OpenTSDB 2.4.1
-that are genuinely vulnerable, `time` reaches its own proven tier and still does
-not reach `executed`. That is the tier ceiling holding against real software
-rather than against a fixture.
+The controls are not in this table and two of them are the point. On a Webmin
+1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
+own proven tier and still does not reach `executed` — a ceiling holding against
+real software rather than against a fixture. Those two are the rows reading *as
+a control* above. The full 9, controls included, are in
+[`tests/bench/README.md`](tests/bench/README.md#status).
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
 HugeGraph rows and the fastjson row are `—` deliberately: HugeGraph 1.3.0 answers
@@ -173,12 +163,25 @@ rcekit --acknowledge-consent \
 
 ```
 [detect] methods: reflected, eval
-[detect] sent 13 probes (13 result(s)): executed=4, negative=9
+[detect] sent 1430 probes (1430 result(s)): executed=17, negative=1413
 
-[detect] EXECUTED (4):
-  [reflected/unix/raw] ; echo RKYZRIP$((540141+314681))RKFWVFS$(echo RKBWOOC)RKYZRIP
-      (target computed 'RKYZRIP854822RKFWVFSRKBWOOCRKYZRIP' — random operands, absent from control)
+[detect] EXECUTED (17):
+  [reflected/unix/raw] | awk 'BEGIN{print "RKDXCXU" 206334+786088 "RKLMVXZ"}'
+      (target computed 'RKDXCXU992422RKLMVXZ' (random operands, absent from control))
 ```
+
+**That is 1430 requests, and the number is the corpus, not the target.** With no
+`--environments`, RCEKit sweeps every sink dialect it knows — POSIX, `cmd.exe`,
+PowerShell, and the language runtimes that reach a shell — because which one is
+behind the parameter is the thing you do not know yet. 17 of them computed the
+value here, which is one sink answering in seventeen dialects, not seventeen
+findings.
+
+Narrow it when you already know something. Against the same target, the same
+command plus `--environments unix` sends 177 requests; adding `--contexts raw`
+as well sends 32. `--max-payloads` caps the total outright whatever else is set.
+All three are worth reaching for before pointing this at something you do not
+own.
 
 ### From a captured request — the shape most real targets have
 
@@ -194,12 +197,13 @@ rcekit --acknowledge-consent \
 ```
 
 ```
-[detect] sent 4 probes (4 result(s)): executed=3, negative=1
-
-[detect] EXECUTED (3):
-  [reflected/unix/raw] ; echo RKHWNHK$((114157+752773))RKXGFIH$(echo RKHSEIF)RKHWNHK
-      (target computed 'RKHWNHK866930RKXGFIHRKHSEIFRKHWNHK' — random operands, absent from control)
+[detect] EXECUTED (17):
+  [reflected/unix/raw] | awk 'BEGIN{print "RKXJTON" 570247+922635 "RKJCVJT"}'
+      (target computed 'RKXJTON1492882RKJCVJT' (random operands, absent from control))
 ```
+
+Same corpus, so the same scale as above — what changes is that the session
+cookie, the content type and the body go with every probe.
 
 The method, path, headers, body and cookies are reused as captured, and each
 value is encoded for the context it lands in — a JSON leaf, a form field and a
@@ -420,15 +424,10 @@ python rcekit.py --acknowledge-consent -r request.txt -p host --methods reflecte
 A tool reports what it found. RCEKit also reports **what it refused to believe** —
 `inconclusive` is a verdict of its own, for anything it cannot attribute to
 execution: evidence that showed up in the payload-free control too, and equally
-a measurement the run never finished gathering:
+a measurement the run never finished gathering. Either would have been someone
+else's finding.
 
-```
-[detect] methods: reflected, eval
-[detect] sent 13 probes (13 result(s)): executed=0, inconclusive=2, negative=11
-```
-
-Those two would have been someone else's finding. Five mechanisms produce that
-verdict, and they run on every confirmation:
+Five mechanisms produce that verdict, and they run on every confirmation:
 
 - **A payload-free control request.** Evidence must be present *with* the payload
   and absent *without* it. Anything in both is `inconclusive`, not a finding.
