@@ -170,18 +170,33 @@ rcekit --acknowledge-consent \
       (target computed 'RKDXCXU992422RKLMVXZ' (random operands, absent from control))
 ```
 
-**That is 1430 requests, and the number is the corpus, not the target.** With no
-`--environments`, RCEKit sweeps every sink dialect it knows — POSIX, `cmd.exe`,
-PowerShell, and the language runtimes that reach a shell — because which one is
-behind the parameter is the thing you do not know yet. 17 of them computed the
-value here, which is one sink answering in seventeen dialects, not seventeen
-findings.
+**That is 1430 requests against this target.** With no `--environments`, RCEKit
+sweeps every sink dialect it knows — POSIX, `cmd.exe`, PowerShell, and the
+language runtimes that reach a shell — because which one is behind the parameter
+is the thing you do not know yet. 17 of them computed the value, which is one
+sink answering in seventeen dialects, not seventeen findings.
+
+The target moves the number: at the default `--confirm-depth first`, a carrier
+stops once it confirms, so a sink that answers sends **fewer** probes than one
+that never does. The same command against an endpoint that only echoes sent
+1684.
 
 Narrow it when you already know something. Against the same target, the same
 command plus `--environments unix` sends 177 requests; adding `--contexts raw`
-as well sends 32. `--max-payloads` caps the total outright whatever else is set.
-All three are worth reaching for before pointing this at something you do not
-own.
+as well sends 32.
+
+**`--max-payloads` is not a total.** It is a probe budget spent *per injection
+point, per question* — execution, lookup and deserialization are three
+questions — and the payload-free control each point sends is outside it. With
+`--auto-params all`, `--max-payloads 5` across 3 points and 2 questions sent 30
+probes, not 5. Read the cost line, which prints before any traffic and says
+which multiplier it is applying:
+
+```
+[detect] cost: 3 points x ~10 probes (capped by --max-payloads 5 per question,
+         2 question(s) asked) = at least 36 requests (each point carries its
+         own payload-free control)
+```
 
 ### From a captured request — the shape most real targets have
 
