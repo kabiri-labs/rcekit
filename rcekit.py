@@ -8430,7 +8430,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "--sink-raw, which sends bare commands.")
     parser.add_argument("--probe-depth", choices=["quick", "full"], default="full",
                         help="(--methods) How many probe shapes to try per sink. 'full' (default) also "
-                             "sends the substitution-free (awk / bare expr) and comment-terminated "
+                             "sends the substitution-free (awk) and comment-terminated "
                              "variants, which reach sinks that strip '$(' and backticks, filter command "
                              "words, or append a redirect after the injection point — roughly twice the "
                              "requests. 'quick' sends only the canonical probes, for rate-limited targets "

@@ -9,6 +9,7 @@ dependency.
 import argparse
 import html
 import os
+import random
 import re
 import subprocess
 import sys
@@ -71,6 +72,11 @@ DENIAL_RE = re.compile(
     r"`?(?:confirm\w*|execut\w*)`?"
     r"|\bunconfirm\w*",
     re.IGNORECASE)
+
+
+# The command a probe runs, after any separator it breaks out with. Used to ask
+# whether the shape a help string names is one the generator really builds.
+COMMAND_WORD_RE = re.compile(r"^[\s;|&]*([A-Za-z_][\w.-]*)")
 
 
 def row_cells(row_body):
@@ -1229,6 +1235,61 @@ class CLIDocumentationTestCase(unittest.TestCase):
             if not re.search(rf"(?<![\w-]){re.escape(name)} \(", help_text)
         )
         self.assertFalse(missing, f"--methods help does not name {missing}")
+
+    def test_the_probe_depth_help_names_only_shapes_full_actually_sends(self):
+        """The help promised a probe the generator had stopped building.
+
+        It read "the substitution-free (awk / bare expr) ... variants" after
+        3.0.1 retired the bare `expr` shape, whose expected value was the sum
+        alone and which therefore confirmed on anything that evaluates
+        arithmetic. An operator reads this one sentence to decide whether a
+        sink that strips `$(` is reachable at `full` at all, so a name here is
+        a claim that a probe of that shape goes out.
+
+        Held to the probes rather than to a reviewer's eye, in the same shape
+        as the two checks above: the names come out of the help, and each one
+        has to be carried by a payload `full` builds and by none `quick`
+        builds -- the second half being what "full also sends" asserts.
+        """
+        help_text = self._option_help("--probe-depth")
+        self.assertIn("probe shapes", help_text)
+        self.assertNotIn("--oob-host", help_text)
+        named = re.search(r"substitution-free \(([^)]*)\)", help_text)
+        self.assertIsNotNone(
+            named, f"--probe-depth help names no substitution-free shape: {help_text}")
+        words = [part.strip().split()[-1] for part in re.split(r"[/,]", named.group(1))
+                 if part.strip()]
+        self.assertTrue(words, f"no shape name parsed from {named.group(1)!r}")
+
+        generator = rcekit.RCEKit()
+        records = list(generator.generate_payload_records(
+            mode="detection", selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"]))
+        self.assertTrue(records, "no unix/raw record to build probes from")
+        record = records[0]
+        commands = {}
+        for depth in ("quick", "full"):
+            method = rcekit.ReflectedMath(generator, {"probe_depth": depth})
+            built = [p.payload for p in method.build_probes(record, random.Random(11))]
+            self.assertTrue(built, f"no probes built at --probe-depth {depth}")
+            # The *command word*, not a substring. `expr` occurs inside the
+            # canonical backtick shape that `quick` already sends, so a
+            # substring test blamed the stale name on `quick` rather than on
+            # the shape nobody builds -- a failure that points at the wrong
+            # thing is most of the way to the wrong fix.
+            commands[depth] = {m.group(1) for m in
+                               (COMMAND_WORD_RE.match(payload) for payload in built) if m}
+            self.assertIn("echo", commands[depth], commands[depth])
+        for word in words:
+            with self.subTest(shape=word):
+                self.assertIn(
+                    word, commands["full"],
+                    f"--probe-depth help names {word!r} as a shape `full` sends, and "
+                    f"no probe it builds runs it; `full` runs {sorted(commands['full'])}")
+                self.assertNotIn(
+                    word, commands["quick"],
+                    f"--probe-depth help offers {word!r} as something `full` adds, "
+                    "but `quick` already sends it")
 
     def test_help_output_was_parsed(self):
         # A guard on the test itself: if argparse ever changes its help layout,
