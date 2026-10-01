@@ -294,21 +294,24 @@ Two methods still reach **`executed`** there, and which one you can use depends
 on what you have:
 
 ```bash
-# The target can reach the internet, and you own a domain delegated to you.
+# The target can reach something of yours. An address is enough: `oob` carries
+# the token in a URL path, so the HTTP channel alone can reach `executed`.
 rcekit --acknowledge-consent \
   --verify-url "https://target.example/render?q=FUZZ" \
-  --methods oob --oob-host oob.yourdomain.example --listen-dns-port 53 \
+  --methods oob --oob-host 203.0.113.9 \
   --verify-active-risk intrusive
 ```
 
-Keep `--listen-dns-port 53` — it needs root, and without it RCEKit says so and
-sends the DNS shapes anyway, where they **silently never fire**: a resolver only
-reaches the authority for your domain on port 53. The HTTP shapes still work, so
-a run without it is narrower than it looks rather than broken.
+Give it a **delegated name** and `--listen-dns-port 53` instead when you have
+them, and the DNS shapes come alive too — those often cross egress filtering
+that blocks outbound HTTP. They cannot work off an address: a resolver reaches
+the authority for a name on port 53 only, and RCEKit says so rather than sending
+probes that silently never fire. The benchmark's OpenTSDB case runs the plain
+address form and reaches `executed`.
 
 ```bash
-# No egress at all — but somewhere the target writes and also serves.
-# Writes a random token, fetches it back, and prints a cleanup line per finding.
+# No egress at all — but something writable you can also read back.
+# Writes a random token, fetches it, and prints a cleanup line per finding.
 rcekit --acknowledge-consent \
   -r search.req -p q \
   --methods file \
@@ -316,6 +319,11 @@ rcekit --acknowledge-consent \
   --file-read-url "https://target.example/uploads/{name}" \
   --verify-active-risk stateful
 ```
+
+The read-back does not have to be a web root. `--file-read-url` takes `{name}`
+for a handler that wants a filename, and `{path}` or `{path_enc}` for one that
+takes the whole server-side path — so a writable `/tmp` plus an LFI parameter,
+a download handler or an export endpoint is enough.
 
 With neither, `--methods time` still measures a controlled delay series — but it
 reports `timing-sink`, which proves the target honoured a delay and not that a
@@ -585,12 +593,12 @@ which is the same method fighting a filter, a quote or an encoding.
 | What you can observe | Method | You must already have | Reaches |
 |---|---|---|---|
 | Output comes back in the response | `reflected`, `eval` | nothing | **`executed`** |
-| Nothing comes back; the target has egress | `oob` | a delegated domain, root for port 53 | **`executed`** |
-| Nothing comes back, no egress; somewhere the target writes *and* serves | `file` | that path and its URL | **`executed`** |
+| Nothing comes back; the target has egress | `oob` | a listener it can reach — a bare IP is enough. The DNS shapes also want a delegated name and port 53 | **`executed`** |
+| Nothing comes back, no egress; somewhere writable you can also read back | `file` | the write path, and any URL that returns it — a web root, an LFI parameter, a download or export handler | **`executed`** |
 | Your own request stores a file | `write` | the URL the file lands at | **`executed`** |
 | Nothing comes back and none of the above | `time` | nothing | `timing-sink` |
 | The sink interpolates `${…}` rather than shelling out | `lookup` | a delegated domain | `lookup-sink` |
-| The parameter carries a serialized object | `deser` | nothing; the DNS gadget wants the listener | `deserialization-sink` |
+| The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
 | The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
 
 Only the first four prove execution. The rest are proven findings about
