@@ -185,12 +185,22 @@ Narrow it when you already know something. Against the same target, the same
 command plus `--environments unix` sends 177 requests; adding `--contexts raw`
 as well sends 32.
 
-**`--max-payloads` is not a total.** It is a probe budget spent *per injection
-point, per question* — execution, lookup and deserialization are three
-questions — and the payload-free control each point sends is outside it. With
-`--auto-params all`, `--max-payloads 5` across 3 points and 2 questions sent 30
-probes, not 5. Read the cost line, which prints before any traffic and says
-which multiplier it is applying:
+**`--max-payloads` means two different things, and both will surprise you once.**
+
+On a single point — a `--verify-url`, or `-r` without `--auto-params` — it is
+one allowance **shared by every method you selected**. `--methods
+reflected,deser --max-payloads 5` sends 5 probes in total, and `reflected` can
+spend all five: `deser` then never runs, and the run reports nothing about
+deserialization because it never asked. That is the shape to watch, because a
+budget set for politeness quietly becomes a coverage gap.
+
+Under `--auto-params` it is the opposite — a budget *per injection point, per
+question*, where execution, lookup and deserialization are three questions, and
+each point's payload-free control sits outside it. Measured: `--max-payloads 5`
+across 3 points and 2 questions sent 30 probes, not 5.
+
+So read the cost line. It prints before any traffic and names the multiplier it
+is applying:
 
 ```
 [detect] cost: 3 points x ~10 probes (capped by --max-payloads 5 per question,
@@ -235,11 +245,16 @@ knowing before concluding a target is clean.
 ```bash
 rcekit --acknowledge-consent \
   -r search.req --auto-params all --point-order thorough \
-  --methods reflected,eval,time,lookup,deser \
+  --methods reflected,eval,time,oob,lookup,deser,boolean \
   --oob-host oob.yourdomain.example --listen-dns-port 53 \
   --verify-active-risk stateful --probe-depth full \
   --detect-json findings.json
 ```
+
+That is **7 of the 9 methods**. The two left out are the ones that need a path
+only you can supply: `file` wants somewhere writable the target also serves
+(`--file-write-path` + `--file-read-url`), and `write` wants the URL your own
+upload lands at (`--write-url-template`). Both are below.
 
 ```
 [verify] loaded request from search.req: enumerating 4 injection point(s)
@@ -267,6 +282,66 @@ allowed to break: `--verify-active-risk stateful` is the tier for a disposable
 target, not for production.
 
 No external infrastructure, no config file.
+
+### When nothing comes back
+
+The most common way to call a target clean when it is not: `reflected` and
+`eval` need the computed value rendered somewhere, and a sink that returns no
+output has nowhere to render it. A `negative` from those two is not an answer
+about the sink, only about the channel.
+
+Two methods still reach **`executed`** there, and which one you can use depends
+on what you have:
+
+```bash
+# The target can reach the internet, and you own a domain delegated to you.
+rcekit --acknowledge-consent \
+  --verify-url "https://target.example/render?q=FUZZ" \
+  --methods oob --oob-host oob.yourdomain.example --listen-dns-port 53 \
+  --verify-active-risk intrusive
+```
+
+Keep `--listen-dns-port 53` — it needs root, and without it RCEKit says so and
+sends the DNS shapes anyway, where they **silently never fire**: a resolver only
+reaches the authority for your domain on port 53. The HTTP shapes still work, so
+a run without it is narrower than it looks rather than broken.
+
+```bash
+# No egress at all — but somewhere the target writes and also serves.
+# Writes a random token, fetches it back, and prints a cleanup line per finding.
+rcekit --acknowledge-consent \
+  -r search.req -p q \
+  --methods file \
+  --file-write-path /var/www/html/uploads \
+  --file-read-url "https://target.example/uploads/{name}" \
+  --verify-active-risk stateful
+```
+
+With neither, `--methods time` still measures a controlled delay series — but it
+reports `timing-sink`, which proves the target honoured a delay and not that a
+shell ran. [Blind targets](docs/guide.md#blind-targets) and
+[No-egress targets](docs/guide.md#no-egress-targets) work each of these through.
+
+### When your own request stores the file
+
+An upload, or a `PUT` the server accepts. Nothing in the response is computed,
+so `reflected` and `eval` report `negative` against a target that is fully
+exploitable. `write` inverts the question: it stores a one-liner that *computes*
+a product, fetches the file back, and reads which of three things happened —
+the product (`executed`), the source verbatim (`file-write`, an arbitrary write
+that is served but not interpreted), or neither.
+
+```bash
+rcekit --acknowledge-consent \
+  --verify-url "https://target.example/probe.jsp/" \
+  --verify-method PUT --verify-data FUZZ --verify-body-location raw \
+  --methods write --write-url-template "https://target.example/probe.jsp" \
+  --verify-active-risk stateful
+```
+
+That is the CVE-2017-12615 shape, and it is one of the benchmark's cases.
+[Upload and write-primitive targets](docs/guide.md#upload-and-write-primitive-targets)
+covers the others.
 
 **Don't take the GIFs on trust** — [reproduce them yourself](docs/verify-it-yourself.md)
 against dockerised Webmin and Struts2 targets in about five minutes.
@@ -500,15 +575,36 @@ exploit the database.
 
 ## Find your situation
 
-Each row is a worked example in the [field guide](docs/guide.md) — the command,
-what it sends, and how to read what comes back.
+Two different questions, and they are worth keeping apart. The first is **which
+method** — what the target lets you observe decides that, and it decides how
+strong an answer you can get. The second is **getting the payload to land**,
+which is the same method fighting a filter, a quote or an encoding.
+
+### Which method, and what it needs from you
+
+| What you can observe | Method | You must already have | Reaches |
+|---|---|---|---|
+| Output comes back in the response | `reflected`, `eval` | nothing | **`executed`** |
+| Nothing comes back; the target has egress | `oob` | a delegated domain, root for port 53 | **`executed`** |
+| Nothing comes back, no egress; somewhere the target writes *and* serves | `file` | that path and its URL | **`executed`** |
+| Your own request stores a file | `write` | the URL the file lands at | **`executed`** |
+| Nothing comes back and none of the above | `time` | nothing | `timing-sink` |
+| The sink interpolates `${…}` rather than shelling out | `lookup` | a delegated domain | `lookup-sink` |
+| The parameter carries a serialized object | `deser` | nothing; the DNS gadget wants the listener | `deserialization-sink` |
+| The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
+
+Only the first four prove execution. The rest are proven findings about
+something else, and [what a verdict means](#what-a-verdict-means) is the
+difference. [Choosing methods](docs/guide.md#choosing-methods) has the costs,
+and the rows below have the worked commands.
+
+### Getting the payload to land
 
 | Situation | Go to |
 |---|---|
 | I have a URL and a parameter | [Point at a URL](docs/guide.md#point-at-a-url) |
 | I have a request saved from Burp | [Point at a captured request](docs/guide.md#point-at-a-captured-request) |
 | The app is JSON / the payload keeps getting mangled | [Landing the payload intact](docs/guide.md#landing-the-payload-intact) |
-| I don't know which class it is | [Choosing methods](docs/guide.md#choosing-methods) |
 | The sink strips `;` | [When the sink filters separators](docs/guide.md#when-the-sink-filters-separators) |
 | My input lands inside `'quotes'` | [Injecting inside quotes](docs/guide.md#injecting-inside-quotes) |
 | The sink runs my input as the whole command | [Whole-command sinks](docs/guide.md#whole-command-sinks) |

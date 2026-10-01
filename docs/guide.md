@@ -182,6 +182,8 @@ reported separately.
 | No output, but the target has egress | `oob` | one listener, no state change (see [Out-of-band callbacks](#out-of-band-callbacks)) |
 | The sink interpolates an expression rather than shelling out | `lookup` | same listener; `oob`'s probes are shell commands and a `${jndi:…}` sink runs none of them. Proves a lookup sink, **not** execution |
 | No output, but you control a web root | `file` | writes files (see [No-egress targets](#no-egress-targets)) |
+| Your own request stores a file somewhere it is served from | `write` | writes one file, then fetches it (see [Upload and write-primitive targets](#upload-and-write-primitive-targets)) |
+| The parameter takes a serialized object | `deser` | 4 payloads per ecosystem for the shape differential; the DNS gadget needs the same listener `oob` does. Proves the endpoint deserializes attacker data, **not** execution |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 | The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
 
@@ -671,12 +673,27 @@ python rcekit.py --acknowledge-consent \
 - `--verify-delay` — seconds between requests, for rate limits and for staying
   under detection thresholds.
 - `--separators` / `--contexts` / `--environments` — every narrowing cuts probes.
-- `--max-payloads` — a hard cap, sampled round-robin so the remaining probes stay
-  balanced across variants rather than all coming from one bucket.
+- `--max-payloads` — a probe budget, sampled round-robin so what survives stays
+  balanced across variants rather than all coming from one bucket. **It is not
+  always a cap on the whole run** — see below.
 - `--verify-timeout` — lower it on a fast target so dead probes fail quickly.
 
-Note that `--max-payloads` caps *generation*, so combine it with the narrowing
-flags rather than relying on it alone to pick the interesting probes.
+**`--max-payloads` means two different things.** On a single point — a
+`--verify-url`, or `-r` without `--auto-params` — it is one allowance shared by
+every method you selected, so `--methods reflected,deser --max-payloads 5` sends
+5 probes in total and `reflected` can spend all five. `deser` then never runs,
+and the run says nothing about deserialization because it never asked: a budget
+set for politeness quietly becomes a coverage gap.
+
+Under `--auto-params` it multiplies instead — the allowance is granted per
+injection point and per question, where execution, lookup and deserialization
+are three questions, and each point's payload-free control sits outside it.
+Measured: `--max-payloads 5` across 3 points and 2 questions sent 30 probes.
+
+Either way, read the cost line. It prints before any traffic and names the
+multiplier it is applying. And because the cap governs *generation*, combine it
+with the narrowing flags rather than relying on it alone to pick the interesting
+probes.
 
 ---
 
