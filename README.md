@@ -58,7 +58,7 @@ The controls are not in this table and two of them are the point. On a Webmin
 1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
 own proven tier and still does not reach `executed` — a ceiling holding against
 real software rather than against a fixture. Those two are the rows reading *as
-a control* above. The full 9, controls included, are in
+a control* above. The full 10, controls included, are in
 [`tests/bench/README.md`](tests/bench/README.md#status).
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
@@ -185,10 +185,11 @@ Narrow it when you already know something. Against the same target, the same
 command plus `--environments unix` sends 177 requests; adding `--contexts raw`
 as well sends 32.
 
-Every figure here was measured at **3.0.0**, and like the benchmark's they are
-point-in-time rather than constants. 3.0.1 retired a probe shape, which took a
-measured 44 requests per point off a comparable sink without costing a single
-confirmation.
+Every probe count in this quick start was measured at **3.0.0**, and like the
+benchmark's they are point-in-time rather than constants. 3.0.1 retired a probe
+shape, which took a measured 44 requests per point off a comparable sink —
+without costing a single confirmation, which is why the `executed` counts are
+the figures least likely to have moved.
 
 **`--max-payloads` means two different things, and both will surprise you once.**
 
@@ -268,9 +269,6 @@ upload lands at (`--write-url-template`). Both are below.
 [detect]   body param 'q': executed (1544 probes)  <-- EXECUTED
 [detect] sent 6371 probes: executed=446, negative=5925
 ```
-
-Measured at **3.0.0**, and point-in-time for the same reasons as the figures
-above: the counts depend on the sink, and 3.0.1 retired a probe shape.
 
 What each flag opens up:
 
