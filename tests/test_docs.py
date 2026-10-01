@@ -6,6 +6,7 @@ undocumented. These tests keep the published docs honest without any external
 dependency.
 """
 
+import argparse
 import html
 import os
 import re
@@ -1452,6 +1453,192 @@ class CrossReferenceTestCase(unittest.TestCase):
                         anchor, self._anchors(destination.read_text(encoding="utf-8")),
                         f"{path.name} links {target}#{anchor}, which is not a "
                         f"heading in that file")
+
+
+class BlindSinkAdviceTranscriptTestCase(unittest.TestCase):
+    """The guide quotes the tool's own routing advice, and this one *is*
+    reproducible.
+
+    `SampleTranscriptTestCase` checks transcript vocabulary and says outright
+    that it does not check reproducibility, because a report line carries probe
+    counts, tokens and ports that cannot be known from here. That reasoning
+    does not apply to `blind_sink_advice`: it is a pure function of the method
+    names and the flags already set, so the block can be compared word for
+    word instead of word-spotted.
+
+    Which matters, because the quoted block had drifted on four counts at once
+    and every vocabulary check passed. It named `--webroot DIR --web-base-url
+    URL` after the advice moved to the general flags, described `file` as
+    needing "a writable web root" after the tool started naming an LFI endpoint
+    and a download handler too, omitted the `lookup` line the tool now prints,
+    and said "confirms" -- the retired vocabulary, which slipped through
+    `RETIRED = ("confirmed",)` because the verb is spelled differently from the
+    verdict.
+
+    So the one place in the docs that reproduces the tool's method routing told
+    a no-egress reader `file` wanted a web root, which is the same wrong
+    prerequisite three table rows carried.
+    """
+
+    GUIDE = DOCS_DIR / "guide.md"
+    # The info string has to be part of the opener. Matching a bare ```\n
+    # paired every ```bash block's *closing* fence with the next opener, so the
+    # blocks came out shifted by one and the marker was in none of them -- which
+    # read as "the guide does not quote this" rather than as a broken pattern.
+    FENCE = re.compile(r"```[A-Za-z0-9_+-]*\n(.*?)```", re.DOTALL)
+    MARKER = "Methods that reach a blind sink"
+
+    @staticmethod
+    def _advice():
+        """The advice as printed for a run that set none of `file`'s flags --
+        the state the guide's block is showing."""
+        args = argparse.Namespace(webroot=None, web_base_url=None,
+                                  file_write_path=None, file_read_url=None)
+        return "\n".join(rcekit.blind_sink_advice(["reflected", "eval"], args))
+
+    @staticmethod
+    def _claims(text):
+        """Each `[detect]` line of a transcript, whitespace collapsed.
+
+        Collapsed on purpose: the tool prints one long line per claim and the
+        fence in the document wraps for width. Where the document breaks a line
+        is its own business; which words it attributes to the tool is not."""
+        joined = " ".join(text.split())
+        return [part.strip() for part in joined.split("[detect]") if part.strip()]
+
+    def _quoted_block(self):
+        for block in self.FENCE.findall(self.GUIDE.read_text(encoding="utf-8")):
+            if self.MARKER in block:
+                return block
+        return None
+
+    def test_the_guide_quotes_this_advice_at_all(self):
+        # Without this the comparison below passes vacuously the moment the
+        # fence moves or the marker is reworded, which is how a docs check dies
+        # quietly.
+        self.assertIsNotNone(
+            self._quoted_block(),
+            f"no fenced block in {self.GUIDE.name} contains {self.MARKER!r}")
+        self.assertIn(self.MARKER, self._advice(),
+                      "blind_sink_advice no longer prints the marker this test "
+                      "finds the block by")
+
+    def test_the_quoted_advice_is_what_the_tool_prints(self):
+        quoted = self._claims(self._quoted_block() or "")
+        printed = self._claims(self._advice())
+        self.assertEqual(
+            quoted, printed,
+            f"{self.GUIDE.name} shows blind-sink advice the tool does not "
+            "print; the block documents a run nobody can reproduce")
+
+
+class OobHostPrerequisiteTestCase(unittest.TestCase):
+    """What `--oob-host` has to *be* is a per-method fact, and the two tables an
+    operator picks a method from kept stating it from the common case.
+
+    `oob` has a second channel -- it carries its token in a URL path and drops
+    its DNS shapes -- so an address serves it and an ordinary HTTP listener
+    reaches `executed`. `lookup` and `deser`'s gadget have nowhere but a DNS
+    label to put a token, so both need a name delegated to the listener, and
+    `DetectionMethod.oob_needs_dns_label` is where that difference is declared.
+
+    Five rows got it wrong in both directions at once: rows demanding a
+    delegated domain for `oob`, which excludes everyone who can expose only an
+    HTTP listener, and rows for `lookup` and `deser` describing the listener as
+    the one `oob` wants, which sends somebody after an address that carries
+    nothing. Both mistakes push a reader off the only method their target
+    allowed, in the table whose entire job is to stop that.
+
+    Read off the attribute rather than listed here, so a method landing with
+    `oob_needs_dns_label = True` cannot get a row that lets a reader try an
+    address -- and so `oob` losing its URL-path channel would be caught from
+    the other side.
+    """
+
+    # (document, the table's last heading, the column naming the method, the
+    #  column stating what the operator has to supply)
+    TABLES = (
+        (README, "Reaches", "Method", "You must already have"),
+        (DOCS_DIR / "guide.md", "Cost", "Use", "Cost"),
+    )
+    ROW_RE = re.compile(r"^\|(.+)\|\s*$")
+    CODE_RE = re.compile(r"`([^`]+)`")
+    # A name delegated to the listener, in the words both documents use for it.
+    DELEGATION_RE = re.compile(r"delegated\s+(?:name|domain)", re.IGNORECASE)
+    # An address literal being enough, likewise.
+    ADDRESS_RE = re.compile(r"\b(?:IP|address)\b")
+
+    def _rows(self, path, header_ends_with):
+        """Rows of the one table whose header's last cell is
+        ``header_ends_with``, keyed by column heading.
+
+        Keyed because the column a prerequisite lives in is the point: the
+        guide's `lookup` row names `oob` in its prose, and reading a whole row
+        for method names makes that row look like one about `oob`."""
+        rows, header = [], None
+        for line in path.read_text(encoding="utf-8").splitlines():
+            match = self.ROW_RE.match(line)
+            if not match:
+                header = None
+                continue
+            cells = row_cells(match.group(1))
+            if cells[-1] == header_ends_with:
+                header = cells
+                continue
+            if header and not set(cells[0]) <= set("- :"):
+                rows.append(dict(zip(header, cells)))
+        return rows
+
+    def _methods(self, row, column):
+        return [token.strip() for token in
+                ",".join(self.CODE_RE.findall(row[column])).split(",")
+                if token.strip() in rcekit.DETECTION_METHODS]
+
+    def test_a_row_for_a_name_only_method_asks_for_a_delegated_name(self):
+        checked = 0
+        for path, last, method_col, claim_col in self.TABLES:
+            rows = self._rows(path, last)
+            self.assertTrue(rows, f"the method table in {path.name} was not found")
+            for row in rows:
+                named = [name for name in self._methods(row, method_col)
+                         if rcekit.DETECTION_METHODS[name].oob_needs_dns_label]
+                if not named:
+                    continue
+                checked += 1
+                with self.subTest(doc=path.name, methods=named):
+                    self.assertRegex(
+                        row[claim_col], self.DELEGATION_RE,
+                        f"{path.name} offers {', '.join(named)} without asking for a "
+                        "delegated name; an address carries no token for it, and the "
+                        "run builds no callback probes at all")
+        self.assertGreaterEqual(checked, 4, "no name-only rows were checked")
+
+    def test_a_row_for_a_method_an_address_serves_says_an_address_serves_it(self):
+        """The other direction, and the one three of the five rows failed.
+
+        A row here may still mention delegation -- `oob`'s DNS shapes really do
+        want a name and port 53, and they cross egress filtering the HTTP
+        channel does not -- so the requirement is not that the word be absent.
+        It is that the row say an address is enough, which is the half that was
+        missing while the row read as a hard prerequisite."""
+        checked = 0
+        for path, last, method_col, claim_col in self.TABLES:
+            for row in self._rows(path, last):
+                callers = [name for name in self._methods(row, method_col)
+                           if rcekit.DETECTION_METHODS[name].uses_oob_host]
+                if not callers or any(
+                        rcekit.DETECTION_METHODS[name].oob_needs_dns_label
+                        for name in callers):
+                    continue
+                checked += 1
+                with self.subTest(doc=path.name, methods=callers):
+                    self.assertRegex(
+                        row[claim_col], self.ADDRESS_RE,
+                        f"{path.name} never says an address serves "
+                        f"{', '.join(callers)}, which reads as requiring a delegated "
+                        "domain and rules out an HTTP-only listener that reaches "
+                        f"{rcekit.EXECUTION_TIER}")
+        self.assertGreaterEqual(checked, 2, "no address-capable rows were checked")
 
 
 if __name__ == "__main__":
