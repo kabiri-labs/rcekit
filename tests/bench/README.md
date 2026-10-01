@@ -166,8 +166,16 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: **9/9, in 55m50s, at 3.0.0**
-(2026-09-30). The three cases above were last executed as a set at 2.36.0, and
+`python tests/bench/runner.py --all` is green: **10/10, in 55m48s, at 3.0.1**
+(2026-10-01). That run is the one 3.0.1 was gated on: retiring a `reflected`
+probe shape is squarely in the "touching a method's probe construction" case for
+re-running this, and the risk it carries is a false negative on a real shell.
+None appeared — Webmin's `reflected` and `file`, Struts2's `eval`, OpenTSDB's
+`oob`, Tomcat's `write` and HugeGraph's shell body all still reach `executed`.
+The tenth case is new in 3.0.1 and exists for its control: with the retired
+shape restored it fails, reporting `executed` where it expects `negative`.
+
+The three cases above were last executed as a set at 2.36.0, and
 36 commits touched `rcekit.py` between that run and 2.45.5 — including the
 response decoding rewrite in 2.45.4, which is squarely in the "touching
 delivery" case for re-running this. None of them regressed against real

@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.0.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.0.1** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -51,8 +51,8 @@ method could reach in principle.
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
 control. All 11 rows do; `python tests/bench/runner.py --all` was last green at
-**3.0.0** (2026-09-30), 9/9 cases in 55m50s. That is a point-in-time claim: the
-benchmark runs on a cadence, not on every change.
+**3.0.1** (2026-10-01), 10/10 cases in 55m48s. That is a point-in-time claim:
+the benchmark runs on a cadence, not on every change.
 
 The controls are not in this table and two of them are the point. On a Webmin
 1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
@@ -185,6 +185,11 @@ Narrow it when you already know something. Against the same target, the same
 command plus `--environments unix` sends 177 requests; adding `--contexts raw`
 as well sends 32.
 
+Every figure here was measured at **3.0.0**, and like the benchmark's they are
+point-in-time rather than constants. 3.0.1 retired a probe shape, which took a
+measured 44 requests per point off a comparable sink without costing a single
+confirmation.
+
 **`--max-payloads` means two different things, and both will surprise you once.**
 
 On a single point — a `--verify-url`, or `-r` without `--auto-params` — it is
@@ -263,6 +268,9 @@ upload lands at (`--write-url-template`). Both are below.
 [detect]   body param 'q': executed (1544 probes)  <-- EXECUTED
 [detect] sent 6371 probes: executed=446, negative=5925
 ```
+
+Measured at **3.0.0**, and point-in-time for the same reasons as the figures
+above: the counts depend on the sink, and 3.0.1 retired a probe shape.
 
 What each flag opens up:
 
