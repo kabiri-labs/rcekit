@@ -271,6 +271,41 @@ def load_case(path: Path) -> Dict[str, Any]:
                         f"({type(exc).__name__}: {exc})")
 
 
+def format_duration(seconds: float) -> str:
+    """``55m50s`` / ``1h36m48s`` / ``33.8s``.
+
+    Written out because the README quotes a figure for how long the suite takes
+    and the runner printed none, so the number had to be measured from outside
+    the tool -- a file's timestamps -- and then typed into the document by hand.
+    A figure a document states about a program should come from the program."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes}m{secs:02d}s"
+
+
+def line_buffer_stdout(stream: Any = None) -> None:
+    """Flush this runner's output a line at a time.
+
+    A case takes minutes and the whole suite the better part of an hour. With
+    stdout redirected to a file -- which is how anyone watches a run this long
+    -- block buffering holds every line until the buffer fills, so a run that
+    is working looks identical to one that has hung. The workaround was to
+    remember `python -u` at the call site, which is a thing to remember rather
+    than a property of the program."""
+    stream = sys.stdout if stream is None else stream
+    try:
+        stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        # Not a text stream that can be reconfigured -- a StringIO under test,
+        # or a closed one. Output ordering is the only thing at stake.
+        pass
+
+
 def discover_cases(cases_dir: Path = CASES_DIR) -> List[Path]:
     return sorted(cases_dir.glob("*.json"))
 
@@ -507,18 +542,76 @@ def target_cwd(compose_case: Dict[str, Any],
     return cwd, None
 
 
+# How much of a failed command's own output to carry into the problem string.
+# Compose says what went wrong in a line or two; the rest is progress chatter
+# about layers and networks, and it is the tail that carries the reason.
+PROBLEM_OUTPUT_LINES = 6
+PROBLEM_OUTPUT_CHARS = 600
+
+
+def failure_detail(completed: "subprocess.CompletedProcess") -> str:
+    """The last few lines a failed command actually printed.
+
+    Prefers stderr and falls back to stdout, because compose splits itself
+    across both and which one carries the reason depends on the failure.
+
+    Where a line announces an error, the detail starts there. Measured against
+    a real port clash: compose puts five lines of `Creating` / `Created` /
+    `Starting` ahead of `Error response from daemon: ... Bind for
+    0.0.0.0:8080 failed: port is already allocated`, and keeping the tail alone
+    carried the reason buried in progress chatter. This is a starting point,
+    not a parser -- when nothing says `error`, the whole tail is kept, because
+    a failure that does not announce itself is exactly the one worth reading in
+    full."""
+    for stream in (completed.stderr, completed.stdout):
+        text = (stream or "").strip()
+        if not text:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        lines = lines[-PROBLEM_OUTPUT_LINES:]
+        for index, line in enumerate(lines):
+            if "error" in line.lower():
+                lines = lines[index:]
+                break
+        detail = " | ".join(lines)
+        if len(detail) > PROBLEM_OUTPUT_CHARS:
+            detail = detail[:PROBLEM_OUTPUT_CHARS] + "..."
+        if detail:
+            return detail
+    return ""
+
+
 def bring_up(compose_case: Dict[str, Any], cwd: Optional[Path],
              verbose: bool = False) -> Tuple[bool, Optional[str]]:
     """Run a case's compose ``up``. Returns ``(started, problem)``; a case that
-    manages no containers starts nothing and reports no problem."""
+    manages no containers starts nothing and reports no problem.
+
+    A failure carries what compose said. This used to capture the output and
+    read only the return code off it, so every way a target can fail to start
+    arrived as the same four words: `compose up failed`. Three runs failed that
+    way during the HugeGraph work -- a leftover network holding the case's
+    subnet, and a container from an earlier measurement holding port 5005 --
+    and each had to be reproduced by hand to find out which. The messages that
+    would have said so, `Pool overlaps with other one on this address space`
+    and `Bind for 0.0.0.0:5005 failed: port is already allocated`, were in the
+    captured output the whole time and were thrown away.
+
+    For a harness whose job is to keep one failure from being mistaken for
+    another, "the target could not start" and "the tool did not confirm" must
+    not look alike -- and neither must two different reasons a target could
+    not start."""
     up = compose_command(compose_case, "up")
     if not up:
         return False, None
     if verbose:
         print(f"    $ {' '.join(up)}" + (f"  (in {cwd})" if cwd else ""))
-    started = subprocess.run(up, cwd=str(cwd) if cwd else None,
-                             capture_output=True, text=True).returncode == 0
-    return started, None if started else "compose up failed"
+    completed = subprocess.run(up, cwd=str(cwd) if cwd else None,
+                               capture_output=True, text=True)
+    if completed.returncode == 0:
+        return True, None
+    detail = failure_detail(completed)
+    problem = f"compose up failed (exit {completed.returncode})"
+    return False, f"{problem}: {detail}" if detail else problem
 
 
 def take_down(compose_case: Dict[str, Any], cwd: Optional[Path],
@@ -681,6 +774,7 @@ def render_markdown(outcomes: List[Dict[str, Any]]) -> str:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    line_buffer_stdout()
     parser = argparse.ArgumentParser(
         description="Run RCEKit against real vulnerable targets and check the verdicts.")
     parser.add_argument("--case", action="append", default=[],
@@ -736,12 +830,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"[!] {exc}", file=sys.stderr)
             return 2
         print(f"[bench] {case['name']}: {case['target']}")
+        started_at = time.monotonic()
         outcome = run_case(case, vulhub_root, args.keep_up, args.verbose)
+        outcome["elapsed_s"] = time.monotonic() - started_at
         outcomes.append(outcome)
         mark = "pass" if outcome["passed"] else "FAIL"
         print(f"[bench]   vulnerable: {outcome['vulnerable_detail']}")
         print(f"[bench]   control:    {outcome['control_detail']}")
-        print(f"[bench]   -> {mark}")
+        print(f"[bench]   -> {mark} in {format_duration(outcome['elapsed_s'])}")
 
     table = render_markdown(outcomes)
     print("\n" + table)
@@ -750,7 +846,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             handle.write(table + "\n")
         print(f"\n[bench] table written to {args.markdown}")
     failed = [o for o in outcomes if not o["passed"]]
-    print(f"\n[bench] {len(outcomes) - len(failed)}/{len(outcomes)} cases passed")
+    total = sum(o.get("elapsed_s", 0.0) for o in outcomes)
+    print(f"\n[bench] {len(outcomes) - len(failed)}/{len(outcomes)} cases passed "
+          f"in {format_duration(total)}")
     return 1 if failed else 0
 
 

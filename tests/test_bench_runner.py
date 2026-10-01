@@ -16,6 +16,7 @@ reported as a clean negative.
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -610,17 +611,19 @@ class SharedTargetTestCase(unittest.TestCase):
     class _FakeSubprocess:
         """Stands in for the runner's `subprocess`, recording compose argv."""
 
-        def __init__(self, returncode=0):
+        def __init__(self, returncode=0, stderr=""):
             self.calls = []
             self.returncode = returncode
+            self.stderr = stderr
 
         def run(self, argv, cwd=None, capture_output=False, text=False):
             self.calls.append(list(argv))
-            return SimpleNamespace(returncode=self.returncode, stdout="", stderr="")
+            return SimpleNamespace(returncode=self.returncode, stdout="",
+                                   stderr=self.stderr)
 
-    def _compose_calls(self, case, returncode=0):
+    def _compose_calls(self, case, returncode=0, stderr=""):
         """Which compose commands a case would run, without running anything."""
-        fake = self._FakeSubprocess(returncode)
+        fake = self._FakeSubprocess(returncode, stderr)
 
         def fake_run_rcekit(invocation, python=None, timeout=900.0, run_in=None):
             return {"verdict": "negative", "counts": {"negative": 1}, "probes": []}
@@ -659,10 +662,15 @@ class SharedTargetTestCase(unittest.TestCase):
         # Proceeding with a target that never came up would leave both halves
         # waiting out a readiness timeout and reporting that instead, which
         # names the wrong failure. Each half manages its own and says so.
+        reason = "Bind for 0.0.0.0:8080 failed: port is already allocated"
         calls, outcome = self._compose_calls(self._composed(share_target=True),
-                                             returncode=1)
-        self.assertEqual(outcome["vulnerable_detail"], "compose up failed")
-        self.assertEqual(outcome["control_detail"], "compose up failed")
+                                             returncode=1, stderr=reason)
+        # The reason compose gave reaches both halves. This used to assert the
+        # bare string `compose up failed`, which is the message that swallowed
+        # it -- the test pinned the defect its own name describes.
+        self.assertIn(reason, outcome["vulnerable_detail"])
+        self.assertIn(reason, outcome["control_detail"])
+        self.assertIn("compose up failed", outcome["vulnerable_detail"])
         self.assertFalse(outcome["passed"])
         # Nothing was torn down, because nothing came up.
         self.assertNotIn("-v", calls)
@@ -950,6 +958,178 @@ class DetectJsonTestCase(unittest.TestCase):
             with open(path, encoding="utf-8") as handle:
                 written = json.load(handle)
         self.assertEqual(written["probes"][0]["payload"], payload)
+
+
+class ComposeFailureDetailTestCase(unittest.TestCase):
+    """A target that would not start has to say which way it would not start.
+
+    `bring_up` captured compose's output and read only the return code off it,
+    so every failure arrived as the same four words: `compose up failed`. Three
+    runs failed that way during the HugeGraph work -- a leftover network
+    holding the case's subnet, and a container from an earlier measurement
+    holding port 5005 -- and each had to be reproduced by hand to learn which
+    one it was. Both messages were sitting in the captured output.
+
+    These drive `bring_up` with a `compose` that fails the way compose fails,
+    rather than asserting on a format string, because the defect was that a
+    real message existed and did not reach the caller.
+    """
+
+    POOL = "Error response from daemon: Pool overlaps with other one on this address space"
+    PORT = "Bind for 0.0.0.0:5005 failed: port is already allocated"
+
+    def _case(self, *, code=1, out="", err=""):
+        """A case whose compose `up` prints what we ask and exits `code`."""
+        script = (
+            "import sys\n"
+            f"sys.stdout.write({out!r})\n"
+            f"sys.stderr.write({err!r})\n"
+            f"sys.exit({code})\n"
+        )
+        return {"compose": [sys.executable, "-c", script]}
+
+    def test_a_failed_compose_carries_what_it_printed(self):
+        started, problem = runner.bring_up(
+            self._case(err="Creating network\n" + self.POOL + "\n"), None)
+        self.assertFalse(started)
+        self.assertIn(self.POOL, problem,
+                      "the reason compose gave did not reach the caller")
+
+    def test_the_problem_still_says_which_step_failed(self):
+        """The detail is added to the old message, not swapped for it. A reader
+        skimming a long run still needs to see that it was the bring-up."""
+        _started, problem = runner.bring_up(self._case(err=self.POOL), None)
+        self.assertIn("compose up failed", problem)
+        self.assertIn("exit 1", problem)
+
+    def test_stdout_is_read_when_stderr_is_silent(self):
+        """Compose splits itself across both streams and which one carries the
+        reason depends on the failure. The port clash arrives on stdout."""
+        _started, problem = runner.bring_up(self._case(out=self.PORT), None)
+        self.assertIn(self.PORT, problem)
+
+    def test_two_different_failures_do_not_read_alike(self):
+        """The property the whole change exists for, stated directly."""
+        _s, pool = runner.bring_up(self._case(err=self.POOL), None)
+        _s, port = runner.bring_up(self._case(out=self.PORT), None)
+        self.assertNotEqual(pool, port)
+
+    def test_a_compose_that_succeeds_reports_no_problem(self):
+        started, problem = runner.bring_up(self._case(code=0, out="done\n"), None)
+        self.assertTrue(started)
+        self.assertIsNone(problem)
+
+    def test_a_case_that_manages_no_containers_is_unchanged(self):
+        started, problem = runner.bring_up({}, None)
+        self.assertFalse(started)
+        self.assertIsNone(problem, "a case with no compose has nothing to report")
+
+    def test_a_silent_failure_still_names_itself(self):
+        """A command that fails printing nothing must not produce a dangling
+        colon or an empty reason."""
+        _started, problem = runner.bring_up(self._case(code=2), None)
+        self.assertIn("compose up failed", problem)
+        self.assertFalse(problem.rstrip().endswith(":"), problem)
+
+    # Captured from a real port clash: two compose projects for
+    # `struts2-s2-001` brought up against the same 8080. Kept verbatim so the
+    # trimming is measured against what compose actually prints rather than
+    # against a tidied-up idea of it.
+    REAL_PORT_CLASH = (
+        " Network rcekit-clash_default  Creating\n"
+        " Network rcekit-clash_default  Created\n"
+        " Container rcekit-clash-struts2-1  Creating\n"
+        " Container rcekit-clash-struts2-1  Created\n"
+        " Container rcekit-clash-struts2-1  Starting\n"
+        "Error response from daemon: failed to set up container networking: driver"
+        " failed programming external connectivity on endpoint"
+        " rcekit-clash-struts2-1 (12b85bf9f1234b6f4d3831f9c04780236ca2a069cea0ac05"
+        "f82cecbf9c2c8c66): Bind for 0.0.0.0:8080 failed: port is already allocated\n"
+    )
+
+    def test_the_real_port_clash_reads_as_the_reason_and_not_the_chatter(self):
+        completed = subprocess.CompletedProcess(
+            ["docker", "compose", "up", "-d"], 1, stdout="", stderr=self.REAL_PORT_CLASH)
+        detail = runner.failure_detail(completed)
+        self.assertIn("port is already allocated", detail)
+        self.assertTrue(detail.startswith("Error response from daemon"),
+                        f"the reason is not what the detail opens with: {detail}")
+        self.assertNotIn("Creating", detail,
+                         "progress chatter survived ahead of the reason")
+
+    def test_a_failure_that_never_says_error_keeps_its_whole_tail(self):
+        """The cut is a starting point, not a parser. A failure that does not
+        announce itself is the one worth reading in full."""
+        completed = subprocess.CompletedProcess(
+            ["docker"], 1, stdout="", stderr="killed\nout of memory\nexiting\n")
+        detail = runner.failure_detail(completed)
+        for line in ("killed", "out of memory", "exiting"):
+            self.assertIn(line, detail)
+
+    def test_a_flood_of_output_is_trimmed_to_its_tail(self):
+        """Compose prints a line per layer. The reason is at the end, and a
+        problem string that carries all of it is one nobody reads."""
+        noise = "".join(f"Pulling layer {n}\n" for n in range(400))
+        _started, problem = runner.bring_up(
+            self._case(err=noise + self.POOL), None)
+        self.assertIn(self.POOL, problem)
+        self.assertLess(len(problem), 1000, "the tail was not trimmed")
+
+
+class DurationReportingTestCase(unittest.TestCase):
+    """The runner prints how long it took.
+
+    The README quotes a figure for the suite and the runner printed none, so it
+    had to be measured from outside the tool -- a file's timestamps -- and typed
+    into the document by hand. A figure a document states about a program should
+    come from the program.
+    """
+
+    def test_the_two_figures_the_readme_quotes_round_trip(self):
+        # Not arbitrary examples: these are the numbers in README.md and
+        # tests/bench/README.md, so a change to the format shows up as a change
+        # to documents that quote it.
+        self.assertEqual(runner.format_duration(3350), "55m50s")
+        self.assertEqual(runner.format_duration(5808), "1h36m48s")
+
+    def test_a_fast_case_keeps_its_tenths(self):
+        # `struts2-s2-001` is quoted at 33.8s and 22.9s in tests/bench/README.md;
+        # rounding those to whole minutes would lose what they are comparing.
+        self.assertEqual(runner.format_duration(33.84), "33.8s")
+        self.assertEqual(runner.format_duration(22.91), "22.9s")
+
+    def test_the_boundaries_do_not_wrap(self):
+        self.assertEqual(runner.format_duration(59.9), "59.9s")
+        self.assertEqual(runner.format_duration(60), "1m00s")
+        self.assertEqual(runner.format_duration(3600), "1h00m00s")
+
+    def test_a_negative_or_zero_elapsed_is_not_rendered_as_a_countdown(self):
+        self.assertEqual(runner.format_duration(0), "0.0s")
+        self.assertEqual(runner.format_duration(-1), "0.0s")
+
+
+class LineBufferingTestCase(unittest.TestCase):
+    """A run this long has to look different from a hung one.
+
+    A case takes minutes and the suite the better part of an hour. Redirected
+    to a file -- which is how anyone watches a run that long -- block buffering
+    holds every line until the buffer fills, so progress is invisible. The
+    workaround was remembering `python -u` at the call site, which is a thing to
+    remember rather than a property of the program.
+    """
+
+    def test_a_text_stream_comes_back_line_buffered(self):
+        import io
+        stream = io.TextIOWrapper(io.BytesIO(), line_buffering=False)
+        self.assertFalse(stream.line_buffering)
+        runner.line_buffer_stdout(stream)
+        self.assertTrue(stream.line_buffering)
+
+    def test_a_stream_that_cannot_be_reconfigured_is_left_alone(self):
+        """Under `unittest`, stdout is often a StringIO with no `reconfigure`.
+        Setting up output must not be the thing that fails a run."""
+        import io
+        runner.line_buffer_stdout(io.StringIO())  # must not raise
 
 
 if __name__ == "__main__":
