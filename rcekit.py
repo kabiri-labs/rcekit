@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.3.0"
+__version__ = "3.4.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -2215,7 +2215,26 @@ class RCEKit:
         return [name for name in cls._INJECTION_ENCODERS
                 if name not in cls._NON_BODY_LOCATIONS]
 
-    def _encode_for_location(self, payload: str, location: str) -> str:
+    def _encode_for_location(self, payload: str, location: Any) -> str:
+        """The payload as it goes on the wire at one injection point.
+
+        ``location`` is normally a key into the registry above. It may also be
+        a **callable** taking the payload and returning the whole value, which
+        is how an encoded blob is reached: the marker replaces the entire
+        carrier value, and the callable decodes the captured blob, puts the
+        payload at the leaf inside it and re-encodes the lot. The marker cannot
+        sit inside the encoded region -- base64 destroys it, so the request
+        would go out carrying the blob unchanged and the run would report
+        `negative` about a point it never tested.
+
+        A callable rather than a parameter threaded through the delivery path,
+        because ``body_location`` already flows through `_fire`,
+        `_fire_channels`, `_escalate`, `run_detection` and `run_verification`
+        untouched and is consumed in exactly one place -- here. Threading one
+        more parameter through those five is what shifted a positional caller's
+        arguments on an earlier change."""
+        if callable(location):
+            return location(payload)
         encoder = self._INJECTION_ENCODERS.get(location)
         if encoder is None:
             raise ValueError(f"Unknown injection location: {location!r}")
@@ -2299,11 +2318,21 @@ class RCEKit:
         url_location: str,
         body_location: str,
         mark: str = "FUZZ",
+        header_location: Any = "header",
     ) -> Tuple[str, Optional[bytes], Dict[str, str]]:
         """Render one verification request, encoding the payload independently
         for each injection point it lands in (URL / body / header). This replaces
         the old blanket URL-encoding, which corrupted JSON bodies and
-        double-encoded already-encoded payloads."""
+        double-encoded already-encoded payloads.
+
+        ``header_location`` was the one of the three that could not be chosen,
+        hard-coded to single-line escaping because no point needed anything
+        else. A blob inside a cookie or an `Authorization` value does: the
+        marker replaces the whole header value and the payload has to be
+        re-wrapped into the blob. **Appended** after ``mark``, like ``mark``
+        itself was, because every caller here passes positionally and inserting
+        a parameter into this signature has shifted a caller's arguments once
+        already."""
         target = url.replace(mark, self._encode_for_location(payload, url_location))
         body: Optional[bytes] = None
         if data is not None:
@@ -2311,7 +2340,8 @@ class RCEKit:
         hdrs: Dict[str, str] = {"User-Agent": "rcekit-verify"}
         for header in headers or []:
             name, _, value = header.partition(":")
-            hdrs[name.strip()] = value.strip().replace(mark, self._encode_for_location(payload, "header"))
+            hdrs[name.strip()] = value.strip().replace(
+                mark, self._encode_for_location(payload, header_location))
         return target, body, hdrs
 
     def _evaluate_verify(self, record: PayloadRecord, status: Optional[int], body: str,
@@ -2527,18 +2557,21 @@ class RCEKit:
 
     def _fire(self, payload: str, url: str, method: str, data: Optional[str],
               headers: Optional[List[str]], url_location: str, body_location: str,
-              timeout: float, mark: str = "FUZZ") -> Tuple[Optional[int], str, float]:
+              timeout: float, mark: str = "FUZZ",
+              header_location: Any = "header") -> Tuple[Optional[int], str, float]:
         """Deliver one request and return ``(status, body, elapsed)``.
 
         The body-only view of :meth:`_fire_channels`, kept for callers whose
         oracle reads the body alone (the classic ``run_verification`` path)."""
         status, body, _channels, elapsed = self._fire_channels(
-            payload, url, method, data, headers, url_location, body_location, timeout, mark)
+            payload, url, method, data, headers, url_location, body_location, timeout, mark,
+            header_location)
         return status, body, elapsed
 
     def _fire_channels(self, payload: str, url: str, method: str, data: Optional[str],
                        headers: Optional[List[str]], url_location: str, body_location: str,
-                       timeout: float, mark: str = "FUZZ"
+                       timeout: float, mark: str = "FUZZ",
+                       header_location: Any = "header"
                        ) -> Tuple[Optional[int], str, List[Tuple[str, str]], float]:
         """Deliver one request with ``payload`` substituted at ``mark`` wherever
         it appears, encoded independently for each injection point. Returns
@@ -2555,7 +2588,7 @@ class RCEKit:
         import urllib.request
         import urllib.error
         target, body, hdrs = self._build_verify_request(
-            payload, url, data, headers, url_location, body_location, mark)
+            payload, url, data, headers, url_location, body_location, mark, header_location)
         request = urllib.request.Request(target, data=body, headers=hdrs, method=method)
         # The context is built whatever the scheme: urllib follows a redirect
         # with the handler it was given, so an http:// target that lands on a
@@ -3101,7 +3134,8 @@ class RCEKit:
                   control_status: Optional[int],
                   started_requests: int = 0,
                   max_payloads: Optional[int] = None,
-                  mark: str = "FUZZ"
+                  mark: str = "FUZZ",
+                  header_location: Any = "header"
                   ) -> Optional[Tuple[str, Any, Any, Any, float]]:
         """Re-send a refused probe, climbing the rungs to the run's ceiling.
 
@@ -3161,7 +3195,7 @@ class RCEKit:
                 continue
             status, body, chans, elapsed = self._fire_channels(
                 climbed, url, method, data, headers, url_location, body_location,
-                timeout, mark)
+                timeout, mark, header_location)
             # A retry is a request the target receives, so it is charged to the
             # same meter as the probe that prompted it. `escalated_probes`
             # counts these too, but that number describes the ladder rather
@@ -3283,7 +3317,10 @@ class RCEKit:
                       # the first delivery raised `TypeError` from `str.replace`.
                       # Tidying this back into its semantic place reintroduces
                       # that, which `DuplicateMarkerTestCase` fails on.
-                      mark: str = "FUZZ") -> List[Dict[str, Any]]:
+                      mark: str = "FUZZ",
+                      # Appended for the same reason, and the comment above is
+                      # the evidence rather than the preference.
+                      header_location: Any = "header") -> List[Dict[str, Any]]:
         """Method-driven RCE detection against an AUTHORISED target.
 
         For each selected :class:`DetectionMethod`, build probes from the
@@ -3316,7 +3353,7 @@ class RCEKit:
         # through is a payload a filter rejected, and that is not a negative.
         control_status, control_body, control_channels, _ = self._fire_channels(
             f"rcekit-control-{self._generate_canary()}", url, method, data, headers,
-            url_location, resolved_body_location, timeout, mark)
+            url_location, resolved_body_location, timeout, mark, header_location)
 
         # The observed channel's control has to be taken *before* any probe is
         # sent, not after: the whole premise is that a probe changes what that
@@ -3413,7 +3450,8 @@ class RCEKit:
                             req_timeout = timeout + (probe.delay_s or 0.0) + 2.0
                             status, body, chans, elapsed = self._fire_channels(
                                 probe.payload, url, method, data, headers, url_location,
-                                resolved_body_location, req_timeout, mark)
+                                resolved_body_location, req_timeout, mark,
+                                header_location)
                             self.delivered_probes += 1
                             # The same retry the per-probe path makes. `time`,
                             # `oob`, `lookup` and `deser` live in this branch,
@@ -3432,7 +3470,8 @@ class RCEKit:
                                 climbed = self._escalate(
                                     meth, probe, record, url, method, data, headers,
                                     url_location, resolved_body_location, req_timeout,
-                                    control_status, started_requests, max_payloads, mark)
+                                    control_status, started_requests, max_payloads, mark,
+                                    header_location)
                                 if climbed is not None:
                                     sent, status, body, chans, elapsed = climbed
                                     probe = dataclass_replace(probe, payload=sent)
@@ -3590,7 +3629,7 @@ class RCEKit:
                     seen.add(probe.payload)
                     status, body, chans, elapsed = self._fire_channels(
                         probe.payload, url, method, data, headers, url_location,
-                        resolved_body_location, timeout, mark)
+                        resolved_body_location, timeout, mark, header_location)
                     self.delivered_probes += 1
                     # A followup fetch (file-based self-OOB): retrieve the file the
                     # probe asked the target to write. Its body is the confirmation
@@ -3616,7 +3655,8 @@ class RCEKit:
                         climbed = self._escalate(
                             meth, probe, record, url, method, data, headers,
                             url_location, resolved_body_location, timeout,
-                            control_status, started_requests, max_payloads, mark)
+                            control_status, started_requests, max_payloads, mark,
+                            header_location)
                         if climbed is not None:
                             sent, status, body, chans, elapsed = climbed
                             probe = dataclass_replace(probe, payload=sent)
@@ -7842,6 +7882,15 @@ class InjectionPoint:
     # the target refuses to parse. Empty for every other kind, whose escaping
     # is a property of the body rather than of the position.
     span: str = ""
+    # For a ``blob`` point: how to take the carrier value apart and put it back
+    # together (a :class:`BlobSpec`), and the point addressing that carrier.
+    #
+    # Two fields rather than one, because the two are used at different times
+    # and by different code. ``outer`` places the marker -- which replaces the
+    # *whole* carrier value, since a marker inside base64 does not survive it --
+    # and ``blob`` rebuilds the value around each payload at delivery time.
+    blob: Optional[Any] = None
+    outer: Optional["InjectionPoint"] = None
 
 
 # Headers worth trying before the rest. Not a guess: each is a header that
@@ -7865,7 +7914,7 @@ NON_INJECTABLE_HEADERS = {
 
 # The candidate kinds, in the order they are tried.
 INJECTION_POINT_KINDS = ("query", "json", "xml", "form", "multipart", "filename",
-                         "cookie", "header", "path")
+                         "cookie", "header", "path", "blob")
 
 # What a finding calls each shape of XML value. The span's kind also picks the
 # escaping, so the noun and the encoder stay in step.
@@ -7974,6 +8023,225 @@ def _multipart_field_name(head: str) -> Optional[str]:
             match = _MULTIPART_NAME_RE.search(value)
             if match:
                 return match.group(1)
+    return None
+
+
+# An encoded blob carried inside one request value: base64 or base64url of a
+# JSON document, or a JWT whose payload segment is one. A session cookie, an
+# opaque `state` parameter and a bearer token are all this shape, and until now
+# each was one opaque leaf -- the enumerator could name it and had no way to
+# reach the fields the application actually reads out of it.
+#
+# One layer only. Deeper nesting is a combinatorial trap and the cap belongs in
+# the documentation rather than in a heuristic that stops when it feels like it.
+_BLOB_MIN = 16
+_BLOB_MAX = 64 * 1024
+_BLOB_POINT_LIMIT = 64
+
+_B64_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]{16,}={0,2}$")
+_JWT_RE = re.compile(r"^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,})\.([A-Za-z0-9_-]*)$")
+
+
+@dataclass
+class BlobSpec:
+    """How to take one request value apart and put it back together.
+
+    ``template`` is the decoded JSON as text and ``tokens`` the leaf inside it
+    this point addresses. ``prefix`` and ``suffix`` carry a JWT's other two
+    segments verbatim, because re-encoding the payload must leave the header
+    and the signature exactly as captured -- the signature is invalid either
+    way, and changing the bytes around it would make a rejection say nothing.
+
+    ``padded`` records whether the captured value carried base64 padding, so
+    the rebuilt one carries it the same way. A producer that strips it and a
+    parser that insists on it both exist.
+
+    The inner document is **re-serialised**, compactly, so the rebuilt value is
+    not byte-identical to the captured one even when the leaf is unchanged --
+    `{"a": 1}` becomes `{"a":1}`. JSON has no offsets to splice the way the XML
+    scanner does, so this is unavoidable rather than chosen. It matters in one
+    way and is handled in another: the payload-free **control is rendered
+    through this same path**, so probe and control differ in the field under
+    test and in nothing else, which is the property the control has to hold. A
+    target that covers the blob's exact bytes with its own integrity check sees
+    a changed value for both, and a JWT's signature is invalid either way."""
+    codec: str
+    template: str
+    tokens: Tuple[Any, ...]
+    prefix: str = ""
+    suffix: str = ""
+    padded: bool = True
+
+    def render(self, value: str) -> str:
+        """The whole carrier value again, with ``value`` at ``tokens``."""
+        obj = json.loads(self.template)
+        if not _set_json_tokens(obj, self.tokens, value):
+            raise ValueError("blob leaf is no longer there")
+        inner = json.dumps(obj, separators=(",", ":")).encode("utf-8")
+        if self.codec == "b64":
+            core = base64.b64encode(inner).decode("ascii")
+        else:
+            core = base64.urlsafe_b64encode(inner).decode("ascii")
+        if not self.padded:
+            core = core.rstrip("=")
+        return self.prefix + core + self.suffix
+
+
+# Which registry encoder the rebuilt blob still has to go through, and which of
+# the three location slots carries it, per carrier kind. A blob in a query value
+# is percent-encoded like any query value; one in a JSON leaf is JSON-escaped.
+# Re-wrapping replaces the *inner* encoding, never the carrier's own.
+_BLOB_OUTER_ENCODERS = {
+    "query": "query_value", "form": "form_value", "json": "json_string",
+    "cookie": "header", "header": "header", "multipart": "raw",
+}
+_BLOB_OUTER_SLOTS = {
+    "query": "url", "form": "body", "json": "body", "multipart": "body",
+    "cookie": "header", "header": "header",
+}
+
+
+class BlobLocation:
+    """An injection *location* that rebuilds an encoded blob around the payload.
+
+    Passed where a location name normally goes, and called by
+    :meth:`RCEKit._encode_for_location`. It carries a label because the run
+    logs the resolved location with ``%s`` and a bare lambda would print its
+    address.
+
+    Two encodings, in order, and getting that wrong is the whole subtlety: the
+    payload goes into the decoded document, the document is re-encoded into the
+    blob, and then the blob goes through **the carrier's own** encoder. A blob
+    in a query value is still percent-encoded; one in a JSON leaf is still
+    JSON-escaped. Skipping the second step put raw base64 containing ``+`` into
+    a query string, where ``+`` is a space."""
+
+    def __init__(self, spec: "BlobSpec", outer_location: str, label: str) -> None:
+        self.spec = spec
+        self.outer_location = outer_location
+        self.label = label
+
+    def __call__(self, payload: str) -> str:
+        rendered = self.spec.render(payload)
+        encoder = RCEKit._INJECTION_ENCODERS.get(self.outer_location)
+        return encoder(rendered) if encoder is not None else rendered
+
+    def __repr__(self) -> str:
+        return self.label
+
+    __str__ = __repr__
+
+
+def point_locations(point: "InjectionPoint") -> Dict[str, Any]:
+    """The location overrides a point names for itself, by slot.
+
+    ``{}`` for a point whose encoding follows from the body's own shape. A
+    ``blob`` point returns one entry, under ``url``, ``body`` or ``header``
+    depending on where its carrier sits -- a token in a cookie is rendered on
+    the header line and one in a query value in the URL, and the engine encodes
+    those through different slots."""
+    if point.kind == "blob" and point.blob is not None and point.outer is not None:
+        kind = point.outer.kind
+        slot = _BLOB_OUTER_SLOTS.get(kind, "body")
+        location = BlobLocation(point.blob, _BLOB_OUTER_ENCODERS.get(kind, "raw"),
+                                f"blob[{point.blob.codec}]")
+        return {slot: location}
+    body = point_body_location(point)
+    return {"body": body} if body else {}
+
+
+def blob_points(outer: "InjectionPoint", value: str,
+                limit: int = _BLOB_POINT_LIMIT) -> List["InjectionPoint"]:
+    """Every leaf inside ``value``'s encoded blob, as points of their own.
+
+    ``[]`` when the value is not an encoded JSON blob, which is the usual
+    answer. The carrier keeps its own point either way -- the blob as one
+    opaque string is still worth probing, since a sink may read it before
+    decoding it -- so these are additions rather than replacements.
+
+    Bounded by ``limit``, which is handed to :func:`_json_leaf_tokens` and
+    enforced there: a token with a hundred claims would otherwise spend a capped
+    run's whole budget on one value. A second slice here would be dead code --
+    mutation testing found it never bites, because the walk cannot return more
+    leaves than it was asked for."""
+    decoded = _blob_decode(value)
+    if decoded is None:
+        return []
+    codec, template, prefix, suffix, padded = decoded
+    try:
+        document = json.loads(template)
+    except (ValueError, TypeError, RecursionError):
+        return []
+    points: List["InjectionPoint"] = []
+    for tokens in _json_leaf_tokens(document, limit=limit):
+        inner = _render_json_path(tokens)
+        spec = BlobSpec(codec, template, tokens, prefix, suffix, padded)
+        points.append(InjectionPoint(
+            "blob", f"{outer.name}>{inner}",
+            f"{codec} blob in {outer.label}, field '{inner}'",
+            tokens, blob=spec,
+            outer=outer))
+    return points
+
+
+def _blob_decode(value: str) -> Optional[Tuple[str, str, str, str, bool]]:
+    """``(codec, json_text, prefix, suffix, padded)`` for an encoded JSON blob.
+
+    ``None`` for anything else, which is most values. Three things have to hold
+    before a value is treated as a blob, and each one is there to keep an
+    ordinary string out: it has to *look* like base64 of a useful length, it has
+    to decode as UTF-8, and the result has to parse as a JSON **object or
+    array**. A bare number or a quoted word would decode from plenty of
+    accidental base64, so a scalar is refused -- it would also carry no leaf to
+    address.
+
+    JWT is tried first and tested on its payload segment, because a JWT's three
+    segments are each base64url and the whole string is not.
+
+    The two base64 alphabets differ only in two characters, so a value
+    containing none of ``-_+/`` belongs to both and is reported as ``b64``. The
+    rebuilt value then uses the standard alphabet, which is byte-identical for
+    such content and may differ once a payload makes the output need one of
+    those characters. A target insisting on base64url would answer 4xx there,
+    which the engine reports as ``blocked`` -- a refusal rather than a clean
+    negative, which is the outcome to prefer over guessing. A JWT is never
+    ambiguous: its segments are base64url by definition.
+
+    Never raises. The input is whatever the operator captured."""
+    text = (value or "").strip()
+    if not (_BLOB_MIN <= len(text) <= _BLOB_MAX):
+        return None
+
+    def parsed(raw: str, urlsafe: bool) -> Optional[str]:
+        pad = "=" * (-len(raw) % 4)
+        try:
+            decoder = base64.urlsafe_b64decode if urlsafe else base64.b64decode
+            body = decoder(raw + pad).decode("utf-8")
+        except (ValueError, TypeError):
+            # `binascii.Error` and `UnicodeDecodeError` are both ValueError
+            # subclasses, so neither needs naming and binascii needs no import.
+            return None
+        try:
+            document = json.loads(body)
+        except (ValueError, TypeError, RecursionError):
+            return None
+        return body if isinstance(document, (dict, list)) else None
+
+    jwt = _JWT_RE.match(text)
+    if jwt:
+        body = parsed(jwt.group(2), True)
+        if body is not None:
+            return ("jwt", body, jwt.group(1) + ".", "." + jwt.group(3),
+                    jwt.group(2).endswith("="))
+    if _B64URL_RE.match(text) and ("-" in text or "_" in text):
+        body = parsed(text, True)
+        if body is not None:
+            return ("b64url", body, "", "", text.endswith("="))
+    if _B64_RE.match(text):
+        body = parsed(text, False)
+        if body is not None:
+            return ("b64", body, "", "", text.endswith("="))
     return None
 
 
@@ -8490,7 +8758,15 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
 
     ``thorough`` adds the remaining non-hop-by-hop headers after the curated
     ones; without it only the high-yield list is tried."""
-    selected = set(kinds or INJECTION_POINT_KINDS)
+    requested = set(kinds or INJECTION_POINT_KINDS)
+    # A blob is not a place in the request, it is an *encoding* of a value that
+    # already has a point, so its carriers have to be walked to find one. The
+    # kind filter therefore decides what is **reported**, not what is scanned:
+    # `--auto-params blob` on its own means "only the fields inside blobs", and
+    # gating the scan instead made it mean "nothing at all".
+    selected = set(requested)
+    if "blob" in requested:
+        selected |= set(_BLOB_OUTER_SLOTS)
     points: List[InjectionPoint] = []
     target, headers, body = req["target"], req["headers"], req.get("body", "")
 
@@ -8619,7 +8895,81 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
             if segment:
                 points.append(InjectionPoint("path", str(index),
                                              f"path segment {index} ('{segment}')"))
-    return points
+
+    if "blob" in requested:
+        # A post-pass over the points already found rather than a branch of its
+        # own. Each carrier keeps its own point, because a sink may read the
+        # token before decoding it, and the fields inside are added beside it.
+        nested: List[InjectionPoint] = []
+        for carrier in points:
+            if carrier.kind not in _BLOB_OUTER_SLOTS:
+                continue
+            value = _point_value(target, headers, body, carrier)
+            if value:
+                nested.extend(blob_points(carrier, value))
+        points.extend(nested)
+    return [point for point in points if point.kind in requested]
+
+
+def _point_value(target: str, headers: List[List[str]], body: str,
+                 point: InjectionPoint) -> Optional[str]:
+    """What a point currently carries, or ``None`` when it carries nothing.
+
+    The read counterpart of :func:`place_injection_point`, and only used to ask
+    whether a value is an encoded blob. Percent-decoded with ``unquote`` rather
+    than ``unquote_plus`` for query and form values: ``+`` means a space to a
+    form parser and a base64 digit to a decoder, and a producer that meant the
+    digit percent-encodes it, so taking ``%2B`` back to ``+`` is right where
+    taking a literal ``+`` to a space would corrupt the blob."""
+    if point.kind in ("query", "form"):
+        blob = target.partition("?")[2] if point.kind == "query" else (body or "")
+        pairs = blob.split("&") if blob else []
+        index = point.tokens[0] if point.tokens else None
+        for position, pair in enumerate(pairs):
+            key, sep, raw = pair.partition("=")
+            if not sep or strip_bom(key) != point.name:
+                continue
+            if index is None or position == index:
+                return urllib.parse.unquote(raw)
+        return None
+    if point.kind == "cookie":
+        for name, value in headers:
+            if name.lower() != "cookie":
+                continue
+            for crumb in value.split(";"):
+                key, sep, raw = crumb.strip().partition("=")
+                if sep and key.strip() == point.name:
+                    return raw
+        return None
+    if point.kind == "header":
+        for name, value in headers:
+            if name.lower() == point.name.lower():
+                return value
+        return None
+    if point.kind == "json":
+        try:
+            parsed = json.loads(strip_bom(body))
+        except (ValueError, TypeError, RecursionError):
+            return None
+        node: Any = parsed
+        for token in point.tokens:
+            if isinstance(node, dict) and token in node:
+                node = node[token]
+            elif isinstance(node, list) and isinstance(token, int) and 0 <= token < len(node):
+                node = node[token]
+            else:
+                return None
+        return node if isinstance(node, str) else None
+    if point.kind == "multipart":
+        boundary = _multipart_boundary(headers, body or "")
+        parts = _split_multipart(body or "", boundary or "") if boundary else None
+        index = point.tokens[0] if point.tokens else None
+        for position, (head, content) in enumerate(parts or []):
+            if _multipart_field_name(head) == point.name and (
+                    index is None or position == index):
+                return content
+        return None
+    return None
 
 
 def place_injection_point(target: str, headers: List[List[str]], body: str,
@@ -8665,6 +9015,15 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
                    for _kind, path, span_start, span_end in _xml_value_spans(body or "")):
             return None
         return target, headers, (body or "")[:start] + mark + (body or "")[end:]
+    if point.kind == "blob":
+        # The marker replaces the *whole* carrier value, because one inside the
+        # encoded region does not survive base64 -- the request would go out
+        # with the blob unchanged and the run would report `negative` about a
+        # point it never tested. The payload is put inside the blob at delivery
+        # time instead, by the location this point names.
+        if point.outer is None:
+            return None
+        return place_injection_point(target, headers, body, point.outer, mark)
     if point.kind == "form":
         marked = _mark_urlencoded_param(body, point.name, mark,
                                         point.tokens[0] if point.tokens else None)
@@ -10112,7 +10471,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # the marker to work it out: a capture carrying a literal
                     # FUZZ of its own has more than one, and the first is not
                     # this point's.
-                    point_location = args.verify_body_location or point_body_location(point)
+                    # Three slots, because a point may name its encoding for
+                    # any of them: an XML value and a multipart filename are
+                    # rendered in the body, while an encoded blob is rendered
+                    # wherever its carrier sits -- a token in a cookie goes on
+                    # the header line and one in a query value in the URL.
+                    overrides = point_locations(point)
+                    point_location = args.verify_body_location or overrides.get("body")
+                    point_url_location = overrides.get("url") or args.verify_url_location
+                    point_header_location = overrides.get("header") or "header"
                     # Deliveries for this point alone, for the same reason the
                     # run-wide summary counts them: rows and requests are the
                     # same number only while every method answers from each
@@ -10147,8 +10514,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                             method=args.verify_method or point_method,
                             data=point_data, headers=point_headers, delay=args.verify_delay,
                             timeout=args.verify_timeout, max_payloads=remaining,
-                            url_location=args.verify_url_location,
+                            url_location=point_url_location,
                             body_location=point_location,
+                            header_location=point_header_location,
                             mark=enumeration_mark,
                             config=detection_config,
                         )

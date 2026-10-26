@@ -378,6 +378,78 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.4.0] — 2026-10-26
+
+### Added
+
+- **A session token was one opaque leaf, and the fields inside it are what the
+  application reads.** A base64 `state` parameter, JSON in a cookie, a bearer
+  token: the enumerator could name the carrier and had no way to reach anything
+  in it. `--auto-params blob` now adds a point per field inside, named
+  `carrier>field` — `state>role`, `tok>sub` — across query values, form values,
+  JSON string leaves and cookie or header values.
+
+  The carrier **keeps its own point**, because a sink may read the token before
+  decoding it. One layer only, at most 64 fields per blob.
+
+  **What counts as a blob** is narrow on purpose: it has to look like base64 of
+  a useful length, decode as UTF-8, and parse as a JSON object or array. A
+  scalar is refused — plenty of accidental base64 decodes to a number or a word,
+  and a scalar carries no field to address. A two-segment token is not a JWT.
+  The inner format is JSON only; a base64 XML blob (SAML) is not covered,
+  because the common binding is deflate-then-base64 over a signed assertion,
+  which is the signed-envelope case the `xml` kind already refuses.
+
+  **The marker goes outside the encoding.** base64 destroys a marker placed in
+  the decoded document — measured, `'FUZZ' in base64(json_with_FUZZ)` is false —
+  so the request would have gone out carrying the blob unchanged and the run
+  would have reported `negative` about a point it never tested. The marker
+  replaces the whole carrier value instead, and the payload is put inside the
+  blob when the request is rendered: into the decoded document, re-encoded, and
+  then through the carrier's **own** encoder. A blob in a query value is still
+  percent-encoded; one in a JSON leaf is still JSON-escaped. Getting that
+  second step wrong put raw base64 containing `+` into a query string, where `+`
+  is a space.
+
+  **A JWT's signature is invalidated**, necessarily, and that is the point
+  rather than a flaw: an application that accepts the rewritten token is not
+  verifying it, which is itself a finding, and one that rejects it answers 4xx
+  where the payload-free control got through — reported as `blocked`, not as a
+  clean negative. The header and signature segments are preserved byte for byte,
+  so a rejection is about the claim and not about something else RCEKit changed.
+
+  The inner document is re-serialised compactly, so the rebuilt value is not
+  byte-identical to the captured one even where the field is unchanged. JSON has
+  no offsets to splice the way the XML scanner does. The payload-free control is
+  rendered through the same path, so probe and control still differ in the field
+  under test and in nothing else.
+
+### Changed
+
+- **An injection *location* may now be a callable, not only a registry name.**
+  A blob has to be rebuilt per payload, which the encoder could not do because
+  it is a pure function of the payload and never sees the body. Threading a
+  transform through `_fire`, `_fire_channels`, `_escalate`, `run_detection` and
+  `run_verification` was the obvious answer and the wrong one: `body_location`
+  already flows through all five untouched and is consumed in exactly one
+  place, so the location carries the transform and nothing else changed. The
+  same threading is what shifted a positional caller's arguments on 3.1.1.
+
+  `--verify-body-location` is unaffected and gains no value: a blob location is
+  derived per point and never operator-supplied, so the CLI's choices still
+  come from the encoder registry alone.
+
+- **`_build_verify_request` takes a `header_location`.** It was the one of the
+  three slots that could not be chosen, hard-coded to single-line escaping
+  because no point had needed anything else; a blob in a cookie or an
+  `Authorization` value does. **Appended** after `mark`, like `mark` itself was,
+  for the reason the comment above that parameter records.
+
+- **The kind filter decides what enumeration *reports*, not what it scans.** A
+  blob is an encoding of a value that already has a point, so its carriers have
+  to be walked to find one. Gating the scan made `--auto-params blob` mean
+  "nothing at all"; it now means "only the fields inside blobs".
+
 ## [3.3.0] — 2026-10-26
 
 ### Added
@@ -3139,6 +3211,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.4.0]: https://github.com/kabiri-labs/rcekit/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/kabiri-labs/rcekit/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/kabiri-labs/rcekit/compare/v3.1.2...v3.2.0
 [3.1.2]: https://github.com/kabiri-labs/rcekit/compare/v3.1.1...v3.1.2
