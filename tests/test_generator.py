@@ -7807,13 +7807,40 @@ class RepeatedUrlencodedKeyTestCase(unittest.TestCase):
         self.assertIsNone(rcekit.place_injection_point(
             req["target"], req["headers"], req.get("body", ""), point, "FUZZ"))
 
-    def test_naming_a_parameter_still_works_without_an_index(self):
+    def test_naming_a_parameter_rewrites_every_occurrence(self):
         # `-p NAME` goes through _place_param_marker, which addresses by name
-        # and has no index to give. The new argument is optional for exactly
-        # that caller, and it keeps the first occurrence.
-        marked = rcekit._mark_urlencoded_param("a=1&a=2&b=3", "a", "FUZZ")
-        self.assertEqual(marked, "a=FUZZ&a=2&b=3")
+        # and has no index to give. Without an index this helper rewrites
+        # EVERY matching pair, which is what it did before the index existed.
+        #
+        # Pinned against the measured prior behaviour, not against what the
+        # change made convenient: an earlier version of this test asserted
+        # `a=FUZZ&a=2&b=3` because the implementation had started doing that,
+        # and review caught it. Keeping only the first is a false negative
+        # wearing a tidy diff -- an application that reads the last value of a
+        # repeated key never sees the payload, and the run says `negative`
+        # about a sink it never reached.
+        self.assertEqual(rcekit._mark_urlencoded_param("a=1&a=2&b=3", "a", "FUZZ"),
+                         "a=FUZZ&a=FUZZ&b=3")
+        self.assertEqual(rcekit._mark_urlencoded_param("cmd=one&cmd=two", "cmd", "FUZZ"),
+                         "cmd=FUZZ&cmd=FUZZ")
         self.assertIsNone(rcekit._mark_urlencoded_param("a=1", "zz", "FUZZ"))
+
+    def test_the_two_callers_ask_different_questions(self):
+        # The distinction the index exists for, asserted side by side so the
+        # two cannot drift into each other: enumeration asks which of these
+        # positions is the sink, `-p NAME` asks for the name wherever it goes.
+        blob = "cmd=one&cmd=two"
+        self.assertEqual(rcekit._mark_urlencoded_param(blob, "cmd", "FUZZ", 1),
+                         "cmd=one&cmd=FUZZ")
+        self.assertEqual(rcekit._mark_urlencoded_param(blob, "cmd", "FUZZ"),
+                         "cmd=FUZZ&cmd=FUZZ")
+
+    def test_naming_a_parameter_end_to_end_is_unchanged_from_before(self):
+        # The regression as the operator would meet it, through the whole
+        # `-p NAME` path rather than the helper alone.
+        raw = "GET /s?cmd=one&cmd=two HTTP/1.1\r\nHost: t.example\r\n\r\n"
+        url, _m, _d, _h, _inj = rcekit.build_request_inputs(raw, param="cmd")
+        self.assertEqual(url, "http://t.example/s?cmd=FUZZ&cmd=FUZZ")
 
     def test_a_byte_order_mark_on_the_first_key_still_resolves(self):
         # The 3.1.2 behaviour, re-checked because this change rewrote the loop

@@ -8767,10 +8767,20 @@ def _mark_urlencoded_param(blob: str, param: str, mark: str,
     form body). Returns the rewritten blob, or None if ``param`` is absent.
 
     ``index`` is the pair's position and the authority when given, as the part
-    index is for multipart: a name posted more than once had only its *first*
-    occurrence rewritten, so every later one was counted as covered and probed
-    nowhere. The name is still checked against that position, so a point that no
-    longer describes the body rewrites nothing rather than the wrong pair.
+    index is for multipart: enumeration addressed a repeated name by name alone,
+    so only its *first* occurrence was rewritten and every later one was counted
+    as covered and probed nowhere. The name is still checked against that
+    position, so a point that no longer describes the body rewrites nothing
+    rather than the wrong pair.
+
+    Without an ``index`` -- the ``-p NAME`` path, which has no position to give
+    -- **every** matching pair is rewritten, which is what this helper did
+    before the index existed. Keeping only the first there would be a false
+    negative wearing a tidy diff: an application that reads the *last* value of
+    a repeated key would never see the payload, and the run would report
+    `negative` about a sink it never reached. Enumeration asks "which of these
+    two positions is the sink", and `-p NAME` asks "put it wherever this name
+    goes" -- different questions, so they get different answers.
 
     Appended rather than inserted before ``mark``. Threading a parameter through
     this file has already shifted a positional caller's arguments once, and the
@@ -8786,7 +8796,7 @@ def _mark_urlencoded_param(blob: str, param: str, mark: str,
         # is written back exactly as captured, because the application's parser
         # sees the mark as well and a key RCEKit rewrote is a key it changed.
         names = key == param or strip_bom(key) == param
-        hit = (position == index and names) if index is not None else (not found and names)
+        hit = (position == index and names) if index is not None else names
         if hit:
             out.append(f"{key}={mark}")
             found = True

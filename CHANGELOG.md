@@ -416,8 +416,13 @@ formats, or the template schema.
 
   `_mark_urlencoded_param` takes the position as an **appended** argument.
   Threading a parameter through this file has already shifted a positional
-  caller's arguments once, and `-p NAME` still addresses by name with no index
-  to give, keeping the first occurrence as it did.
+  caller's arguments once. Without an index — the `-p NAME` path, which has no
+  position to give — **every** matching pair is rewritten, exactly as this
+  helper did before the index existed. The two callers ask different questions:
+  enumeration asks which of these positions is the sink, `-p NAME` asks for the
+  name wherever it goes. Keeping only the first there would be a false negative
+  wearing a tidy diff, because an application that reads the *last* value of a
+  repeated key would never see the payload.
 
 ## [3.2.0] — 2026-10-23
 
