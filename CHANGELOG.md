@@ -378,6 +378,47 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.3.0] — 2026-10-26
+
+### Added
+
+- **A boolean and a `null` are places the application reads input, and were the
+  last scalars excluded.** An empty JSON string and an empty form value were
+  candidates already; `{"debug": true}` was not, so a field that reaches a shell
+  through a boolean flag could not be tested at all.
+
+  The exclusion was inherited from the *response* walk, where it is right for a
+  reason that does not hold on this side: a response channel is somewhere a
+  computed value could surface, and `true` can carry none, so searching it is a
+  wasted comparison. A request leaf is somewhere the application reads attacker
+  input. The two walks ask opposite questions, and a test now pins that the
+  response side still skips them.
+
+  The payload goes in as a JSON **string**, the only form that leaves the body
+  parseable, so the leaf's type changes from boolean or null to string. An
+  endpoint that validates the type answers 4xx where the payload-free control
+  got through, which the engine already reports as `blocked` rather than
+  `negative` — a refusal, not a clean result. That is the reason these are worth
+  enumerating anyway: the run says the sink was never reached instead of saying
+  the target is fine. Objects and arrays are still not candidates, because they
+  carry no value of their own.
+
+- **A query or form key posted more than once had only its first occurrence
+  tested.** A checkbox array and a repeated filter both post one name several
+  times. Addressing by name alone rewrote the first pair for every candidate, so
+  every later one was counted as covered and probed nowhere — the same defect a
+  repeated multipart field had, fixed the same way.
+
+  Each occurrence is now its own point, addressed by **position** with the name
+  as the key placement re-checks, so a point that no longer describes the request
+  rewrites nothing rather than the wrong parameter. The index is shown as `(#1)`,
+  `(#2)` only where the key repeats, because it is noise on the common one.
+
+  `_mark_urlencoded_param` takes the position as an **appended** argument.
+  Threading a parameter through this file has already shifted a positional
+  caller's arguments once, and `-p NAME` still addresses by name with no index
+  to give, keeping the first occurrence as it did.
+
 ## [3.2.0] — 2026-10-23
 
 ### Added
@@ -3093,6 +3134,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.3.0]: https://github.com/kabiri-labs/rcekit/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/kabiri-labs/rcekit/compare/v3.1.2...v3.2.0
 [3.1.2]: https://github.com/kabiri-labs/rcekit/compare/v3.1.1...v3.1.2
 [3.1.1]: https://github.com/kabiri-labs/rcekit/compare/v3.1.0...v3.1.1

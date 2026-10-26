@@ -7678,6 +7678,156 @@ def _graphql_capture(payload):
     return parse_raw_request(head + json.dumps(payload))
 
 
+def _json_capture(body):
+    head = ("POST /api HTTP/1.1\r\nHost: target.example\r\n"
+            "Content-Type: application/json\r\n\r\n")
+    return parse_raw_request(head + body)
+
+
+def _urlencoded_capture(body):
+    head = ("POST /api HTTP/1.1\r\nHost: target.example\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n\r\n")
+    return parse_raw_request(head + body)
+
+
+class JsonScalarLeafTestCase(unittest.TestCase):
+    """A boolean and a `null` are places the application reads input too.
+
+    An empty JSON string and an empty form value were candidates already, so
+    these were the last scalars excluded -- and the exclusion came from the
+    *response* walk, where it is right for a reason that does not hold here:
+    `true` can carry no computed value, so searching a response for one is a
+    wasted comparison, while `{"debug": true}` reaching a shell is as ordinary
+    as `{"host": "x"}` doing it.
+
+    The payload goes in as a JSON string, which is the only form that leaves
+    the body parseable, so the leaf's type changes. That is a real limit and the
+    test below records it rather than hiding it."""
+
+    def _names(self, body):
+        return [p.name for p in rcekit.enumerate_injection_points(_json_capture(body))
+                if p.kind == "json"]
+
+    def _place(self, body, name, mark="FUZZ"):
+        req = _json_capture(body)
+        point = next(p for p in rcekit.enumerate_injection_points(req)
+                     if p.kind == "json" and p.name == name)
+        return rcekit.place_injection_point(
+            req["target"], req["headers"], req["body"], point, mark)[2]
+
+    def test_booleans_and_nulls_are_candidates(self):
+        self.assertEqual(
+            self._names('{"host": "x", "debug": true, "opt": null, "n": 3}'),
+            ["host", "debug", "opt", "n"])
+
+    def test_a_nested_and_an_array_scalar_are_reached(self):
+        self.assertEqual(self._names('{"a": {"b": false}, "c": [null, true]}'),
+                         ["a.b", "c[0]", "c[1]"])
+
+    def test_placement_keeps_the_body_parseable_and_changes_the_type(self):
+        # Both halves asserted, because the type change is the documented cost
+        # of being able to test the field at all.
+        placed = self._place('{"host": "x", "debug": true}', "debug")
+        self.assertEqual(json.loads(placed), {"host": "x", "debug": "FUZZ"})
+        self.assertIsInstance(json.loads(placed)["debug"], str)
+
+    def test_a_null_leaf_is_replaced_not_removed(self):
+        placed = self._place('{"opt": null, "keep": null}', "opt")
+        self.assertEqual(json.loads(placed), {"opt": "FUZZ", "keep": None})
+
+    def test_the_response_walk_still_skips_them(self):
+        # The near neighbour, and the point of the whole change: the two walks
+        # ask opposite questions, so widening the request side must not widen
+        # the response side. A boolean channel would be a wasted comparison.
+        gen = RCEKit()
+        self.assertEqual(gen._json_leaf_channels('{"f": true, "g": null}'), [])
+        self.assertEqual(gen._json_leaf_channels('{"s": "v", "n": 2}'),
+                         [("JSON field s", "v"), ("JSON field n", "2")])
+
+    def test_a_container_is_still_not_a_candidate(self):
+        # Objects and arrays carry no value of their own; replacing one would
+        # test the shape rather than a field.
+        self.assertEqual(self._names('{"o": {}, "a": [], "s": "x"}'), ["s"])
+
+
+class RepeatedUrlencodedKeyTestCase(unittest.TestCase):
+    """`a=1&a=2` is ordinary, and only the first was ever testable.
+
+    A checkbox array and a repeated filter both post one name several times.
+    Addressing by name alone rewrote the first occurrence for every candidate,
+    so the later ones were counted as covered and probed nowhere -- the same
+    bug a repeated multipart field had, and it is fixed the same way, by making
+    the position the authority and keeping the name as the key that placement
+    re-checks."""
+
+    QUERY = "GET /s?a=1&a=2&b=3 HTTP/1.1\r\nHost: target.example\r\n\r\n"
+
+    def _query_points(self):
+        return [p for p in rcekit.enumerate_injection_points(parse_raw_request(self.QUERY))
+                if p.kind == "query"]
+
+    def _place_query(self, point, mark="FUZZ"):
+        req = parse_raw_request(self.QUERY)
+        return rcekit.place_injection_point(
+            req["target"], req["headers"], req.get("body", ""), point, mark)[0]
+
+    def test_each_occurrence_is_its_own_point(self):
+        points = self._query_points()
+        self.assertEqual([(p.name, p.tokens) for p in points],
+                         [("a", (0,)), ("a", (1,)), ("b", (2,))])
+
+    def test_each_occurrence_is_placed_at_its_own_position(self):
+        first, second, other = self._query_points()
+        self.assertEqual(self._place_query(first), "/s?a=FUZZ&a=2&b=3")
+        self.assertEqual(self._place_query(second), "/s?a=1&a=FUZZ&b=3")
+        self.assertEqual(self._place_query(other), "/s?a=1&a=2&b=FUZZ")
+
+    def test_the_index_is_shown_only_where_it_distinguishes_something(self):
+        # The near neighbour: `b` appears once, so the index would be noise.
+        labels = [p.label for p in self._query_points()]
+        self.assertEqual(labels, ["query param 'a' (#1)", "query param 'a' (#2)",
+                                  "query param 'b'"])
+
+    def test_a_form_body_gets_the_same_treatment(self):
+        req = _urlencoded_capture("tag=a&tag=b&x=1")
+        points = [p for p in rcekit.enumerate_injection_points(req) if p.kind == "form"]
+        self.assertEqual([(p.name, p.tokens) for p in points],
+                         [("tag", (0,)), ("tag", (1,)), ("x", (2,))])
+        placed = [rcekit.place_injection_point(req["target"], req["headers"],
+                                               req["body"], p, "FUZZ")[2] for p in points]
+        self.assertEqual(placed, ["tag=FUZZ&tag=b&x=1", "tag=a&tag=FUZZ&x=1",
+                                  "tag=a&tag=b&x=FUZZ"])
+
+    def test_a_point_whose_position_no_longer_names_that_key_places_nothing(self):
+        # An index without the name it was enumerated under means the request
+        # moved underneath the point; rewriting whatever sits there now would
+        # attribute a finding to the wrong parameter.
+        req = parse_raw_request(self.QUERY)
+        point = rcekit.InjectionPoint("query", "a", "x", (2,))
+        self.assertIsNone(rcekit.place_injection_point(
+            req["target"], req["headers"], req.get("body", ""), point, "FUZZ"))
+
+    def test_naming_a_parameter_still_works_without_an_index(self):
+        # `-p NAME` goes through _place_param_marker, which addresses by name
+        # and has no index to give. The new argument is optional for exactly
+        # that caller, and it keeps the first occurrence.
+        marked = rcekit._mark_urlencoded_param("a=1&a=2&b=3", "a", "FUZZ")
+        self.assertEqual(marked, "a=FUZZ&a=2&b=3")
+        self.assertIsNone(rcekit._mark_urlencoded_param("a=1", "zz", "FUZZ"))
+
+    def test_a_byte_order_mark_on_the_first_key_still_resolves(self):
+        # The 3.1.2 behaviour, re-checked because this change rewrote the loop
+        # that carries it: the point is named without the mark and the body
+        # keeps its own bytes.
+        body = rcekit._BOM + "cmd=a&cmd=b"
+        req = _urlencoded_capture(body)
+        points = [p for p in rcekit.enumerate_injection_points(req) if p.kind == "form"]
+        self.assertEqual([(p.name, p.tokens) for p in points], [("cmd", (0,)), ("cmd", (1,))])
+        placed = rcekit.place_injection_point(req["target"], req["headers"],
+                                              req["body"], points[1], "FUZZ")[2]
+        self.assertEqual(placed, rcekit._BOM + "cmd=a&cmd=FUZZ")
+
+
 class MultipartInjectionPointTestCase(unittest.TestCase):
     """A multipart body has fields, and until now none of them were tested.
 
@@ -9328,9 +9478,19 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
 
 
 class JsonPathTestCase(unittest.TestCase):
-    def test_leaf_tokens_skip_containers_booleans_and_nulls(self):
+    def test_leaf_tokens_take_every_scalar_and_skip_containers(self):
+        # Booleans and nulls were excluded here until 3.3.0, and the exclusion
+        # was the inherited one: it belongs to the *response* walk, where `true`
+        # can carry no computed value, not to the request side, where
+        # `{"debug": true}` is a field the application reads. The container half
+        # of this assertion is unchanged and still right -- an object or an
+        # array carries no value of its own, so replacing one would test the
+        # shape rather than a field. See JsonScalarLeafTestCase.
         obj = {"a": {"b": 1}, "ok": True, "none": None, "list": [{"c": "x"}]}
-        self.assertEqual(rcekit._json_leaf_tokens(obj), [("a", "b"), ("list", 0, "c")])
+        self.assertEqual(rcekit._json_leaf_tokens(obj),
+                         [("a", "b"), ("ok",), ("none",), ("list", 0, "c")])
+        self.assertEqual(rcekit._json_leaf_tokens({"o": {}, "a": [], "s": "x"}),
+                         [("s",)])
 
     def test_rendering_is_readable_and_quotes_ambiguous_keys(self):
         self.assertEqual(rcekit._render_json_path(("user", "profile", "name")),

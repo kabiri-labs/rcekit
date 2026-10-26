@@ -675,10 +675,10 @@ serialization rather than blanket-encoded:
 
 | Kind | Addressed as | Rewritten by |
 |---|---|---|
-| `query` | parameter name | the `a=1&b=2` encoder |
-| `json` | path — `user.profile.name`, `tags[1]` | the JSON encoder, re-serialised |
+| `query` | parameter name, by position when it repeats | the `a=1&b=2` encoder |
+| `json` | path — `user.profile.name`, `tags[1]`; every scalar, booleans and `null` included | the JSON encoder, re-serialised |
 | `xml` | path — `soap:Body/getUser/name`, `getUser/@id`, `note/cdata()` | the document spliced at the value's offsets, XML-escaped for its position |
-| `form` | field name | the `a=1&b=2` encoder |
+| `form` | field name, by position when it repeats | the `a=1&b=2` encoder |
 | `multipart` | part name from `Content-Disposition` | the part's own body, re-serialised with CRLF delimiters |
 | `filename` | the field whose part declares it | the `filename="…"` parameter in the part *header*, quoted-string escaped |
 | `cookie` | crumb name | the `Cookie` header, other crumbs untouched |
@@ -686,7 +686,28 @@ serialization rather than blanket-encoded:
 | `path` | segment index | the URL path (opt-in, see below) |
 
 A JSON leaf is only *replaced*, never created: assigning to a missing key would
-test a field the application never sends.
+test a field the application never sends. Every scalar is a candidate, **booleans
+and `null` included** — `{"debug": true}` reaching a shell is as ordinary as
+`{"host": "x"}` doing it, and an empty JSON string and an empty form value were
+candidates already. Objects and arrays are not: they carry no value of their own,
+so replacing one would test the shape rather than a field.
+
+The payload goes into such a leaf as a JSON **string**, which is the only form
+that leaves the body parseable, so the leaf's type changes from boolean or null
+to string. An endpoint that validates the type answers 4xx where the
+payload-free control got through, and the run reports that as `blocked` rather
+than `negative` — a refusal, not a clean result. That is the reason these are
+worth enumerating even so: the run says the sink was never reached instead of
+saying the target is fine.
+
+A query or form key posted **more than once** — a checkbox array, a repeated
+filter — has each occurrence as its own point, addressed by position and
+labelled `(#1)`, `(#2)` so a finding says which one carried it. Addressing by
+name alone rewrote the first occurrence for every candidate, so the later ones
+were counted as covered and probed nowhere. The index appears only where the key
+repeats, because it is noise on the common one. Placement re-checks the name at
+that position, so a point that no longer describes the request rewrites nothing
+rather than the wrong parameter.
 
 A **byte-order mark** on either a JSON or an XML body is tolerated, at the branch
 and at the parse alike — `str.strip()` leaves U+FEFF in place and `json.loads`
