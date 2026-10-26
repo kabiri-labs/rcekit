@@ -709,6 +709,13 @@ repeats, because it is noise on the common one. Placement re-checks the name at
 that position, so a point that no longer describes the request rewrites nothing
 rather than the wrong parameter.
 
+`-p NAME` is unaffected and keeps its own behaviour: it has no position to give,
+so it rewrites **every** pair of that name, as it always has. The two ask
+different questions — enumeration asks which of these positions is the sink,
+`-p NAME` asks for the name wherever it goes — and an application that reads the
+*last* value of a repeated key would never see a payload placed only in the
+first.
+
 A **byte-order mark** on either a JSON or an XML body is tolerated, at the branch
 and at the parse alike — `str.strip()` leaves U+FEFF in place and `json.loads`
 rejects it outright, so a marked capture used to yield no body point at all. The
