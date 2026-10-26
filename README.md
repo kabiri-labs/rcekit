@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.3.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.4.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -324,8 +324,10 @@ That is 7 of the 9 methods; `file` and `write` need a path only you can supply
 and are scenarios 3 and 4 above. `--auto-params all` takes every query value,
 JSON leaf — booleans and `null` included — XML element, attribute and CDATA
 section, form field, multipart part and upload filename, cookie and header, with
-each occurrence of a repeated query or form key counted separately;
-`--point-order thorough` adds every non-hop-by-hop header;
+each occurrence of a repeated query or form key counted separately, and the
+fields inside an encoded blob — a base64 JSON document or a JWT — reached
+through their carrier; `--point-order thorough` adds every non-hop-by-hop
+header;
 `--confirm-depth every` maps every shape the sink accepts instead of stopping at
 the first; `--bridges auto` carries the command probes through SQL and XML query
 languages; `--observe-url` catches execution that lands on a different request.
@@ -534,7 +536,16 @@ them will call `executed`:
   with the probe cost printed before anything fires. A query or form key posted
   more than once has **each occurrence** as its own point, addressed by position:
   addressing by name alone rewrote the first one for every candidate, so the
-  later ones were counted as covered and probed nowhere.
+  later ones were counted as covered and probed nowhere. An **encoded blob** —
+  a base64 or base64url JSON document, or a **JWT** — is one opaque string to
+  every other kind, so the fields inside it get points of their own, named
+  `state>role`, `tok>sub`. The marker cannot go inside the encoding, because
+  base64 destroys it and the request would go out carrying the blob unchanged;
+  it replaces the whole carrier value, and the payload is put inside the blob
+  when the request is rendered, then re-encoded for the carrier. A JWT's
+  signature is invalidated by construction — an application that accepts the
+  rewritten token is not verifying it, which is the finding, and one that
+  rejects it reports `blocked` rather than a clean negative.
   A GraphQL body is ordered by what can actually confirm: the `variables` a
   resolver reads before the operation document itself. An XML body is spliced at
   the value's offsets rather than re-emitted, so a whitespace-significant
@@ -700,6 +711,7 @@ target shapes.
 | I have a request saved from Burp | [Point at a captured request](docs/guide.md#point-at-a-captured-request) |
 | The app is JSON / the payload keeps getting mangled | [Landing the payload intact](docs/guide.md#landing-the-payload-intact) |
 | The body is XML or a SOAP envelope | [Enumerating injection points](docs/reference.md#enumerating-injection-points) |
+| A parameter, cookie or token carries a base64 blob or a JWT | [Enumerating injection points](docs/reference.md#enumerating-injection-points) |
 | The sink strips `;` | [When the sink filters separators](docs/guide.md#when-the-sink-filters-separators) |
 | My input lands inside `'quotes'` | [Injecting inside quotes](docs/guide.md#injecting-inside-quotes) |
 | The sink runs my input as the whole command | [Whole-command sinks](docs/guide.md#whole-command-sinks) |

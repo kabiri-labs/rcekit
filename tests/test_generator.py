@@ -7690,6 +7690,230 @@ def _urlencoded_capture(body):
     return parse_raw_request(head + body)
 
 
+def _b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def _b64u(text):
+    return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+
+# A JSON document whose base64url form genuinely contains `-` or `_`, so the two
+# alphabets can be told apart. Found by search rather than by eye: those
+# characters appear only for particular byte triples, and a fixture that does not
+# produce them tests base64 twice while claiming to test both.
+_URLSAFE_DOC = '{"d":"a~?>","role":"r"}'
+
+
+class EncodedBlobTestCase(unittest.TestCase):
+    """A session token is one opaque leaf until something decodes it.
+
+    A base64 `state` parameter, JSON in a cookie and a bearer token all carry
+    fields the application reads out of them, and the enumerator could name the
+    carrier while having no way to reach what was inside.
+
+    The marker cannot go inside the encoded region -- base64 destroys it, so the
+    request would go out carrying the blob unchanged and the run would report
+    `negative` about a point it never tested. The marker replaces the whole
+    carrier value instead, and the payload is put inside the blob at delivery
+    time by the location the point names."""
+
+    # -- detection, and what it refuses -------------------------------------
+
+    def test_each_codec_is_recognised(self):
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        self.assertEqual(rcekit._blob_decode(_b64(inner))[0], "b64")
+        urlsafe = base64.urlsafe_b64encode(_URLSAFE_DOC.encode()).decode().rstrip("=")
+        self.assertEqual(rcekit._blob_decode(urlsafe)[0], "b64url")
+        jwt = _b64u('{"alg":"HS256"}') + "." + _b64u(inner) + ".c2ln"
+        self.assertEqual(rcekit._blob_decode(jwt)[0], "jwt")
+
+    def test_the_urlsafe_fixture_really_distinguishes_the_alphabets(self):
+        # Guards the fixture, not the code. An earlier version of this test used
+        # a document whose base64url happened to contain no `-` or `_`, so it
+        # asserted base64url and measured base64.
+        encoded = base64.urlsafe_b64encode(_URLSAFE_DOC.encode()).decode().rstrip("=")
+        self.assertTrue("-" in encoded or "_" in encoded, encoded)
+
+    def test_what_is_not_a_blob(self):
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        for label, value in [
+                ("base64 of plain text", _b64("hello there friend ok")),
+                ("base64 of a bare number", _b64("12345678901234567890")),
+                ("base64 of a JSON scalar", _b64('"just a string value"')),
+                ("a two-segment token", _b64u('{"alg":"x"}') + "." + _b64u(inner)),
+                ("ordinary text", "just-an-ordinary-value"),
+                ("JSON that is not encoded", inner),
+                ("too short to bother", _b64('{"a":1}')),
+                ("empty", ""),
+                ("none at all", None)]:
+            self.assertIsNone(rcekit._blob_decode(value), label)
+
+    def test_a_scalar_document_is_refused_because_it_has_no_leaf(self):
+        # An object or an array has fields to address; `"x"` or `7` does not,
+        # and plenty of accidental base64 decodes to one.
+        self.assertIsNone(rcekit._blob_decode(_b64("7777777777777777777777")))
+        self.assertIsNotNone(rcekit._blob_decode(_b64('["aaaaaaaaaaaaaaaa"]')))
+
+    def test_decoding_never_raises_on_a_capture_it_cannot_read(self):
+        for broken in ("=" * 40, "....", "a.b.c", _b64("{")[:20], "A" * 17,
+                       chr(0) * 20, "a" * 70000):
+            self.assertIsInstance(rcekit._blob_decode(broken), (tuple, type(None)), broken)
+
+    # -- rebuilding ---------------------------------------------------------
+
+    def _spec(self, raw, tokens=("role",)):
+        codec, template, prefix, suffix, padded = rcekit._blob_decode(raw)
+        return rcekit.BlobSpec(codec, template, tokens, prefix, suffix, padded)
+
+    def test_the_payload_lands_at_the_leaf_inside(self):
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        rendered = self._spec(_b64(inner)).render("; echo pwned")
+        self.assertEqual(json.loads(base64.b64decode(rendered).decode()),
+                         {"user": "ali", "role": "; echo pwned"})
+
+    def test_a_jwt_keeps_its_header_and_signature_byte_for_byte(self):
+        # The signature is invalid either way; changing the bytes around it
+        # would make a rejection say nothing about why.
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        header, sig = _b64u('{"alg":"HS256"}'), "c2lnbmF0dXJl"
+        rendered = self._spec(header + "." + _b64u(inner) + "." + sig).render("; id")
+        parts = rendered.split(".")
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], header)
+        self.assertEqual(parts[2], sig)
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(payload).decode())["role"],
+                         "; id")
+
+    def test_a_urlsafe_blob_stays_in_the_urlsafe_alphabet(self):
+        raw = base64.urlsafe_b64encode(_URLSAFE_DOC.encode()).decode().rstrip("=")
+        rendered = self._spec(raw).render("; id")
+        self.assertNotIn("+", rendered)
+        self.assertNotIn("/", rendered)
+
+    def test_padding_is_carried_the_way_it_was_captured(self):
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        padded = _b64(inner)
+        self.assertTrue(padded.endswith("="), "fixture must be padded")
+        self.assertTrue(self._spec(padded).render("x").endswith("="))
+        self.assertFalse(self._spec(padded.rstrip("=")).render("x").endswith("="))
+
+    def test_rebuilding_a_leaf_that_is_gone_refuses_rather_than_inventing_it(self):
+        spec = self._spec(_b64(json.dumps({"role": "guest"})), tokens=("absent",))
+        with self.assertRaises(ValueError):
+            spec.render("x")
+
+    # -- enumeration --------------------------------------------------------
+
+    def _capture(self):
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        jwt = _b64u('{"alg":"HS256"}') + "." + _b64u(inner) + ".c2ln"
+        raw = ("POST /s?state=" + _b64(inner) + " HTTP/1.1\r\n"
+               "Host: target.example\r\n"
+               "Cookie: tok=" + jwt + "\r\n"
+               "Content-Type: application/json\r\n\r\n"
+               '{"blob": "' + _b64(inner) + '"}')
+        return raw, parse_raw_request(raw)
+
+    def test_fields_inside_each_carrier_become_points(self):
+        _raw, req = self._capture()
+        blobs = {p.name for p in rcekit.enumerate_injection_points(req) if p.kind == "blob"}
+        self.assertEqual(blobs, {"state>user", "state>role", "tok>user", "tok>role",
+                                 "blob>user", "blob>role"})
+
+    def test_the_carrier_keeps_its_own_point(self):
+        # A sink may read the token before decoding it, so the opaque value is
+        # still worth probing. These are additions, not replacements.
+        _raw, req = self._capture()
+        kinds = {(p.kind, p.name) for p in rcekit.enumerate_injection_points(req)}
+        self.assertIn(("query", "state"), kinds)
+        self.assertIn(("cookie", "tok"), kinds)
+        self.assertIn(("json", "blob"), kinds)
+
+    def test_the_label_names_the_codec_and_the_carrier(self):
+        _raw, req = self._capture()
+        labels = {p.label for p in rcekit.enumerate_injection_points(req)
+                  if p.kind == "blob" and p.name.endswith("role")}
+        self.assertIn("b64 blob in query param 'state', field 'role'", labels)
+        self.assertIn("jwt blob in cookie 'tok', field 'role'", labels)
+
+    def test_the_kind_can_be_narrowed_away(self):
+        _raw, req = self._capture()
+        narrowed = rcekit.enumerate_injection_points(req, kinds=("query", "cookie", "json"))
+        self.assertFalse([p for p in narrowed if p.kind == "blob"])
+
+    def test_the_point_count_per_blob_is_bounded(self):
+        # The bound is enforced inside the leaf walk, which `blob_points` hands
+        # the limit to. A slice afterwards would be dead code -- mutation
+        # testing showed removing one changed nothing, because the walk cannot
+        # return more leaves than it was asked for -- so this asserts the
+        # bound through the path that actually carries it.
+        wide = json.dumps({"k%d" % i: str(i) for i in range(400)})
+        carrier = rcekit.InjectionPoint("query", "t", "query param 't'", (0,))
+        self.assertEqual(len(rcekit.blob_points(carrier, _b64(wide))),
+                         rcekit._BLOB_POINT_LIMIT)
+        self.assertEqual(len(rcekit.blob_points(carrier, _b64(wide), limit=5)), 5)
+
+    # -- placement and the location it names --------------------------------
+
+    def test_placement_replaces_the_whole_carrier_value(self):
+        _raw, req = self._capture()
+        point = next(p for p in rcekit.enumerate_injection_points(req)
+                     if p.kind == "blob" and p.name == "state>role")
+        target, _h, _b = rcekit.place_injection_point(
+            req["target"], req["headers"], req["body"], point, "FUZZ")
+        self.assertIn("state=FUZZ", target)
+
+    def test_each_carrier_names_the_slot_its_value_is_rendered_in(self):
+        _raw, req = self._capture()
+        slots = {}
+        for point in rcekit.enumerate_injection_points(req):
+            if point.kind != "blob" or not point.name.endswith("role"):
+                continue
+            slots[point.outer.kind] = next(iter(rcekit.point_locations(point)))
+        self.assertEqual(slots, {"query": "url", "cookie": "header", "json": "body"})
+
+    def test_a_blob_still_goes_through_its_carriers_own_encoding(self):
+        # The subtlety, and a bug while writing this: re-wrapping replaces the
+        # inner encoding, never the carrier's. Raw base64 in a query string
+        # carries `+`, which a form parser reads as a space.
+        #
+        # The payload is `~~~` because that is a value whose *base64 output*
+        # contains a `+` -- found by search, since the character appears only
+        # for particular byte triples. A payload merely containing `+` proves
+        # nothing here: that `+` is inside the document being encoded, so
+        # base64 consumes it and the output may carry none. An earlier version
+        # of this test asserted on such a payload and passed while measuring
+        # nothing, which is the second fixture in this file to do that.
+        spec = self._spec(_b64(json.dumps({"role": "guest"})))
+        raw = spec.render("~~~")
+        self.assertIn("+", raw, "fixture must produce a + in the base64 output")
+        rendered = rcekit.BlobLocation(spec, "query_value", "blob[b64]")("~~~")
+        self.assertNotIn("+", rendered, "a query value must be percent-encoded")
+        self.assertIn("%2B", rendered)
+        # The JSON-leaf carrier escapes for JSON instead, so the `+` stays.
+        as_json = rcekit.BlobLocation(spec, "json_string", "blob[b64]")("~~~")
+        self.assertIn("+", as_json)
+        self.assertNotIn("%", as_json)
+
+    def test_the_location_prints_readably_for_the_run_log(self):
+        # The resolved location is logged with `%s`; a bare lambda would print
+        # its address.
+        spec = self._spec(_b64(json.dumps({"role": "guest"})))
+        self.assertEqual("%s" % rcekit.BlobLocation(spec, "raw", "blob[b64]"), "blob[b64]")
+
+    def test_the_encoder_accepts_a_callable_without_disturbing_the_names(self):
+        kit = RCEKit()
+        self.assertEqual(kit._encode_for_location("a b", "raw"), "a b")
+        self.assertEqual(kit._encode_for_location("x", lambda p: "wrapped:" + p), "wrapped:x")
+        with self.assertRaises(ValueError):
+            kit._encode_for_location("x", "no_such_location")
+        # A blob location is never operator-supplied, so the CLI's choices are
+        # untouched by any of this.
+        self.assertNotIn("blob", RCEKit.body_location_choices())
+
+
 class JsonScalarLeafTestCase(unittest.TestCase):
     """A boolean and a `null` are places the application reads input too.
 
@@ -9228,23 +9452,52 @@ class DuplicateMarkerTestCase(unittest.TestCase):
             ["Content-Type: application/json"], "query_value", "json_string")
         self.assertEqual(rendered.decode().count("P"), 2)
 
-    def test_threading_the_marker_moved_no_existing_positional_slot(self):
-        """The marker is appended to every signature it was threaded through.
+    # Where `mark` sits in each signature it was threaded through. Pinned as an
+    # index rather than as "last", which is what this asserted until a second
+    # parameter was appended after it: inserting one *before* `mark` moves it
+    # and fails here, which is the rule, while appending one after leaves every
+    # existing slot where it was and is allowed.
+    MARK_SLOTS = {
+        "run_detection": 14,
+        "run_verification": 11,
+        "_fire": 9,
+        "_fire_channels": 9,
+        "_escalate": 14,
+        "_detect_body_location": 3,
+    }
 
-        Inserting it mid-signature moves every later parameter along by one, and
-        a caller passing one of those positionally then binds the wrong value:
-        `run_detection`'s `config` landed in `mark`, and the first delivery
-        raised `TypeError` from `str.replace`. Pinned per signature rather than
-        as one rule, because the fix for `run_detection` puts `mark` somewhere
-        its meaning does not suggest -- so the next person to tidy it needs this
-        to fail."""
+    def test_threading_the_marker_moved_no_existing_positional_slot(self):
+        """Nothing was ever inserted mid-signature, only appended.
+
+        Inserting moves every later parameter along by one, and a caller passing
+        one of those positionally then binds the wrong value: `run_detection`'s
+        `config` landed in `mark`, and the first delivery raised `TypeError`
+        from `str.replace`.
+
+        Pinned per signature, because the fix for `run_detection` puts `mark`
+        somewhere its meaning does not suggest -- so the next person to tidy it
+        needs this to fail.
+
+        It asserted `mark` was *last* until `header_location` was appended after
+        it. That was a proxy for the rule rather than the rule: what must not
+        change is where the parameters that already existed sit, and the index
+        pins exactly that. Confirmed by mutation -- moving `mark` next to
+        `body_location`, where its meaning belongs, fails here.
+
+        A clause asserting that anything appended after `mark` carries a default
+        was written and removed: Python already refuses a non-defaulted
+        parameter after a defaulted one, so it could not fail.
+        `test_a_caller_passing_config_positionally_still_gets_config` is this
+        same invariant checked through an actual binding rather than through the
+        shape of the signature, and it is the one that would catch a real
+        break."""
         import inspect
-        for name in ("run_detection", "run_verification", "_fire", "_fire_channels",
-                     "_escalate", "_detect_body_location"):
+        for name, slot in self.MARK_SLOTS.items():
             params = list(inspect.signature(getattr(RCEKit, name)).parameters)
-            self.assertEqual(params[-1], "mark",
-                             f"{name}: mark must be last, or it shifts "
-                             f"{params[params.index('mark') + 1:]}")
+            self.assertEqual(
+                params.index("mark"), slot,
+                f"{name}: mark moved from slot {slot} to {params.index('mark')}, "
+                f"which shifts every parameter after it")
 
     def test_a_caller_passing_config_positionally_still_gets_config(self):
         # The break this ordering exists to prevent, stated as the call that
@@ -9481,6 +9734,60 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         result = self._upload_run("/reflect")
         self.assertEqual(result.returncode, 0, result.stdout[-2000:])
         self.assertIn("multipart filename of 'avatar'", result.stdout)
+        self.assertNotIn("EXECUTED (", result.stdout)
+        self.assertNotIn("<-- EXECUTED", result.stdout)
+
+    def _blob_run(self, path):
+        """Point the whole CLI at an endpoint that shells a field inside a blob.
+
+        The fixture decodes the `state` parameter and shells the `role` field
+        out of it, which is the half a unit test of the codec cannot show: the
+        payload has to survive percent-encoding, base64 and JSON parsing in
+        that order and arrive at the shell intact."""
+        import tempfile
+
+        def route(method, path_, params, headers, body_):
+            raw = params.get("state", "")
+            try:
+                pad = "=" * (-len(raw) % 4)
+                document = json.loads(base64.b64decode(raw + pad).decode())
+            except Exception:
+                return 400, "undecodable"
+            role = str(document.get("role", ""))
+            if path_.startswith("/vuln"):
+                pipe = sh_popen("echo " + role + " 2>&1")
+                out = pipe.read()
+                pipe.close()
+            else:  # /reflect: name the field back, never run it
+                out = role
+            return 200, "role=" + out
+
+        inner = json.dumps({"user": "ali", "role": "guest"})
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET %s?state=%s HTTP/1.1\nHost: %s\n\n"
+                               % (path, _b64(inner), host))
+            return self._run("--acknowledge-consent", "-r", str(capture),
+                             "--auto-params", "blob", "--methods", "reflected",
+                             "--request-scheme", "http", "--environments", "unix",
+                             "--contexts", "raw", "--probe-depth", "quick")
+
+    def test_a_field_inside_a_base64_blob_is_confirmed_end_to_end(self):
+        result = self._blob_run("/vuln")
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        # It reached inside the blob rather than probing it as one string...
+        self.assertIn("blob in query param 'state', field 'role'", result.stdout)
+        # ...and the finding names that point.
+        self.assertIn("EXECUTED (", result.stdout)
+        self.assertIn("at b64 blob in query param 'state', field 'role'", result.stdout)
+
+    def test_a_blob_endpoint_that_only_echoes_is_never_confirmed(self):
+        # The other half of the gate. The same capture, the same probes, a
+        # target that names the decoded field back instead of running it.
+        result = self._blob_run("/reflect")
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        self.assertIn("blob in query param 'state', field 'role'", result.stdout)
         self.assertNotIn("EXECUTED (", result.stdout)
         self.assertNotIn("<-- EXECUTED", result.stdout)
 

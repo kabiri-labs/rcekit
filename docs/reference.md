@@ -684,6 +684,7 @@ serialization rather than blanket-encoded:
 | `cookie` | crumb name | the `Cookie` header, other crumbs untouched |
 | `header` | header name | single-line header escaping |
 | `path` | segment index | the URL path (opt-in, see below) |
+| `blob` | carrier and inner field — `state>role`, `tok>sub` | the whole carrier value, rebuilt around the payload and re-encoded |
 
 A JSON leaf is only *replaced*, never created: assigning to a missing key would
 test a field the application never sends. Every scalar is a candidate, **booleans
@@ -840,6 +841,55 @@ Before this, an XML body fell through to the **form** branch — which it reache
 because a prolog and every attribute contain `=`. Splitting it on `&` produced
 one point named `<?xml version`, and every probe for it rewrote the prolog. The
 run printed a point and a probe count while nothing in the document was tested.
+
+An **encoded blob** — a base64 or base64url JSON document, or a JWT — is one
+opaque string to every other kind, and the fields inside it are what the
+application reads. A `state` parameter, a session cookie and a bearer token are
+all this shape. `--auto-params blob` adds a point per field inside, named
+`carrier>field`: `state>role`, `tok>sub`.
+
+The carrier **keeps its own point** as well, because a sink may read the token
+before decoding it — the inner fields are additions, not replacements. One layer
+only: a blob inside a blob is a combinatorial trap, and the cap is here rather
+than in a heuristic that stops when it feels like it. At most 64 fields per blob.
+
+**What counts as a blob.** It has to look like base64 of a useful length, decode
+as UTF-8, and parse as a JSON **object or array**. A scalar is refused — plenty
+of accidental base64 decodes to a number or a word, and a scalar carries no field
+to address anyway. A two-segment token is not a JWT. The inner format is JSON
+only; a base64 XML blob (SAML) is **not** covered, because the common binding is
+deflate-then-base64 over a signed assertion, which is the signed-envelope case
+the `xml` kind already refuses for the same reason.
+
+**The marker goes outside the encoding, never inside.** base64 destroys a marker
+placed in the decoded document, so the request would go out carrying the blob
+unchanged and the run would report `negative` about a point it never tested. The
+marker replaces the **whole carrier value** instead, and the payload is put
+inside the blob when the request is rendered: the payload goes into the decoded
+document, the document is re-encoded, and the result then goes through the
+carrier's **own** encoder. A blob in a query value is still percent-encoded; one
+in a JSON leaf is still JSON-escaped.
+
+**A JWT's signature is invalidated**, necessarily — rewriting a claim changes the
+bytes the signature covers. That is the point rather than a flaw: an application
+that accepts the rewritten token is not verifying it, which is itself a finding,
+and one that rejects it answers 4xx where the payload-free control got through,
+which the engine reports as `blocked` rather than `negative`. The header and
+signature segments are preserved byte for byte, so a rejection is about the
+claim and not about something else RCEKit changed.
+
+**The inner document is re-serialised** compactly, so the rebuilt value is not
+byte-identical to the captured one even where the field is unchanged — JSON has
+no offsets to splice the way the XML scanner does. The payload-free control is
+rendered through the same path, so probe and control still differ in the field
+under test and in nothing else. A target that covers the blob's exact bytes with
+its own integrity check sees a changed value for both.
+
+Padding is carried the way it was captured, and the two base64 alphabets differ
+in two characters, so a value containing none of `-_+/` belongs to both and is
+treated as standard base64. A target insisting on base64url would answer 4xx
+there, reported as `blocked`. A JWT is never ambiguous: its segments are
+base64url by definition.
 
 A **GraphQL** body is enumerated as JSON, then reordered. `variables` carries
 the values the operation is called with, and those reach resolvers; `query` is
