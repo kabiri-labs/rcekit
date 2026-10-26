@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.2.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.3.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -322,9 +322,10 @@ python rcekit.py --acknowledge-consent \
 
 That is 7 of the 9 methods; `file` and `write` need a path only you can supply
 and are scenarios 3 and 4 above. `--auto-params all` takes every query value,
-JSON leaf, XML element, attribute and CDATA section, form field, multipart part
-and upload filename, cookie and header; `--point-order thorough` adds every
-non-hop-by-hop header;
+JSON leaf — booleans and `null` included — XML element, attribute and CDATA
+section, form field, multipart part and upload filename, cookie and header, with
+each occurrence of a repeated query or form key counted separately;
+`--point-order thorough` adds every non-hop-by-hop header;
 `--confirm-depth every` maps every shape the sink accepts instead of stopping at
 the first; `--bridges auto` carries the command probes through SQL and XML query
 languages; `--observe-url` catches execution that lands on a different request.
@@ -526,10 +527,14 @@ them will call `executed`:
 - **Query-language bridges** (`--bridges`) — `COPY … FROM PROGRAM`,
   `xp_cmdshell`, `expect://`. A bridge is a carrier, not an oracle: it wraps the
   command the methods already build, so the same tiers apply through it.
-- **Injection-point enumeration** (`-p all`) — query, JSON leaves, XML and SOAP
-  elements, attributes and CDATA sections, form fields, multipart parts and the
-  **filenames** their uploads declare, cookies, headers and path segments, each
-  encoded for where it lands, with the probe cost printed before anything fires.
+- **Injection-point enumeration** (`-p all`) — query, JSON leaves (every scalar,
+  **booleans and `null` included**), XML and SOAP elements, attributes and CDATA
+  sections, form fields, multipart parts and the **filenames** their uploads
+  declare, cookies, headers and path segments, each encoded for where it lands,
+  with the probe cost printed before anything fires. A query or form key posted
+  more than once has **each occurrence** as its own point, addressed by position:
+  addressing by name alone rewrote the first one for every candidate, so the
+  later ones were counted as covered and probed nowhere.
   A GraphQL body is ordered by what can actually confirm: the `variables` a
   resolver reads before the operation document itself. An XML body is spliced at
   the value's offsets rather than re-emitted, so a whitespace-significant

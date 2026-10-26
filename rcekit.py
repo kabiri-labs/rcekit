@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -8400,7 +8400,25 @@ def _json_leaf_tokens(obj: Any, limit: int = 256,
     Tokens rather than a joined string, because a string cannot round-trip a key
     containing the separator. Iterative and bounded for the same reason the
     response-channel walk is: a pathological body must cost a bounded amount of
-    work, not a RecursionError in the middle of a run."""
+    work, not a RecursionError in the middle of a run.
+
+    Booleans and ``null`` are leaves here, and deliberately *not* in
+    :meth:`RCEKit._json_leaf_channels`. The two walks ask opposite questions. A
+    response channel is somewhere a computed value could surface, and ``true``
+    can carry no computed value, so searching it is a wasted comparison. A
+    request leaf is somewhere the application reads attacker input, and
+    ``{"debug": true}`` reaching a shell is as ordinary as ``{"host": "x"}``
+    doing it -- an empty JSON string and an empty form value were candidates
+    already, so these were the remaining scalars excluded for no reason that
+    held on this side.
+
+    The payload is placed as a JSON *string*, which is the only form that
+    leaves the body parseable, so the leaf's type changes from boolean or null
+    to string. An endpoint that validates the type answers 4xx where the
+    payload-free control got through, which the engine reports as ``blocked``
+    rather than as ``negative`` -- a refusal, not a clean result. That is the
+    honest outcome and the reason these are worth enumerating anyway: the run
+    says the sink was never reached instead of saying the target is fine."""
     leaves: List[Tuple[Any, ...]] = []
     stack: List[Tuple[Any, Tuple[Any, ...], int]] = [(obj, (), 0)]
     while stack and len(leaves) < limit:
@@ -8413,7 +8431,9 @@ def _json_leaf_tokens(obj: Any, limit: int = 256,
         elif isinstance(node, list):
             for index in range(len(node) - 1, -1, -1):
                 stack.append((node[index], path + (index,), depth + 1))
-        elif isinstance(node, str) or isinstance(node, (int, float)) and not isinstance(node, bool):
+        elif node is None or isinstance(node, (str, int, float)):
+            # `bool` is a subclass of `int`, so it needs no clause of its own;
+            # the previous form existed only to exclude it.
             if path:
                 leaves.append(path)
     return leaves
@@ -8476,10 +8496,14 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
 
     if "query" in selected:
         _, _, query = target.partition("?")
-        for pair in query.split("&") if query else []:
+        pairs = query.split("&") if query else []
+        keys = [pair.partition("=")[0] for pair in pairs]
+        for index, pair in enumerate(pairs):
             key, sep, _ = pair.partition("=")
             if sep and key:
-                points.append(InjectionPoint("query", key, f"query param '{key}'"))
+                points.append(InjectionPoint(
+                    "query", key, _urlencoded_label("query param", key, index, keys),
+                    (index,)))
 
     stripped = strip_bom_then_space(body)
     if _is_multipart_body(headers):
@@ -8547,17 +8571,21 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
                     "xml", path, f"XML {_XML_POINT_NOUNS[kind]} '{path}'", (start, end),
                     span=kind))
     elif "=" in (body or "") and "form" in selected:
-        for pair in body.split("&"):
+        pairs = body.split("&")
+        # A byte-order mark sits in front of the *first* key, where it is an
+        # artefact of how the body was encoded rather than part of the field
+        # name. Named without it, so the report does not print an invisible
+        # character and `-p NAME` addresses what the operator can read. The
+        # body keeps its own bytes: the key is rewritten as captured, since
+        # a urlencoded parser on the far side sees the mark too.
+        keys = [strip_bom(pair.partition("=")[0]) for pair in pairs]
+        for index, pair in enumerate(pairs):
             key, sep, _ = pair.partition("=")
-            # A byte-order mark sits in front of the *first* key, where it is an
-            # artefact of how the body was encoded rather than part of the field
-            # name. Named without it, so the report does not print an invisible
-            # character and `-p NAME` addresses what the operator can read. The
-            # body keeps its own bytes: the key is rewritten as captured, since
-            # a urlencoded parser on the far side sees the mark too.
             key = strip_bom(key)
             if sep and key:
-                points.append(InjectionPoint("form", key, f"body param '{key}'"))
+                points.append(InjectionPoint(
+                    "form", key, _urlencoded_label("body param", key, index, keys),
+                    (index,)))
 
     if "cookie" in selected:
         for name, value in headers:
@@ -8607,7 +8635,8 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
         path, sep, query = target.partition("?")
         if not sep:
             return None
-        marked = _mark_urlencoded_param(query, point.name, mark)
+        marked = _mark_urlencoded_param(query, point.name, mark,
+                                        point.tokens[0] if point.tokens else None)
         return (f"{path}?{marked}", headers, body) if marked is not None else None
     if point.kind == "json":
         try:
@@ -8637,7 +8666,8 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
             return None
         return target, headers, (body or "")[:start] + mark + (body or "")[end:]
     if point.kind == "form":
-        marked = _mark_urlencoded_param(body, point.name, mark)
+        marked = _mark_urlencoded_param(body, point.name, mark,
+                                        point.tokens[0] if point.tokens else None)
         return (target, headers, marked) if marked is not None else None
     if point.kind == "multipart":
         boundary = _multipart_boundary(headers, body or "")
@@ -8719,20 +8749,45 @@ def place_injection_point(target: str, headers: List[List[str]], body: str,
     return None
 
 
-def _mark_urlencoded_param(blob: str, param: str, mark: str) -> Optional[str]:
+def _urlencoded_label(noun: str, key: str, index: int, keys: "Sequence[str]") -> str:
+    """How a query or form point reads, indexed only when the key repeats.
+
+    ``a=1&a=2`` is ordinary -- a checkbox array and a repeated filter both post
+    one name several times -- and the index is noise on the common key, so it
+    appears exactly where it distinguishes something, which is how a repeated
+    multipart field is labelled too."""
+    if list(keys).count(key) > 1:
+        return f"{noun} '{key}' (#{index + 1})"
+    return f"{noun} '{key}'"
+
+
+def _mark_urlencoded_param(blob: str, param: str, mark: str,
+                           index: Optional[int] = None) -> Optional[str]:
     """Replace ``param``'s value with ``mark`` in a ``a=1&b=2`` blob (query or
-    form body). Returns the rewritten blob, or None if ``param`` is absent."""
+    form body). Returns the rewritten blob, or None if ``param`` is absent.
+
+    ``index`` is the pair's position and the authority when given, as the part
+    index is for multipart: a name posted more than once had only its *first*
+    occurrence rewritten, so every later one was counted as covered and probed
+    nowhere. The name is still checked against that position, so a point that no
+    longer describes the body rewrites nothing rather than the wrong pair.
+
+    Appended rather than inserted before ``mark``. Threading a parameter through
+    this file has already shifted a positional caller's arguments once, and the
+    callers here pass ``mark`` positionally."""
     if not blob:
         return None
     found = False
     out: List[str] = []
-    for pair in blob.split("&"):
+    for position, pair in enumerate(blob.split("&")):
         key, _, _value = pair.partition("=")
         # `strip_bom` on the comparison only: a mark in front of the first key
         # is an encoding artefact and the point is named without it, but the key
         # is written back exactly as captured, because the application's parser
         # sees the mark as well and a key RCEKit rewrote is a key it changed.
-        if key == param or strip_bom(key) == param:
+        names = key == param or strip_bom(key) == param
+        hit = (position == index and names) if index is not None else (not found and names)
+        if hit:
             out.append(f"{key}={mark}")
             found = True
         else:
