@@ -218,10 +218,12 @@ one request and neither is about a filter the other probes already try: the
 space-free one below, and the [Shellshock
 shape](reference.md#the-shellshock-shape), which reaches a header a CGI server
 put in the environment rather than a command the application built. The second
-is dropped if you declare the sink's shape — `--sink-raw`, `--sink-shape` or
-`--separators` — since each of those says the value lands inside a command,
-which a Shellshock sink does not have. Narrowing with `--environments` and
-`--contexts` keeps it.
+is the `env` rung of the [sink-shape
+ladder](reference.md#the-sink-shape-ladder), so `--sink-raw` and `--separators`
+drop it — each says the value lands inside a command, which a Shellshock sink
+does not have — and `--sink-shape env` asks for it alone, one request per
+carrier instead of 37. Narrowing with `--environments` and `--contexts` keeps
+it.
 
 It governs probe *shapes* only — never which break-outs are tried. Both depths
 sweep every separator, and both screen every separator in `--methods time`,

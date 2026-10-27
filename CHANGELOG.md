@@ -378,6 +378,44 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.6.0] — 2026-10-27
+
+### Added
+
+- **A shape held back with no rung to name it could not be asked for.** 3.5.0
+  added the Shellshock shape to `reflected` and suppressed it whenever the
+  operator declared the sink's shape — correctly, since `--sink-raw`,
+  `--sink-shape` and `--separators` each say the value lands inside a command
+  the application built, and this sink has none. But the suppression read
+  three flags directly and the ladder had no rung for it, which left two
+  things wrong at once: there was no `--sink-shape` name that asked for the
+  shape *instead* of the others, and the pre-flight plan — presented as an
+  audit of the traffic about to be sent — could not say it was being held
+  back. A ladder that shrinks quietly is indistinguishable from a target with
+  nothing to find, which is the thing this plan exists to prevent.
+
+  `--sink-shape` gains **`env`**: the value reaches the shell as an
+  environment variable rather than inside a command, and bash parses a
+  function definition out of it on the way in. It is in the ladder by default,
+  so no run's traffic changes; `--sink-shape env` now asks for it alone, which
+  is one request per carrier instead of 37 against an endpoint already known
+  to be a CGI. The separator sweep goes empty under it on purpose — the only
+  shape left supplies its own way into the shell, the same way `--sink-shape
+  sq` already behaved.
+
+  Narrowing follows the rung rather than a separate read. `--sink-raw` and
+  `--separators` drop `env` exactly as they drop `raw`; `--sink-env windows`
+  and `powershell` rule it out, because neither shell parses its environment
+  that way, and a run narrowed to `--sink-shape env` on one of them builds
+  nothing and reports `nothing-tested` rather than a clean negative.
+  `--environments` and `--contexts` are deliberately not part of it: they are
+  how an operator who suspects a CGI narrows.
+
+  `DetectionMethod._env_rung_selected` reads `effective_sink_shapes` the way
+  `_raw_rung_selected` already does, so what is printed and what is sent
+  cannot drift — and a test now pins that the engine's answer and the plan's
+  line are the same read, for every narrowing.
+
 ## [3.5.0] — 2026-10-27
 
 ### Added
@@ -3312,6 +3350,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.6.0]: https://github.com/kabiri-labs/rcekit/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/kabiri-labs/rcekit/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/kabiri-labs/rcekit/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/kabiri-labs/rcekit/compare/v3.2.0...v3.3.0

@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.5.0"
+__version__ = "3.6.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -83,7 +83,19 @@ NO_SEPARATOR_CONTEXTS = SELF_SEPARATING_CONTEXTS | SUBSTITUTION_CONTEXTS
 # rungs; the machinery underneath is the existing separator sweep and break-out
 # contexts, so naming a rung narrows an already-supported run rather than
 # switching on a parallel code path.
-SINK_SHAPE_RUNGS = ("sep", "raw", "chain", "newline", "dq", "sq", "subshell")
+SINK_SHAPE_RUNGS = ("sep", "raw", "chain", "newline", "dq", "sq", "subshell",
+                    "env")
+
+# Dialects whose shell reads a function definition out of its own environment,
+# which is what the `env` rung is for. bash did (CVE-2014-6271); cmd.exe and
+# PowerShell do not parse their environment that way at all, so the rung has no
+# shape they could execute and naming it for them would describe a request that
+# is never sent.
+#
+# Last in the ladder and apart from the rest of it on purpose: every other rung
+# is a way of reaching *into a command the application built*, and this one is
+# the absence of such a command. See `ReflectedMath._shellshock_probes`.
+SINK_SHAPE_ENV_DIALECTS = frozenset({"unix"})
 
 # The shell dialects a probe can be written for. `$((a+b))`, `$(echo TAG)` and
 # `sleep` are POSIX constructs: on a cmd.exe or PowerShell sink they are inert
@@ -460,8 +472,11 @@ def effective_sink_shapes(config: Dict[str, Any]) -> Tuple[str, ...]:
     shapes = config.get("sink_shapes")
     selected = set(shapes if shapes is not None else SINK_SHAPE_RUNGS)
     if shapes is None and config.get("separators"):
-        # Naming the separators is a statement that the sink is separator-led.
+        # Naming the separators is a statement that the sink is separator-led,
+        # which rules out both rungs that are not: the bare command, and the
+        # value that never reaches a command at all.
         selected.discard("raw")
+        selected.discard("env")
     if config.get("contexts_explicit"):
         # An explicit --contexts suppresses the added quote/substitution
         # carriers, so those rungs never get a carrier to ride on.
@@ -476,7 +491,8 @@ def effective_sink_shapes(config: Dict[str, Any]) -> Tuple[str, ...]:
         selected &= (set(SINK_SHAPE_CONTEXTS_BY_ENV.get(sink_env, {}))
                      | {rung for rung, seps in
                         SINK_SHAPE_SEPARATORS_BY_ENV.get(sink_env, {}).items() if seps}
-                     | {"raw"})
+                     | {"raw"}
+                     | ({"env"} if sink_env in SINK_SHAPE_ENV_DIALECTS else set()))
     return tuple(rung for rung in SINK_SHAPE_RUNGS if rung in selected)
 
 
@@ -494,6 +510,7 @@ def sink_shape_plan(shapes: Optional[Tuple[str, ...]]) -> List[str]:
         "sq": "\"'; ... #\" -- value inside single quotes",
         "dq": "'\"; ... #' -- value inside double quotes",
         "subshell": "'$(...)' and backticks -- substitution inside a quoted string",
+        "env": "'() { :;}; ...' -- value read from the environment, not a command",
     }
     return [f"[detect]   {rung:<9} {described[rung]}"
             for rung in SINK_SHAPE_RUNGS if rung in selected]
@@ -4853,22 +4870,24 @@ class DetectionMethod:
             return False  # already the only body; see _needs_separator
         return "raw" in effective_sink_shapes(self.config)
 
-    def _sink_shape_declared(self) -> bool:
-        """Whether the operator has stated the shape of the sink.
+    def _env_rung_selected(self) -> bool:
+        """Whether the shape for a value the shell reads out of its own
+        environment should be sent.
 
-        ``--sink-raw``, ``--sink-shape`` and ``--separators`` are three
-        spellings of one statement: the injected value lands inside a command
-        the application built, and here is how. :func:`effective_sink_shapes`
-        reads all three for the pre-flight plan, and this reads them for the
-        one shape that is not about such a command at all -- see
-        :meth:`ReflectedMath._shellshock_probes`. Kept here rather than in that
-        method so the two cannot drift apart.
+        A rung of the ladder, read the same way :meth:`_raw_rung_selected`
+        reads its own, so the pre-flight plan and the engine cannot disagree
+        about it. :func:`effective_sink_shapes` is where the narrowing lives:
+        ``--sink-raw`` and ``--separators`` both say the value lands inside a
+        command the application built, ``--sink-shape`` says which rungs by
+        name, and a pinned ``--sink-env`` rules out the dialects whose shell
+        does not parse its environment that way.
 
-        Deliberately not ``--contexts``: an explicit context says where in the
-        *serialization* the value sits, which is a different question and one a
-        header-carried value answers with ``raw``."""
-        return bool(self.config.get("sink_raw") or self.config.get("sink_shapes")
-                    or self.config.get("separators"))
+        It used to be a direct read of those three flags, which worked and said
+        nothing to the operator: a shape held back with no rung to name it
+        could not be asked for and did not appear in the printed plan. The
+        ladder is the place a sink's shape is declared, so the shape belongs in
+        it."""
+        return "env" in effective_sink_shapes(self.config)
 
     def _separator_candidates(self, record: "PayloadRecord",
                               sink_env: str = "unix") -> Tuple[Optional[str], ...]:
@@ -5243,19 +5262,18 @@ class ReflectedMath(DetectionMethod):
         sink it reaches is reachable by no other shape here, so this is not the
         saving ``--probe-depth quick`` is for.
 
-        A **declared** sink shape suppresses it, through
-        :meth:`_sink_shape_declared`. ``--sink-raw``, ``--sink-shape`` and
-        ``--separators`` each say the value lands inside a command the
-        application built -- and a Shellshock sink has no such command, so the
-        probe could only come back negative. That is the same reasoning by
-        which naming the separators drops the ``raw`` rung, and it is why the
-        ladder's own tests, which pin that every payload honours the declared
-        shape, were right to fail on the first version of this: it ignored all
-        three. The sink-shape ladder has no rung for a value that reaches bash
-        through the environment, so there is no ``--sink-shape`` name that asks
-        for this shape *instead*; an operator who suspects a CGI leaves the
-        shape undeclared and narrows with ``--environments``/``--contexts``,
-        which this gate does not read.
+        This is the ``env`` rung of the sink-shape ladder, and
+        :meth:`_env_rung_selected` is the whole gate. It is in the ladder by
+        default, so an ordinary run sends it; ``--sink-raw`` and
+        ``--separators`` drop it the way they drop ``raw``, because each says
+        the value lands inside a command the application built and this sink
+        has none; ``--sink-shape env`` asks for it alone, which sends this one
+        probe per carrier and nothing else; and a pinned ``--sink-env windows``
+        or ``powershell`` rules it out, since neither shell parses its
+        environment for function definitions. ``--environments`` and
+        ``--contexts`` are deliberately not part of it: they say which runtime
+        and which serialization, which is how an operator who suspects a CGI
+        narrows.
 
         What it does not test, stated because a ``negative`` has to mean
         something: the shapes that survive the 6271 patch (CVE-2014-6277 and
@@ -5263,7 +5281,7 @@ class ReflectedMath(DetectionMethod):
         than writing to stdout (CVE-2014-7169). A target patched against 6271
         alone answers ``negative`` here, and that is narrower than "not
         vulnerable to Shellshock"."""
-        if self._sink_shape_declared():
+        if not self._env_rung_selected():
             return []
         ctx = self.gen.contexts.get(record.context, {})
         if ctx.get("prefix") or ctx.get("suffix"):
@@ -9842,7 +9860,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                              f"auto (default, the whole ladder) or any of {', '.join(SINK_SHAPE_RUNGS)}. "
                              "sep/chain/newline vary the command separator; raw sends the bare "
                              "command; sq/dq break out of a surrounding quote; subshell reaches a "
-                             "quoted value through $(...) and backticks without closing the quote. "
+                             "quoted value through $(...) and backticks without closing the quote; "
+                             "env is the one rung that is not about a command the application "
+                             "built -- a value bash reads out of its own environment, which is a "
+                             "CGI header sink (Shellshock), and it needs a bash dialect rather "
+                             "than a --sink-env of windows or powershell. "
                              "Narrow it to cut request count once the sink's shape is known.")
     parser.add_argument("--deser-formats", default=None, metavar="NAMES",
                         help="(--methods deser) Serialization ecosystems to probe: auto "
