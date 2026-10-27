@@ -428,12 +428,34 @@ formats, or the template schema.
   reaches is reachable by no other shape and that is not the saving
   `--probe-depth quick` exists for.
 
+  **`--evade` never touches this shape**, and a `Probe` now says so with
+  `evadable=False`. Both rungs replace spaces with `${IFS}`, which turns the
+  value into `()${IFS}{${IFS}:;};…` — no longer a function definition, so the
+  retry reaches nothing and comes back 200 from the very filter that refused
+  the real probe. Measured against a CGI answering 403 to the signature:
+  `(403, 'blocked')` had become `(200, 'negative')`, which is the false clean
+  the verdict beside it exists to remove. A filter keyed on whitespace makes
+  this shape unreachable by construction, since bash matched the literal
+  `() {`, so there is nothing to evade and the run says `blocked`.
+
+  The field is the proper form of a guard `_escalate` already carries as a
+  payload test for the redirect shapes, whose comment records that the
+  build-time `evade` argument stopped doing anything when the rung became a
+  retry. Those shapes are left on the payload test here; moving them is not
+  this change.
+
   Stated in `docs/reference.md` rather than left to be discovered: this tests
   CVE-2014-6271 and not the shapes that survive its patch (CVE-2014-6277,
   CVE-2014-6278) or the parser-state shape that writes a file instead of
   stdout (CVE-2014-7169), so a target patched against 6271 alone answers
   `negative`, which is narrower than "not vulnerable to Shellshock". A blind
   Shellshock sink is out of reach too — only `reflected` carries the shape.
+  So is a **cookie crumb**, which an earlier draft of these docs claimed:
+  `HTTP_COOKIE` is the whole `Cookie` header and an enumerated crumb keeps its
+  name, so the parser sees `session=() { :;};` rather than a function
+  definition — and there is no whole-`Cookie`-header point to use instead,
+  because `Cookie` is excluded from header enumeration in favour of its crumbs.
+  A header point is the carrier that reaches this sink.
 
   No bench case yet. The unit tests prove the method reaches the right verdict
   from a modelled CGI; only a bench case proves it against a real

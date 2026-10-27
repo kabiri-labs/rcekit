@@ -2159,6 +2159,121 @@ class ShellshockProbeTestCase(unittest.TestCase):
         self.assertFalse(ReflectedMath(self.gen, {})._sink_shape_declared())
         self.assertEqual(rcekit.effective_sink_shapes({}), rcekit.SINK_SHAPE_RUNGS)
 
+    def test_it_declares_itself_unevadable_and_the_others_do_not(self):
+        # `${IFS}` is a space to the shell wherever a word boundary is all that
+        # is wanted. bash matched the *literal* `() {`, so a rung applied here
+        # does not evade a filter, it sends a different payload -- and the near
+        # neighbour is the point: every other shape this method builds stays
+        # evadable, so the declaration is about this one and not a blanket off.
+        import random as _random
+        probes = ReflectedMath(self.gen).build_probes(
+            make_record(environment="unix", context="raw"), _random.Random(5))
+        shape = next(p for p in probes if p.carrier == "shellshock")
+        self.assertFalse(shape.evadable)
+        others = [p for p in probes if p.carrier != "shellshock"]
+        self.assertTrue(others)
+        self.assertTrue(all(p.evadable for p in others),
+                        [p.payload for p in others if not p.evadable])
+
+    def _signature_filter_route(self, method, path, params, headers, body):
+        """A CGI behind a filter that refuses the Shellshock signature.
+
+        403 for a header value beginning `() {`, and 200 for anything else --
+        including a rewritten retry, which is the whole problem: a real bash
+        imports a function only from a value beginning with those four
+        characters, so the retry reaches nothing and the filter that refused
+        the real probe answers 200 to it."""
+        if headers.get("User-Agent", "").startswith("() {"):
+            return 403, "forbidden by policy"
+        return 200, "<html>status ok</html>"
+
+    def _filtered_run(self, evade):
+        rec = make_record(environment="unix", context="raw")
+        with local_target(self._signature_filter_route) as base:
+            rows = self.gen.run_detection(
+                [rec], url=base + "/cgi-bin/status", methods=["reflected"],
+                headers=["User-Agent: FUZZ"], timeout=10,
+                config={"probe_depth": "quick", "evade": evade})
+        return [r for r in rows if "{" in r.get("payload", "")
+                and ":;}" in r.get("payload", "")]
+
+    def test_a_refused_shape_reports_blocked_at_every_evade_ceiling(self):
+        # The regression, measured before the fix: with `--evade high` -- the
+        # CLI default -- the retry went out as `()${IFS}{${IFS}:;};...`, the
+        # filter let it through, and the row read `(200, 'negative')` about a
+        # sink the canonical probe had just proven was guarded. `--evade none`
+        # read `(403, 'blocked')`. The ceiling must not change the verdict.
+        for evade in ("none", "low", "high"):
+            rows = self._filtered_run(evade)
+            self.assertEqual(len(rows), 1, (evade, rows))
+            self.assertEqual((rows[0]["status"], rows[0]["verdict"]),
+                             (403, "blocked"), evade)
+            # And the payload that was sent is still the function definition,
+            # so `blocked` is a statement about the shape the shape intended.
+            self.assertTrue(rows[0]["payload"].startswith("() {"), rows[0])
+
+    def test_an_evadable_probe_is_still_retried(self):
+        # The near neighbour for the guard itself: a blanket `return None` in
+        # `_escalate` would pass the test above and silently remove the rung
+        # for every shape. Driven through the engine rather than asserted on
+        # the flag, because the flag is what is being checked.
+        import random as _random
+        rec = make_record(environment="unix", context="raw")
+        refused = rcekit.Probe(payload="; echo RKONE$((2+3))RKTWO",
+                               expected="RKONE5RKTWO", forbidden="$((2+3))")
+        unevadable = rcekit.Probe(payload="() { :;}; echo RKONE$((2+3))RKTWO",
+                                  expected="RKONE5RKTWO", forbidden="$((2+3))",
+                                  carrier="shellshock", evadable=False)
+        meth = ReflectedMath(self.gen, {"evade": "high"})
+        self.gen.config_evade = "high"
+        with local_target(self._signature_filter_route) as base:
+            before = self.gen.escalated_probes
+            self.gen._escalate(meth, refused, rec, base + "/cgi-bin/status",
+                               "GET", None, ["User-Agent: FUZZ"], "query_value",
+                               "raw", 10.0, 200)
+            retried = self.gen.escalated_probes - before
+            before = self.gen.escalated_probes
+            held = self.gen._escalate(meth, unevadable, rec,
+                                      base + "/cgi-bin/status", "GET", None,
+                                      ["User-Agent: FUZZ"], "query_value",
+                                      "raw", 10.0, 200)
+            not_retried = self.gen.escalated_probes - before
+        self.assertGreater(retried, 0, "an evadable probe must still climb")
+        self.assertEqual(not_retried, 0)
+        self.assertIsNone(held)
+
+    def test_a_cookie_crumb_cannot_carry_the_prefix(self):
+        # The docs claimed a cookie crumb was a carrier for this shape and it
+        # is not: `HTTP_COOKIE` is the whole `Cookie` header, an enumerated
+        # crumb keeps its name, and the value the parser sees begins
+        # `session=() { :;};`. Pinned so the claim cannot come back.
+        raw = ("GET /cgi-bin/x HTTP/1.1\r\nHost: t.example\r\n"
+               "Cookie: session=abc123; theme=dark\r\n"
+               "User-Agent: Mozilla/5.0\r\n\r\n")
+        req = parse_raw_request(raw)
+        points = rcekit.enumerate_injection_points(req, thorough=True)
+        crumb = next(p for p in points if p.kind == "cookie")
+        placed = rcekit.place_injection_point(
+            req["target"], [list(h) for h in req["headers"]],
+            req.get("body", ""), crumb, "() { :;}; echo; echo; echo RKA")
+        cookie_value = next(v for n, v in placed[1] if n.lower() == "cookie")
+        self.assertFalse(cookie_value.startswith("() {"), cookie_value)
+        self.assertIn("session=() {", cookie_value)
+        # Nor is there a whole-header point to use instead: `Cookie` is
+        # excluded in favour of its crumbs, which is the addressable unit.
+        self.assertIn("cookie", rcekit.NON_INJECTABLE_HEADERS)
+        self.assertEqual([p.name for p in points
+                          if p.kind == "header" and p.name.lower() == "cookie"], [])
+        # The near neighbour, and the reason the shape exists: a header point
+        # *does* carry it as the value's own first bytes.
+        header_point = next(p for p in points if p.kind == "header")
+        placed = rcekit.place_injection_point(
+            req["target"], [list(h) for h in req["headers"]],
+            req.get("body", ""), header_point, "() { :;}; echo; echo; echo RKA")
+        value = next(v for n, v in placed[1]
+                     if n.lower() == header_point.name.lower())
+        self.assertTrue(value.startswith("() {"), value)
+
     def _cgi_route(self, executes):
         """A CGI endpoint behind a bash that parses its own environment.
 

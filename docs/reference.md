@@ -153,14 +153,31 @@ asks for this shape *instead* of the others. Leaving the shape undeclared is
 what keeps it; that is a known rough edge rather than a design, and it means
 the pre-flight plan does not print the shape being held back.
 
-The carrier that actually reaches such a sink is a **header** or a **cookie
-crumb**, both of which `-p all` enumerates — see [Enumerating injection
-points](#enumerating-injection-points). Sent into a query value the shape is
-inert, because the server hands `QUERY_STRING` to the script still
-percent-encoded, and `%28%29%20%7B` is not a function definition. It costs one
-request per carrier either way — 17 of the 661 a default `reflected` run sends
-at `--probe-depth quick` — which is why it is not held back for
-`--probe-depth full`.
+The carrier that reaches such a sink is a **header**, which `-p all`
+enumerates — see [Enumerating injection
+points](#enumerating-injection-points). Two carriers that look like they
+should and do not:
+
+- a **query value**, because the server hands `QUERY_STRING` to the script
+  still percent-encoded, and `%28%29%20%7B` is not a function definition;
+- a **cookie crumb**, because `HTTP_COOKIE` is the whole `Cookie` header and an
+  enumerated crumb keeps its name — the value the parser sees begins
+  `session=() { :;};`. There is no whole-`Cookie`-header point to use instead:
+  `Cookie` is excluded from header enumeration because its crumbs are the
+  addressable unit an application reads.
+
+It costs one request per carrier either way — 17 of the 661 a default
+`reflected` run sends at `--probe-depth quick` — which is why it is not held
+back for `--probe-depth full`.
+
+`--evade` never touches this shape. Both rungs replace spaces with `${IFS}`,
+which turns the value into `()${IFS}{${IFS}:;};…` — no longer a function
+definition, so the retry reaches nothing and comes back 200 from the very
+filter that refused the real probe. Measured against a CGI that answers 403 to
+the signature: `blocked` became a false `negative` before the probe declared
+itself unevadable. A filter keyed on whitespace therefore makes this shape
+unreachable by construction, and the run says `blocked` rather than retrying
+into a clean negative.
 
 **What it does not test**, since a `negative` has to mean something: the shapes
 that survive the 6271 patch (CVE-2014-6277 and CVE-2014-6278) and the

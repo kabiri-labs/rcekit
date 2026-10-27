@@ -3165,6 +3165,16 @@ class RCEKit:
         ceiling = self.config_evade
         if ceiling == "none":
             return None
+        if not probe.evadable:
+            # The shape declared that its bytes are the thing being tested, so
+            # no rung can be applied without testing something else. The
+            # Shellshock prefix is the case: a filter keyed on whitespace makes
+            # that shape unreachable *by construction*, since bash matched the
+            # literal `() {`. Retrying it anyway sent a payload that reaches
+            # nothing to a filter that then answered 200, and the row read
+            # `negative` about a sink the canonical probe had proven was
+            # guarded -- `(403, 'blocked')` turned into `(200, 'negative')`.
+            return None
         if ">" in probe.payload:
             # A shape whose command redirects is left canonical. The build-time
             # transform took an explicit `evade=False` for these, and that
@@ -4365,6 +4375,23 @@ class Probe:
     # case -- an effect a notice cannot take back, like a file written or a
     # class fetched from an address RCEKit did not choose.
     reaches_past: Optional[str] = None
+    # Whether an evasion rung may be applied to this payload on retry.
+    #
+    # ``False`` for a shape whose *bytes* are the thing being tested rather
+    # than a command the rung can rewrite around. ``${IFS}`` is a space to the
+    # shell wherever a word boundary is all that is wanted -- and not where a
+    # parser matches a literal: a Shellshock value has to begin with the four
+    # characters ``() {``, so the rewritten retry is no longer a function
+    # definition, reaches nothing, and comes back 200 from the very filter that
+    # refused the real probe. Measured: `(403, 'blocked')` became
+    # `(200, 'negative')`.
+    #
+    # A declaration rather than a test on the payload, because the engine
+    # cannot tell which bytes a shape needs to keep. ``_wrap_variants`` used to
+    # take an ``evade`` argument for exactly this and it stopped doing anything
+    # when the rung became a retry; the redirect shapes are still guarded by a
+    # payload test in :meth:`RCEKit._escalate` for want of this field.
+    evadable: bool = True
 
 
 @dataclass
@@ -5186,14 +5213,23 @@ class ReflectedMath(DetectionMethod):
         reason it exists rather than a note about it. The others break *out* of
         a command the application is assembling; this one is never part of a
         command at all. A CGI server copies request headers into the
-        environment -- ``User-Agent`` becomes ``HTTP_USER_AGENT``, ``Cookie``
-        becomes ``HTTP_COOKIE`` -- and a vulnerable bash parses an environment
-        value beginning ``() {`` as a function definition while it starts up,
-        then runs whatever follows the closing brace. Nothing the application
-        does with the value is involved, so no separator can help and none is
-        sent: the value has to *begin* with ``() {``, which is why this probe
-        declares ``separator=None`` and why a context that prepends or appends
-        anything cannot carry it.
+        environment -- ``User-Agent`` becomes ``HTTP_USER_AGENT`` -- and a
+        vulnerable bash parses an environment value beginning ``() {`` as a
+        function definition while it starts up, then runs whatever follows the
+        closing brace. Nothing the application does with the value is
+        involved, so no separator can help and none is sent: the value has to
+        *begin* with ``() {``, which is why this probe declares
+        ``separator=None``, why ``evadable=False`` keeps a rung off it, and why
+        a context that prepends or appends anything cannot carry it.
+
+        That first-byte requirement is also what puts a **cookie crumb** out
+        of reach, and the first version of this docstring said otherwise.
+        ``HTTP_COOKIE`` is the whole ``Cookie`` header, and an enumerated
+        crumb keeps its name, so the value the parser sees begins
+        ``session=() { :;};`` -- not a function definition. There is no
+        whole-``Cookie``-header point either; ``Cookie`` is in
+        ``NON_INJECTABLE_HEADERS`` because its crumbs are the addressable unit.
+        A header point is the carrier that reaches this sink.
 
         ``echo; echo;`` is not decoration. The injected command runs before the
         CGI script has written a byte, so its output lands where the response
@@ -5239,7 +5275,7 @@ class ReflectedMath(DetectionMethod):
         core = "() { :;}; echo; echo; echo " + f"{t1}{arith}{t2}"
         return [Probe(payload=self._wrap_context(record, core),
                       expected=f"{t1}{total}{t2}", forbidden=arith,
-                      carrier="shellshock", separator=None)]
+                      carrier="shellshock", separator=None, evadable=False)]
 
     def _extended_probes(self, record: "PayloadRecord", a: int, b: int, total: int,
                          t1: str, t2: str, t3: str, core: str) -> List[Probe]:
