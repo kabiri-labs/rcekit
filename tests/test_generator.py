@@ -10224,6 +10224,65 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         self.assertIn("NOTHING WAS TESTED", result.stdout)
         self.assertNotEqual(result.returncode, 0, result.stdout[-2000:])
 
+    def _empty_ladder_run(self, *methods):
+        """A run whose sink-shape ladder is empty, with `methods` selected.
+
+        cmd.exe has no quote-breakout rung, so `--sink-shape sq --sink-env
+        windows` leaves nothing for the four methods that ride the ladder."""
+        import tempfile
+
+        def route(method, path, params, headers, body):
+            return 200, "<html>status ok</html>"
+
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET /s?q=FUZZ HTTP/1.1\n"
+                               f"Host: {host}\n\n")
+            return self._run("--acknowledge-consent", "-r", str(capture),
+                             "-p", "q", "--methods", ",".join(methods),
+                             "--request-scheme", "http",
+                             "--environments", "windows", "--contexts", "raw",
+                             "--sink-env", "windows", "--sink-shape", "sq",
+                             "--max-payloads", "1")
+
+    def test_the_empty_ladder_predicts_the_whole_run_only_when_it_may(self):
+        """The ladder decides four of the nine methods, so it cannot speak for
+        a run that selected one of the other five.
+
+        Measured before this was conditioned: `--methods reflected,eval` with
+        an empty ladder printed `this run will report NOTHING WAS TESTED` and
+        then reported `sent 1 probes (1 result(s)): negative=1`, exiting 0.
+        That is the pre-flight plan contradicting the traffic -- the defect the
+        empty-ladder line was added to fix, reintroduced by the line itself."""
+        # Both halves read the *plan line*, not stdout. The end-of-run
+        # `[!] No probes were built, so NOTHING WAS TESTED` carries the same
+        # words, so a stdout-wide assertion passes whether or not the plan
+        # made the prediction -- measured: with the condition forced to
+        # `False` for every run, a stdout-wide check stayed green and the
+        # mutant survived.
+        shell_only = self._empty_ladder_run("reflected")
+        self.assertIn("NOTHING WAS TESTED", self._plan_line(shell_only))
+        self.assertIn("sent 0 probes", shell_only.stdout)
+        self.assertNotEqual(shell_only.returncode, 0, shell_only.stdout[-2000:])
+
+        # The near neighbour, and the finding: `eval` does not ride the ladder.
+        mixed = self._empty_ladder_run("reflected", "eval")
+        line = self._plan_line(mixed)
+        self.assertIn("do not ride the ladder", line)
+        # The prediction is withheld where it would be wrong...
+        self.assertNotIn("NOTHING WAS TESTED", line)
+        # ...and the traffic is what the plan declined to predict about.
+        self.assertIn("sent 1 probes", mixed.stdout)
+        self.assertEqual(mixed.returncode, 0, mixed.stdout[-2000:])
+
+    def _plan_line(self, result):
+        """The empty-ladder plan line, or a failure naming what was printed."""
+        for line in result.stdout.splitlines():
+            if "no rung survives the narrowing" in line:
+                return line
+        self.fail("no empty-ladder plan line in:\n" + result.stdout[-2000:])
+
     def test_a_narrowing_that_leaves_a_rung_still_prints_it(self):
         """The near neighbour: the fix must not silence the plan for every
         narrowed run, which is how a one-word change here could go wrong and
