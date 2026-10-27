@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.6.0"
+__version__ = "3.6.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -500,8 +500,19 @@ def sink_shape_plan(shapes: Optional[Tuple[str, ...]]) -> List[str]:
     """One line per rung the run will try, for the pre-flight execution plan.
 
     The ladder multiplies request count, so what it is about to send is stated
-    before it is sent rather than inferred from the traffic afterwards."""
-    selected = shapes or SINK_SHAPE_RUNGS
+    before it is sent rather than inferred from the traffic afterwards.
+
+    ``None`` means no selection was made and the whole ladder is tried; an
+    **empty** tuple means every rung was narrowed away and nothing will be.
+    Those are opposite facts and ``shapes or SINK_SHAPE_RUNGS`` read them as
+    the same one, because an empty tuple is falsy -- so a run that would send
+    no shell probe at all printed a plan describing a full sweep.
+    ``--sink-shape sq --sink-env windows`` is such a run: cmd.exe has no
+    quote-breakout rung, the intersection is empty, and the plan listed all
+    seven while the traffic was zero. The one output an operator is told to
+    read *instead of* inferring the run from the traffic was the one that
+    disagreed with it."""
+    selected = SINK_SHAPE_RUNGS if shapes is None else shapes
     described = {
         "raw": "input is the whole command (no separator)",
         "sep": "'; ' -- mid-command concatenation",
@@ -10597,9 +10608,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                             or sink_env or bool(selected_contexts))
                 label = ", ".join(effective) if narrowed else "auto (full ladder)"
                 print(f"[detect] sink shell: {sink_env or 'auto (per carrier)'}")
-                print(f"[detect] sink shapes: {label}")
+                print(f"[detect] sink shapes: {label or 'none'}")
                 for line in sink_shape_plan(effective):
                     print(line)
+                if not effective:
+                    # Nothing survived the narrowing, so no shell probe will be
+                    # built. Said here and not only at the end: the plan is the
+                    # audit an operator reads *before* the traffic, and a
+                    # narrowing that leaves nothing to send is exactly what it
+                    # has to be able to show.
+                    print("[detect]   (no rung survives the narrowing, so no shell "
+                          "probe will be built -- this run will report NOTHING "
+                          "WAS TESTED)")
                 if separators:
                     print("[detect]   (separators pinned by --separators: "
                           f"{', '.join(repr(s) for s in separators)})")
