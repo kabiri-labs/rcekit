@@ -1263,7 +1263,17 @@ read off a zero-probe run:
 
 ```
 [detect] sink shapes: none
-[detect]   (no rung survives the narrowing, so no shell probe will be built -- this run will report NOTHING WAS TESTED)
+[detect]   (no rung survives the narrowing, so none of the shell methods will build a probe -- this run will report NOTHING WAS TESTED)
+```
+
+The run-wide half of that is claimed only where it holds. Four methods ride
+this ladder -- `reflected`, `file`, `time`, `oob` -- and five do not, so a run
+that also selected `eval`, `boolean`, `deser`, `lookup` or `write` still has
+probes to send and gets the narrower sentence:
+
+```
+[detect] sink shapes: none
+[detect]   (no rung survives the narrowing, so none of the shell methods will build a probe; the other selected methods do not ride the ladder and are unaffected)
 ```
 
 `eval` does not ride the ladder: its probes are template/expression syntax, not

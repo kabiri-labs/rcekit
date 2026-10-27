@@ -10612,14 +10612,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for line in sink_shape_plan(effective):
                     print(line)
                 if not effective:
-                    # Nothing survived the narrowing, so no shell probe will be
-                    # built. Said here and not only at the end: the plan is the
-                    # audit an operator reads *before* the traffic, and a
-                    # narrowing that leaves nothing to send is exactly what it
-                    # has to be able to show.
-                    print("[detect]   (no rung survives the narrowing, so no shell "
-                          "probe will be built -- this run will report NOTHING "
-                          "WAS TESTED)")
+                    # Nothing survived the narrowing, so none of the methods
+                    # that ride the ladder will build a probe. Said here and
+                    # not only at the end: the plan is the audit an operator
+                    # reads *before* the traffic, and a narrowing that leaves
+                    # nothing to send is exactly what it has to be able to
+                    # show.
+                    #
+                    # The run-wide half of that claim is made only when it is
+                    # true. Four methods ride this ladder and five do not, so
+                    # `--methods reflected,eval` with an empty ladder still
+                    # sends eval probes and still exits 0 -- measured as `sent
+                    # 1 probes (1 result(s)): negative=1` under a plan that
+                    # had just predicted NOTHING WAS TESTED. Predicting the
+                    # whole run from the ladder alone put this output back in
+                    # the one state it exists to rule out.
+                    #
+                    # A set comparison and not a probe count: a cost estimate
+                    # is documented as a floor rather than an exact figure, and
+                    # an aggregate method may answer with further waves once it
+                    # has seen the first, so a zero estimate would be the same
+                    # over-claim arrived at more expensively.
+                    only_shell = set(method_names) <= SHELL_PROBE_METHODS
+                    print("[detect]   (no rung survives the narrowing, so none of "
+                          "the shell methods will build a probe"
+                          + (" -- this run will report NOTHING WAS TESTED)"
+                             if only_shell else
+                             "; the other selected methods do not ride the "
+                             "ladder and are unaffected)"))
                 if separators:
                     print("[detect]   (separators pinned by --separators: "
                           f"{', '.join(repr(s) for s in separators)})")

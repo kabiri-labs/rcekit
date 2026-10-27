@@ -402,8 +402,21 @@ formats, or the template schema.
 
   ```
   [detect] sink shapes: none
-  [detect]   (no rung survives the narrowing, so no shell probe will be built -- this run will report NOTHING WAS TESTED)
+  [detect]   (no rung survives the narrowing, so none of the shell methods will build a probe -- this run will report NOTHING WAS TESTED)
   ```
+
+  The run-wide half of that sentence is claimed only where it holds, which
+  the first version of this got wrong. Four methods ride the ladder and
+  five do not, so `--methods reflected,eval` with an empty ladder still
+  sends `eval` probes -- measured as `sent 1 probes (1 result(s)):
+  negative=1` and exit 0, under a plan that had just predicted `NOTHING
+  WAS TESTED`. Predicting the whole run from the ladder alone put this
+  output back in the one state it exists to rule out. A mixed run gets the
+  narrower sentence instead, and the condition is a set comparison rather
+  than a probe count: a cost estimate is documented as a floor, and an
+  aggregate method may answer with further waves once it has seen the
+  first, so a zero estimate would be the same over-claim reached more
+  expensively.
 
   Predates 3.5.0 and was reachable before the `env` rung existed; found while
   adding it, because `--sink-shape env --sink-env windows` is a natural way to
