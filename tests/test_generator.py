@@ -10188,6 +10188,76 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         # Non-zero, so a script cannot read an untested run as a clean one.
         self.assertNotEqual(result.returncode, 0, result.stdout[-2000:])
 
+    def test_a_narrowing_that_leaves_no_rung_says_so_before_the_traffic(self):
+        """The plan is the audit an operator reads *instead of* inferring the
+        run from the traffic, so it is the one output that must not disagree
+        with it.
+
+        Measured before the fix, with `--sink-shape sq --sink-env windows`:
+        cmd.exe has no quote-breakout rung, the run sent 0 probes, and the plan
+        listed all 7 under a `sink shapes:` header with nothing after the
+        colon. The end-of-run `NOTHING WAS TESTED` was already right; the
+        before-the-traffic half was not."""
+        import tempfile
+
+        def route(method, path, params, headers, body):
+            return 200, "<html>status ok</html>"
+
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET /s?q=FUZZ HTTP/1.1\n"
+                               f"Host: {host}\n\n")
+            result = self._run("--acknowledge-consent", "-r", str(capture),
+                               "-p", "q", "--methods", "reflected",
+                               "--request-scheme", "http",
+                               "--environments", "windows",
+                               "--sink-env", "windows", "--sink-shape", "sq")
+
+        self.assertIn("[detect] sink shapes: none", result.stdout)
+        self.assertIn("no rung survives the narrowing", result.stdout)
+        # Not one rung line, where it used to print every one of them.
+        for rung in rcekit.SINK_SHAPE_RUNGS:
+            self.assertNotIn(f"[detect]   {rung} ", result.stdout, rung)
+        # And the two halves of the run agree with each other.
+        self.assertIn("sent 0 probes", result.stdout)
+        self.assertIn("NOTHING WAS TESTED", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout[-2000:])
+
+    def test_a_narrowing_that_leaves_a_rung_still_prints_it(self):
+        """The near neighbour: the fix must not silence the plan for every
+        narrowed run, which is how a one-word change here could go wrong and
+        still pass the test above.
+
+        `--sink-shape sep` and not `sq`, which is what the first draft of this
+        test used and why it failed: an explicit `--contexts` subtracts the
+        quote and substitution rungs, because those rungs ride carriers the
+        enumerator only adds when the contexts are left open. So
+        `--contexts raw --sink-shape sq` is a *second* route into the empty
+        case rather than a one-rung run -- measured, not assumed."""
+        import tempfile
+
+        def route(method, path, params, headers, body):
+            return 200, "<html>status ok</html>"
+
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET /s?q=FUZZ HTTP/1.1\n"
+                               f"Host: {host}\n\n")
+            result = self._run("--acknowledge-consent", "-r", str(capture),
+                               "-p", "q", "--methods", "reflected",
+                               "--request-scheme", "http",
+                               "--environments", "unix", "--contexts", "raw",
+                               "--sink-env", "unix", "--sink-shape", "sep",
+                               "--max-payloads", "4")
+
+        self.assertIn("[detect] sink shapes: sep", result.stdout)
+        self.assertNotIn("no rung survives the narrowing", result.stdout)
+        self.assertIn("[detect]   sep ", result.stdout)
+        self.assertNotIn("[detect]   chain ", result.stdout)
+        self.assertNotIn("NOTHING WAS TESTED", result.stdout)
+
     def _soap_run(self, path, body=None):
         """Point the whole CLI at a SOAP endpoint that shells its `<name>`.
 
@@ -10776,6 +10846,30 @@ class SinkShapeLadderTestCase(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertTrue(any(" sq " in line for line in lines))
         self.assertFalse(any(" chain " in line for line in lines))
+
+    def test_an_empty_selection_is_not_an_absent_one(self):
+        """The near neighbour the plan was getting wrong, and the whole bug.
+
+        `None` means no selection was made, so the whole ladder is tried. An
+        empty tuple means every rung was narrowed away, so nothing is. They are
+        opposite facts, and `shapes or SINK_SHAPE_RUNGS` read them as the same
+        one because an empty tuple is falsy -- so the run that sends no shell
+        probe at all printed the plan of a full sweep."""
+        self.assertEqual(len(rcekit.sink_shape_plan(None)),
+                         len(rcekit.SINK_SHAPE_RUNGS))
+        self.assertEqual(rcekit.sink_shape_plan(()), [])
+        # And the narrowing that produces it, so the two halves stay joined:
+        # cmd.exe has no quote-breakout rung, so asking for one leaves nothing.
+        empty = rcekit.effective_sink_shapes({"sink_shapes": ("sq",),
+                                              "sink_env": "windows"})
+        self.assertEqual(empty, ())
+        self.assertEqual(rcekit.sink_shape_plan(empty), [])
+        # The near neighbour on the other side: a narrowing that leaves one
+        # rung still prints that one, so the fix did not silence the plan.
+        kept = rcekit.effective_sink_shapes({"sink_shapes": ("sq",),
+                                             "sink_env": "unix"})
+        self.assertEqual(kept, ("sq",))
+        self.assertEqual(len(rcekit.sink_shape_plan(kept)), 1)
 
     # -- substitution contexts ----------------------------------------------
 

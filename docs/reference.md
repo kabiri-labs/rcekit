@@ -1255,6 +1255,17 @@ before anything is sent:
 ...
 ```
 
+Two narrowings can meet and leave **nothing** — `--sink-shape sq --sink-env
+windows`, because cmd.exe has no quote-breakout rung, or `--contexts raw
+--sink-shape sq`, because an explicit context suppresses the carriers those
+rungs ride. The plan says so before the traffic rather than leaving it to be
+read off a zero-probe run:
+
+```
+[detect] sink shapes: none
+[detect]   (no rung survives the narrowing, so no shell probe will be built -- this run will report NOTHING WAS TESTED)
+```
+
 `eval` does not ride the ladder: its probes are template/expression syntax, not
 shell, so no separator or quote break-out applies to them.
 

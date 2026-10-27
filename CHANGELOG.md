@@ -378,6 +378,40 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.6.1] — 2026-10-27
+
+### Fixed
+
+- **A run narrowed to nothing printed the plan of a full sweep.**
+  `sink_shape_plan` was written `selected = shapes or SINK_SHAPE_RUNGS`, so an
+  **empty** tuple — every rung narrowed away — was read as the same thing as
+  `None`, which means no selection was made. Those are opposite facts, and an
+  empty tuple is falsy.
+
+  Measured on 3.6.0 with `--sink-shape sq --sink-env windows` (cmd.exe has no
+  quote-breakout rung, so the intersection is empty): the run sent 0 probes and
+  the plan listed all 8 rungs under a `sink shapes:` header with nothing after
+  the colon. The pre-flight plan is the one output an operator is told to read
+  *instead of* inferring the run from the traffic, and it was the output that
+  disagreed with it. The end-of-run half was already right — `sent 0 probes`,
+  `NOTHING WAS TESTED`, exit non-zero.
+
+  `None` now means the whole ladder and `()` means no rung, and the plan names
+  the empty case rather than printing a blank header and nothing under it,
+  because an empty list is the same quiet shrink by a different route:
+
+  ```
+  [detect] sink shapes: none
+  [detect]   (no rung survives the narrowing, so no shell probe will be built -- this run will report NOTHING WAS TESTED)
+  ```
+
+  Predates 3.5.0 and was reachable before the `env` rung existed; found while
+  adding it, because `--sink-shape env --sink-env windows` is a natural way to
+  hit it. A second route is `--contexts raw --sink-shape sq`: an explicit
+  `--contexts` suppresses the carriers the quote and substitution rungs ride,
+  which is measured in the near-neighbour test rather than assumed — the first
+  draft of that test used it expecting one rung and got none.
+
 ## [3.6.0] — 2026-10-27
 
 ### Added
@@ -3350,6 +3384,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.6.1]: https://github.com/kabiri-labs/rcekit/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/kabiri-labs/rcekit/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/kabiri-labs/rcekit/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/kabiri-labs/rcekit/compare/v3.3.0...v3.4.0
