@@ -33,7 +33,7 @@ against a payload-free control:
 | Webmin 1.910 | CVE-2019-15107 | OS command injection (results-based) | `reflected` | **`executed`** | yes | GIF |
 | Apache Struts2 | S2-001 | Expression injection (OGNL) | `eval` | **`executed`** | yes | GIF |
 | Apache Solr 8.11.0 (Log4j 2.14.1) | CVE-2021-44228 | Expression-lookup (Log4Shell/JNDI) | `lookup` | `lookup-sink` | yes | GIF |
-| Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `timing-sink` | as a control | GIF |
+| Webmin 1.910 | CVE-2019-15107 | Blind command injection (no output) | `time` | `timing-sink` | yes | GIF |
 | Webmin 1.910 | CVE-2019-15107 | OS command injection (self-OOB read-back) | `file` | **`executed`** | yes | — |
 | OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `oob` | **`executed`** | yes | — |
 | OpenTSDB 2.4.1 | CVE-2023-25826 | Blind command injection (gnuplot) | `time` | `timing-sink` | as a control | — |
@@ -41,6 +41,7 @@ against a payload-free control:
 | Apache HugeGraph 1.2.0 | — | OS command injection | `reflected` | **`executed`** | yes | — |
 | Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | yes | — |
 | Apache Tomcat 8.5.19 | CVE-2017-12615 | Write primitive (PUT a JSP) | `write` | **`executed`** | yes | — |
+| mongo-express 0.53.0 on MongoDB 3.4 | — | Predicate sink, nothing rendered (Mongo `$where`) | `boolean` | `evaluation-sink` | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -50,15 +51,24 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 11 rows do; `python tests/bench/runner.py --all` was last green at
+control. All 12 rows do; `python tests/bench/runner.py --all` was last green at
 **3.0.1** (2026-10-01), 10/10 cases in 55m48s. That is a point-in-time claim:
 the benchmark runs on a cadence, not on every change.
+
+The suite holds 13 cases now, and the 3 added last were each run on their own
+rather than as part of an `--all` sweep: `mongo-express-where-boolean` passed in
+29.9s, `webmin-cve-2019-15107-enumerated` in 4m32s and
+`webmin-cve-2019-15107-time` in 21m21s. So the figure above still describes the
+last full sweep, which is the claim it was making.
 
 The controls are not in this table and two of them are the point. On a Webmin
 1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
 own proven tier and still does not reach `executed` — a ceiling holding against
-real software rather than against a fixture. Those two are the rows reading *as
-a control* above. The full 10, controls included, are in
+real software rather than against a fixture. The OpenTSDB one is the row
+reading *as a control* above; the Webmin one now has a case of its own, where
+`time` is the subject and the control injects into a parameter on the same
+request that no shell reads — so the slope has to be attributable to the sink
+rather than to the host. The full 13, controls included, are in
 [`tests/bench/README.md`](tests/bench/README.md#status).
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
