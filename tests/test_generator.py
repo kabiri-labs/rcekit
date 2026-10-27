@@ -2146,18 +2146,69 @@ class ShellshockProbeTestCase(unittest.TestCase):
                        {"sink_env": "unix"}):
             self.assertEqual(len(self._shapes(config=config)), 1, config)
 
-    def test_the_gate_reads_the_same_three_statements_as_the_printed_plan(self):
-        # One source of truth. `effective_sink_shapes` narrows on exactly these
-        # three for the pre-flight plan; if the two ever disagree, the plan
-        # describes traffic that is not the traffic.
-        for config in ({"sink_raw": True}, {"sink_shapes": ("sep",)},
-                       {"separators": ["| "]}):
-            method = ReflectedMath(self.gen, config)
-            self.assertTrue(method._sink_shape_declared(), config)
-            self.assertNotEqual(rcekit.effective_sink_shapes(config),
-                                rcekit.SINK_SHAPE_RUNGS, config)
-        self.assertFalse(ReflectedMath(self.gen, {})._sink_shape_declared())
-        self.assertEqual(rcekit.effective_sink_shapes({}), rcekit.SINK_SHAPE_RUNGS)
+    def test_the_gate_is_the_printed_plan(self):
+        # One source of truth, and the reason the shape became a rung: the
+        # engine's answer and the pre-flight plan's are now the same read, so
+        # a shape being held back is something the operator can see rather
+        # than infer from the traffic.
+        for config in ({}, {"sink_raw": True}, {"sink_shapes": ("sep",)},
+                       {"sink_shapes": ("env",)}, {"separators": ["| "]},
+                       {"contexts_explicit": True}, {"sink_env": "unix"},
+                       {"sink_env": "windows"}, {"sink_env": "powershell"}):
+            rungs = rcekit.effective_sink_shapes(config)
+            self.assertEqual(ReflectedMath(self.gen, config)._env_rung_selected(),
+                             "env" in rungs, config)
+            named = any(" env " in line for line in rcekit.sink_shape_plan(rungs))
+            self.assertEqual(named, "env" in rungs, config)
+
+    def test_asking_for_the_rung_alone_sends_this_shape_and_nothing_else(self):
+        # `--sink-shape env` is the narrowing this rung exists to make
+        # possible: one request per carrier instead of 37, for an operator who
+        # already knows the endpoint is a CGI. The separator sweep goes empty
+        # on purpose -- the only shape left supplies its own way into the
+        # shell, which is what `_separators` documents for `--sink-shape sq`.
+        import random as _random
+        probes = ReflectedMath(self.gen, {"sink_shapes": ("env",)}).build_probes(
+            make_record(environment="unix", context="raw"), _random.Random(3))
+        self.assertEqual([p.carrier for p in probes], ["shellshock"])
+        self.assertTrue(probes[0].payload.startswith("() {"))
+        # The near neighbour: the default ladder still sends the whole sweep,
+        # so this is a narrowing rather than a shape the rung smuggled in.
+        full = ReflectedMath(self.gen).build_probes(
+            make_record(environment="unix", context="raw"), _random.Random(3))
+        self.assertGreater(len(full), 1)
+        self.assertEqual(len([p for p in full if p.carrier == "shellshock"]), 1)
+
+    def test_a_dialect_that_does_not_parse_its_environment_has_no_rung(self):
+        # cmd.exe and PowerShell never read a function definition out of
+        # their environment, so naming the rung for them would describe a
+        # request that is not sent -- and the plan is presented as an audit of
+        # the traffic about to go out. This is the only place that term is
+        # measured: a pinned non-unix `--sink-env` already routes every carrier
+        # to the dialect's own branch of `build_probes`, which never reaches
+        # `_shellshock_probes`, so a probe-count test would pass with the term
+        # removed.
+        import random as _random
+        for sink_env in ("windows", "powershell"):
+            self.assertNotIn("env", rcekit.effective_sink_shapes(
+                {"sink_env": sink_env}), sink_env)
+        self.assertIn("env", rcekit.effective_sink_shapes({"sink_env": "unix"}))
+        self.assertEqual(rcekit.SINK_SHAPE_ENV_DIALECTS, frozenset({"unix"}))
+        probes = ReflectedMath(self.gen, {"sink_shapes": ("env",)}).build_probes(
+            make_record(environment="windows", context="windows_cmd"),
+            _random.Random(3))
+        self.assertEqual(probes, [])
+
+    def test_the_rung_is_spelled_the_same_everywhere_the_cli_reads_it(self):
+        # A rung the parser refuses is a flag the operator cannot use, and the
+        # help text is built from the same tuple -- so a typo in one place is
+        # caught here rather than by someone narrowing a run to nothing.
+        self.assertIn("env", rcekit.SINK_SHAPE_RUNGS)
+        self.assertEqual(rcekit.parse_sink_shapes("env"), ("env",))
+        self.assertEqual(rcekit.parse_sink_shapes("env,sep"), ("env", "sep"))
+        with self.assertRaises(ValueError) as ctx:
+            rcekit.parse_sink_shapes("envv")
+        self.assertIn("envv", str(ctx.exception))
 
     def test_it_declares_itself_unevadable_and_the_others_do_not(self):
         # `${IFS}` is a space to the shell wherever a word boundary is all that
@@ -10057,6 +10108,85 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
         # ...and the finding names the point that worked.
         self.assertIn("EXECUTED (", result.stdout)
         self.assertIn("at header 'User-Agent'", result.stdout)
+
+    def test_sink_shape_env_narrows_the_cli_to_the_one_shape_that_can_confirm(self):
+        """The `env` rung, driven the way an operator drives it.
+
+        The unit tests prove the rung narrows the probe list. This proves the
+        flag survives the whole path -- `parse_sink_shapes`, the config, the
+        printed plan, the engine -- against a CGI that only a value beginning
+        `() {` can reach. A rung the CLI cannot actually select would pass
+        every test above it."""
+        import tempfile
+
+        def route(method, path, params, headers, body):
+            agent = headers.get("User-Agent", "")
+            script = "<html>status ok</html>"
+            if not agent.startswith("() {"):
+                return 200, script
+            trailing = agent.split("}", 1)[1].lstrip("; ")
+            pipe = sh_popen(trailing + " 2>&1")
+            out = pipe.read()
+            pipe.close()
+            _h, blank, rendered = out.partition(chr(10) + chr(10))
+            if not blank:
+                return 500, "malformed header from script"
+            return 200, rendered + script
+
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET /cgi-bin/status HTTP/1.1\n"
+                               f"Host: {host}\n"
+                               "User-Agent: Mozilla/5.0\n\n")
+            result = self._run("--acknowledge-consent", "-r", str(capture),
+                               "-p", "User-Agent", "--methods", "reflected",
+                               "--request-scheme", "http",
+                               "--environments", "unix", "--contexts", "raw",
+                               "--sink-shape", "env")
+
+        self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        # The plan names the rung it is about to try, and only that one...
+        self.assertIn("env", result.stdout)
+        self.assertNotIn("'; ' -- mid-command concatenation", result.stdout)
+        # ...and the sink is reached by the one shape that can reach it.
+        self.assertIn("EXECUTED (", result.stdout)
+        self.assertIn("() { :;};", result.stdout)
+
+    def test_narrowing_to_a_rung_this_dialect_lacks_tests_nothing_and_says_so(self):
+        """Narrowed to a rung the pinned dialect has no shape for, the run must
+        say it tested nothing rather than come back clean.
+
+        What this does *not* pin, because it passes with the clause removed:
+        the `SINK_SHAPE_ENV_DIALECTS` term in `effective_sink_shapes`. A pinned
+        non-unix `--sink-env` already routes every carrier to the cmd.exe or
+        PowerShell branch of `build_probes`, which never reaches
+        `_shellshock_probes`, so no probe is built either way. That term is
+        about the printed plan naming a rung that will not be tried, and
+        `test_a_dialect_that_does_not_parse_its_environment_has_no_rung` is
+        where it is measured. Said here because the first draft of this test
+        claimed otherwise and passed while measuring nothing."""
+        import tempfile
+
+        def route(method, path, params, headers, body):
+            return 200, "<html>status ok</html>"
+
+        with local_target(route) as base, tempfile.TemporaryDirectory() as tmp:
+            host = base.split("//", 1)[1]
+            capture = Path(tmp) / "request.txt"
+            capture.write_text("GET /cgi-bin/status HTTP/1.1\n"
+                               f"Host: {host}\n"
+                               "User-Agent: Mozilla/5.0\n\n")
+            result = self._run("--acknowledge-consent", "-r", str(capture),
+                               "-p", "User-Agent", "--methods", "reflected",
+                               "--request-scheme", "http",
+                               "--environments", "windows", "--contexts", "raw",
+                               "--sink-env", "windows", "--sink-shape", "env")
+
+        self.assertIn("NOTHING WAS TESTED", result.stdout)
+        self.assertNotIn("EXECUTED (", result.stdout)
+        # Non-zero, so a script cannot read an untested run as a clean one.
+        self.assertNotEqual(result.returncode, 0, result.stdout[-2000:])
 
     def _soap_run(self, path, body=None):
         """Point the whole CLI at a SOAP endpoint that shells its `<name>`.

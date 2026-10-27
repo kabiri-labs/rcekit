@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.5.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.6.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -379,7 +379,7 @@ An example can only name one value per flag; these are the others.
 `mongodb` for `eval` and `boolean`.
 `--sink-env`: `auto`, `unix`, `windows`, `powershell`.
 `--sink-shape`: `auto`, `sep`, `chain`, `newline`, `raw`, `sq`, `dq`,
-`subshell`. `--contexts`: `raw`, `json`, `xml`, `xml_cdata`, `yaml`,
+`subshell`, `env`. `--contexts`: `raw`, `json`, `xml`, `xml_cdata`, `yaml`,
 `attribute`, `http_header` and the rest of the
 [context list](docs/reference.md#contexts). `--separators`: any subset of
 `'; '`, `'| '`, `'|| '`, `'&& '` and a newline written `\n`.

@@ -139,19 +139,29 @@ Four consequences, each visible in the probe:
   belong. The two blank lines close that header block; without them the server
   reads the computed value as a malformed header, answers 500, and discards the
   one thing the probe exists to collect.
-- **A declared sink shape suppresses it.** `--sink-raw`, `--sink-shape` and
-  `--separators` each say the value lands inside a command the application
-  built, and a Shellshock sink has no such command — so the probe could only
-  come back negative. This is the same reasoning that drops the `raw` rung when
-  separators are named. `--environments` and `--contexts` are *not* read here:
-  they say which runtime and which serialization, not that the value reaches a
-  command, and an operator who suspects a CGI narrows exactly that way.
+- **It is the `env` rung of the ladder.** That is where a sink's shape is
+  declared, so this shape is declared there too: it is in the ladder by
+  default, `--sink-shape env` asks for it alone, and the pre-flight plan prints
+  it like every other rung. `--sink-raw` and `--separators` drop it the way
+  they drop `raw` — each says the value lands inside a command the application
+  built, and this sink has none. `--environments` and `--contexts` are *not*
+  part of it: they say which runtime and which serialization, which is how an
+  operator who suspects a CGI narrows.
 
-The [sink-shape ladder](#the-sink-shape-ladder) has no rung for a value that
-reaches bash through the environment, so there is no `--sink-shape` name that
-asks for this shape *instead* of the others. Leaving the shape undeclared is
-what keeps it; that is a known rough edge rather than a design, and it means
-the pre-flight plan does not print the shape being held back.
+`--sink-shape env` is the narrowing this rung exists for — one request per
+carrier instead of 37, for an endpoint already known to be a CGI:
+
+```bash
+python rcekit.py --acknowledge-consent -r request.txt -p all \
+  --methods reflected --environments unix --contexts raw --sink-shape env
+```
+
+The separator sweep goes empty under it, on purpose: the only shape left
+supplies its own way into the shell, so a separator-led probe would be a
+request that cannot confirm. Pair it with a `--sink-env` of `windows` or
+`powershell` and nothing is built at all — the run reports `nothing-tested`
+rather than a clean negative, which is the right answer to "you narrowed this
+to a shape this dialect does not have".
 
 The carrier that reaches such a sink is a **header**, which `-p all`
 enumerates — see [Enumerating injection
@@ -1196,6 +1206,7 @@ An injected value lands in a *shape*, and the shape decides what can reach it.
 | `dq` | `"; cmd #` | value inside double quotes |
 | `sq` | `'; cmd #` | value inside single quotes |
 | `subshell` | `$(cmd)`, `` `cmd` `` | value inside quotes, reached **without closing them** |
+| `env` | `() { :;}; cmd` | no command at all — bash reads the value out of its own environment |
 
 `subshell` is the rung that is easy to mis-explain, so here is what it is
 actually for. Against `system("echo PING \"$input\"")`, with the app filtering
@@ -1221,11 +1232,21 @@ blind there:
 | `echo TOKEN > file` — `file` | no write | writes |
 | `curl …` — `oob` | no request | fetches |
 
+`env` is the odd rung and deliberately last. Every other one is a way of
+reaching **into** a command the application built; this one is the absence of
+such a command — a CGI server copies the header into the environment and bash
+parses it on the way in. It is in the ladder by default, `--sink-shape env`
+asks for it alone (one request per carrier instead of 37), and a `--sink-env`
+of `windows` or `powershell` rules it out, since neither shell parses its
+environment that way. [The Shellshock shape](#the-shellshock-shape) has the
+rest.
+
 Narrow the ladder once the sink's shape is known — it is the request-count
 control. `--sink-raw` is the narrowing alias for `--sink-shape raw`, and naming
-`--separators` implies the sink is separator-led, so the `raw` rung is dropped
-unless you name it explicitly. A profile with `sink_needs_separator` drops it
-too. The plan is printed before anything is sent:
+`--separators` implies the sink is separator-led, so the `raw` and `env` rungs
+are both dropped unless you name them explicitly — neither is separator-led. A
+profile with `sink_needs_separator` drops `raw` too. The plan is printed
+before anything is sent:
 
 ```
 [detect] sink shapes: auto (full ladder)
