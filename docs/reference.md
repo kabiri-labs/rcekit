@@ -845,7 +845,9 @@ run printed a point and a probe count while nothing in the document was tested.
 An **encoded blob** — a base64 or base64url JSON document, or a JWT — is one
 opaque string to every other kind, and the fields inside it are what the
 application reads. A `state` parameter, a session cookie and a bearer token are
-all this shape. `--auto-params blob` adds a point per field inside, named
+all this shape — an `Authorization: Bearer <token>` header has its scheme word
+split off before decoding and put back when the value is rebuilt, since a header
+without it is one the target cannot parse. `--auto-params blob` adds a point per field inside, named
 `carrier>field`: `state>role`, `tok>sub`.
 
 The carrier **keeps its own point** as well, because a sink may read the token
@@ -873,10 +875,20 @@ in a JSON leaf is still JSON-escaped.
 **A JWT's signature is invalidated**, necessarily — rewriting a claim changes the
 bytes the signature covers. That is the point rather than a flaw: an application
 that accepts the rewritten token is not verifying it, which is itself a finding,
-and one that rejects it answers 4xx where the payload-free control got through,
+and one that rejects it answers 4xx where the captured request got through,
 which the engine reports as `blocked` rather than `negative`. The header and
 signature segments are preserved byte for byte, so a rejection is about the
 claim and not about something else RCEKit changed.
+
+That verdict costs **one extra request per blob point**, and it is the reason the
+verdict is right. The payload-free control carries the canary *inside* the blob,
+so it carries a rewritten one too — a verifying target refuses the control
+exactly as it refuses every probe, and refusal classification needs something
+that was *accepted* to compare against. So a blob point also fires a **baseline**
+that puts the captured value back verbatim, reproducing the request as captured,
+and lends only its status. The evidence differential still rests on the canary
+control, which is the comparison that has to hold the payload constant. Without
+the baseline the run reported `negative` about a sink no probe had reached.
 
 **The inner document is re-serialised** compactly, so the rebuilt value is not
 byte-identical to the captured one even where the field is unchanged — JSON has

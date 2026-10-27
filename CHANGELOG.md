@@ -414,8 +414,26 @@ formats, or the template schema.
   **A JWT's signature is invalidated**, necessarily, and that is the point
   rather than a flaw: an application that accepts the rewritten token is not
   verifying it, which is itself a finding, and one that rejects it answers 4xx
-  where the payload-free control got through — reported as `blocked`, not as a
-  clean negative. The header and signature segments are preserved byte for byte,
+  where the captured request got through — reported as `blocked`, not as a clean
+  negative.
+
+  That took **one extra request per blob point**, found by review and not by me:
+  the payload-free control carries the canary *inside* the blob, so it carries a
+  rewritten one too, and a verifying target refuses the control exactly as it
+  refuses every probe. `payload_refused` needs the control to have got through,
+  so it answered no, and the run reported `negative` about a sink no probe had
+  reached — the one outcome this tool exists to refuse, under documentation that
+  claimed `blocked`. A blob point now also fires a **baseline** that puts the
+  captured value back verbatim and lends only its status; the evidence
+  differential still rests on the canary control, which is the comparison that
+  has to hold the payload constant.
+
+  An `Authorization: Bearer <token>` header was **advertised and never
+  reached**, also found by review: the patterns anchor on the encoded form
+  alone, so the header value as read matched none of them and the bearer case
+  produced no points at all. The scheme word is split off before decoding and
+  put back when the value is rebuilt — stripping it without restoring it would
+  send a header the target cannot parse. The header and signature segments are preserved byte for byte,
   so a rejection is about the claim and not about something else RCEKit changed.
 
   The inner document is re-serialised compactly, so the rebuilt value is not
