@@ -378,6 +378,67 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.5.0] — 2026-10-27
+
+### Added
+
+- **A CGI header sink was enumerated and could not be confirmed.** `-p all` has
+  named headers as candidates for a long time, and the reason given in the docs
+  was Shellshock riding `User-Agent`. Nothing in `reflected` could reach that
+  sink: every probe it builds breaks *out* of a command the application is
+  assembling, and a Shellshock sink has no such command — the server copies the
+  header into the environment and a vulnerable bash runs the text after a
+  function definition while it starts up, before the script executes a line.
+  So the point was offered, probed, and reported `negative` about a sink nothing
+  had asked a question it could answer.
+
+  `reflected` now builds one more shape: `() { :;}; echo; echo; echo
+  RK…$((a+b))…RK` (CVE-2014-6271). The arithmetic proof and the tier are
+  unchanged — the computed value must be present in the response and absent
+  from the payload-free control — and the finding names the shape, because
+  "patch bash" and "fix the application" are different remediations.
+
+  Three parts of it are load-bearing and each is pinned by a test:
+
+  - **No separator, at any rung.** The value has to *begin* with `() {`, so the
+    sweep and `--sink-raw` leave this shape byte-identical.
+  - **Only a context that prepends nothing carries it.** `attribute` opens with
+    a quote and `attribute_unquoted` with a single space — one invisible
+    character, and enough that bash no longer reads a function definition.
+    Those contexts get no Shellshock probe rather than one that cannot confirm.
+  - **`echo; echo;` closes the CGI header block.** The injected output arrives
+    where the response headers belong; without the two blank lines the server
+    reads the computed value as a malformed header, answers 500 and discards
+    it. Measured against a fixture that models exactly that, and the fixture
+    has its own test so it cannot stop modelling it silently.
+  - **A declared sink shape suppresses it.** `--sink-raw`, `--sink-shape` and
+    `--separators` each say the value lands inside a command the application
+    built, which a Shellshock sink has none of — the same reasoning that drops
+    the `raw` rung when separators are named. The ladder's own tests pin that
+    every payload honours the declared shape, and they were right to fail on
+    the first version of this, which read none of the three. `--environments`
+    and `--contexts` are deliberately not read: they are how an operator who
+    suspects a CGI narrows. The ladder has no rung for a value reaching bash
+    through the environment, so there is no `--sink-shape` name asking for this
+    shape instead, and the pre-flight plan therefore does not print it being
+    held back — a rough edge, recorded rather than smoothed over.
+
+  One request per carrier — 17 of the 661 a default `reflected` run sends at
+  `--probe-depth quick` — and sent at **both** probe depths, since the sink it
+  reaches is reachable by no other shape and that is not the saving
+  `--probe-depth quick` exists for.
+
+  Stated in `docs/reference.md` rather than left to be discovered: this tests
+  CVE-2014-6271 and not the shapes that survive its patch (CVE-2014-6277,
+  CVE-2014-6278) or the parser-state shape that writes a file instead of
+  stdout (CVE-2014-7169), so a target patched against 6271 alone answers
+  `negative`, which is narrower than "not vulnerable to Shellshock". A blind
+  Shellshock sink is out of reach too — only `reflected` carries the shape.
+
+  No bench case yet. The unit tests prove the method reaches the right verdict
+  from a modelled CGI; only a bench case proves it against a real
+  bash-behind-Apache, and the README claims nothing it has not run.
+
 ## [3.4.0] — 2026-10-26
 
 ### Added
@@ -3229,6 +3290,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.5.0]: https://github.com/kabiri-labs/rcekit/compare/v3.4.0...v3.5.0
 [3.4.0]: https://github.com/kabiri-labs/rcekit/compare/v3.3.0...v3.4.0
 [3.3.0]: https://github.com/kabiri-labs/rcekit/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/kabiri-labs/rcekit/compare/v3.1.2...v3.2.0

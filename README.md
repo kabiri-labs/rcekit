@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.4.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.5.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -509,7 +509,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 
 | RCE class | `--methods` | How RCEKit proves it |
 |-----------|-------------|----------------------|
-| **OS command injection** | `reflected` | Makes the shell compute `$((a+b))` on random operands and collapse `$(echo TAG)`; confirms the *result*, never the literal expression. Written in the sink's own dialect — POSIX, `cmd.exe` or PowerShell. |
+| **OS command injection** | `reflected` | Makes the shell compute `$((a+b))` on random operands and collapse `$(echo TAG)`; confirms the *result*, never the literal expression. Written in the sink's own dialect — POSIX, `cmd.exe` or PowerShell. One shape is not injected into a command at all: the `() { :;}` function definition a CGI server's bash parses out of a header it copied into the environment (Shellshock, CVE-2014-6271). |
 | **Code / expression injection** — SSTI, SpEL, OGNL, Groovy, `eval()` (CWE-94) | `eval` | Injects `a*b` in every common template syntax (`${…}` `{{…}}` `#{…}` `%{…}` `<%=…%>` `@(…)`, bare); confirms the **product** appears while the literal `a*b` does not. |
 | **Blind command injection** (no output) | `time` | Fires a controlled `0/N/2N` delay series and confirms the response time tracks the delay **linearly**; reported `timing-sink` — proven, and not execution: what waited is not shown. |
 | **Internal / no-egress** targets | `file` | Writes a random token and fetches it back through *any* read-back path — a web root, an LFI parameter, a download or export handler, a `/tmp`-backed preview. Proves execution **plus** a write primitive, with no external listener. |
@@ -716,6 +716,7 @@ target shapes.
 | My input lands inside `'quotes'` | [Injecting inside quotes](docs/guide.md#injecting-inside-quotes) |
 | The sink runs my input as the whole command | [Whole-command sinks](docs/guide.md#whole-command-sinks) |
 | The target is Windows or the sink is PowerShell | [Windows and PowerShell sinks](docs/guide.md#windows-and-powershell-sinks) |
+| The endpoint is a CGI script and the header never reaches a command | [The Shellshock shape](docs/reference.md#the-shellshock-shape) |
 | There's a WAF | [Working around a WAF](docs/guide.md#working-around-a-waf) |
 | No output comes back at all | [Blind targets](docs/guide.md#blind-targets) |
 | No output *and* no egress | [No-egress targets](docs/guide.md#no-egress-targets) |
