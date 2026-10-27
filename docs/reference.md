@@ -103,14 +103,72 @@ does not need the flag.
 
 ### Probe depth
 
-One extra shape is sent at **both** depths, because it costs a single shape and
-closes a whole filter class:
+Two extra shapes are sent at **both** depths, because each costs a single
+request and closes something a whole depth setting should not:
 
 - **space-free** (`echo${IFS}…`) — stripping spaces looks like it disarms
   command injection and does not, since `${IFS}` is a space to the shell. Every
   other probe carries a space, so this one filter silenced all of them. The
   separator's trailing space is trimmed too (`;echo…`, not `; echo…`), and the
   newline separator survives unchanged.
+- **Shellshock** (`() { :;}; echo; echo; echo …`) — the only shape here that
+  is never part of a command. It is described on its own below, because what it
+  reaches is a different sink rather than a filtered one.
+
+#### The Shellshock shape
+
+Every other probe in `reflected` breaks **out** of a command the application is
+assembling. This one is never in a command: a CGI server copies request headers
+into the environment — `User-Agent` becomes `HTTP_USER_AGENT`, `Cookie` becomes
+`HTTP_COOKIE` — and a vulnerable bash parses an environment value beginning
+`() {` as a function definition while it starts up, then runs whatever follows
+the closing brace (CVE-2014-6271). The application never touches the value.
+
+Four consequences, each visible in the probe:
+
+- **No separator, at any rung.** The value has to *begin* with `() {`, so a
+  leading `;` or `|` turns the one shape that reaches this sink into a wasted
+  request. The sweep and `--sink-raw` leave it byte-identical.
+- **Only a context that prepends nothing carries it.** `raw`, `html`,
+  `unix_shell`, `json` and `xml` hand the value over as its own first bytes;
+  `attribute` opens with a quote and `attribute_unquoted` with a single space,
+  and either is enough that bash no longer reads a function definition. Those
+  contexts get no Shellshock probe rather than an unconfirmable one.
+- **`echo; echo;` is load-bearing.** The injected command runs before the CGI
+  script has written a byte, so its output arrives where the response headers
+  belong. The two blank lines close that header block; without them the server
+  reads the computed value as a malformed header, answers 500, and discards the
+  one thing the probe exists to collect.
+- **A declared sink shape suppresses it.** `--sink-raw`, `--sink-shape` and
+  `--separators` each say the value lands inside a command the application
+  built, and a Shellshock sink has no such command — so the probe could only
+  come back negative. This is the same reasoning that drops the `raw` rung when
+  separators are named. `--environments` and `--contexts` are *not* read here:
+  they say which runtime and which serialization, not that the value reaches a
+  command, and an operator who suspects a CGI narrows exactly that way.
+
+The [sink-shape ladder](#the-sink-shape-ladder) has no rung for a value that
+reaches bash through the environment, so there is no `--sink-shape` name that
+asks for this shape *instead* of the others. Leaving the shape undeclared is
+what keeps it; that is a known rough edge rather than a design, and it means
+the pre-flight plan does not print the shape being held back.
+
+The carrier that actually reaches such a sink is a **header** or a **cookie
+crumb**, both of which `-p all` enumerates — see [Enumerating injection
+points](#enumerating-injection-points). Sent into a query value the shape is
+inert, because the server hands `QUERY_STRING` to the script still
+percent-encoded, and `%28%29%20%7B` is not a function definition. It costs one
+request per carrier either way — 17 of the 661 a default `reflected` run sends
+at `--probe-depth quick` — which is why it is not held back for
+`--probe-depth full`.
+
+**What it does not test**, since a `negative` has to mean something: the shapes
+that survive the 6271 patch (CVE-2014-6277 and CVE-2014-6278) and the
+parser-state shape that creates a file instead of writing to stdout
+(CVE-2014-7169). A target patched against 6271 alone answers `negative` here,
+and that is narrower than "not vulnerable to Shellshock". A *blind* Shellshock
+sink is also out of reach: only `reflected` carries the shape, so `time`, `oob`
+and `file` still need the application to put the value into a command.
 
 `full` sends three further shapes per sink, each aimed at a filter that silences
 the canonical probes:

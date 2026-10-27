@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.4.0"
+__version__ = "3.5.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4826,6 +4826,23 @@ class DetectionMethod:
             return False  # already the only body; see _needs_separator
         return "raw" in effective_sink_shapes(self.config)
 
+    def _sink_shape_declared(self) -> bool:
+        """Whether the operator has stated the shape of the sink.
+
+        ``--sink-raw``, ``--sink-shape`` and ``--separators`` are three
+        spellings of one statement: the injected value lands inside a command
+        the application built, and here is how. :func:`effective_sink_shapes`
+        reads all three for the pre-flight plan, and this reads them for the
+        one shape that is not about such a command at all -- see
+        :meth:`ReflectedMath._shellshock_probes`. Kept here rather than in that
+        method so the two cannot drift apart.
+
+        Deliberately not ``--contexts``: an explicit context says where in the
+        *serialization* the value sits, which is a different question and one a
+        header-carried value answers with ``raw``."""
+        return bool(self.config.get("sink_raw") or self.config.get("sink_shapes")
+                    or self.config.get("separators"))
+
     def _separator_candidates(self, record: "PayloadRecord",
                               sink_env: str = "unix") -> Tuple[Optional[str], ...]:
         """The separators to build one probe each for; ``None`` means "none".
@@ -5114,6 +5131,7 @@ class ReflectedMath(DetectionMethod):
             probes.extend(Probe(payload=payload, expected=f"{t1}{total}{t2}", forbidden=bt)
                           for payload in self._wrap_variants(record, core_bt))
             probes.extend(self._space_free_probes(record, a, b, total, t1, t2))
+            probes.extend(self._shellshock_probes(record, a, b, total, t1, t2))
             if self._depth() != "quick":
                 probes.extend(self._extended_probes(record, a, b, total, t1, t2, t3, core))
         probes.extend(self._bridge_probes(record, sink_env, rng, a, b, total, t1, t2))
@@ -5158,6 +5176,70 @@ class ReflectedMath(DetectionMethod):
         return [Probe(payload=self._wrap_context(record, body), expected=f"{t1}{total}{t2}",
                       forbidden=f"$(({a}+{b}))", separator=separator)
                 for separator, body in self._space_free_bodies(record, core)]
+
+    def _shellshock_probes(self, record: "PayloadRecord", a: int, b: int, total: int,
+                           t1: str, t2: str) -> List[Probe]:
+        """The arithmetic proof carried as a bash function definition
+        (CVE-2014-6271, "Shellshock").
+
+        Structurally unlike every other shape in this method, which is the
+        reason it exists rather than a note about it. The others break *out* of
+        a command the application is assembling; this one is never part of a
+        command at all. A CGI server copies request headers into the
+        environment -- ``User-Agent`` becomes ``HTTP_USER_AGENT``, ``Cookie``
+        becomes ``HTTP_COOKIE`` -- and a vulnerable bash parses an environment
+        value beginning ``() {`` as a function definition while it starts up,
+        then runs whatever follows the closing brace. Nothing the application
+        does with the value is involved, so no separator can help and none is
+        sent: the value has to *begin* with ``() {``, which is why this probe
+        declares ``separator=None`` and why a context that prepends or appends
+        anything cannot carry it.
+
+        ``echo; echo;`` is not decoration. The injected command runs before the
+        CGI script has written a byte, so its output lands where the response
+        headers belong; the two empty lines close that header block, and
+        without them the server reads ``RKAAAAA1234567RKBBBBB`` as a malformed
+        header, answers 500 and discards the one thing the probe exists to
+        collect.
+
+        Sent at both probe depths. One request per carrier -- 17 of the 661 a
+        default ``reflected`` run sends at ``--probe-depth quick`` -- and the
+        sink it reaches is reachable by no other shape here, so this is not the
+        saving ``--probe-depth quick`` is for.
+
+        A **declared** sink shape suppresses it, through
+        :meth:`_sink_shape_declared`. ``--sink-raw``, ``--sink-shape`` and
+        ``--separators`` each say the value lands inside a command the
+        application built -- and a Shellshock sink has no such command, so the
+        probe could only come back negative. That is the same reasoning by
+        which naming the separators drops the ``raw`` rung, and it is why the
+        ladder's own tests, which pin that every payload honours the declared
+        shape, were right to fail on the first version of this: it ignored all
+        three. The sink-shape ladder has no rung for a value that reaches bash
+        through the environment, so there is no ``--sink-shape`` name that asks
+        for this shape *instead*; an operator who suspects a CGI leaves the
+        shape undeclared and narrows with ``--environments``/``--contexts``,
+        which this gate does not read.
+
+        What it does not test, stated because a ``negative`` has to mean
+        something: the shapes that survive the 6271 patch (CVE-2014-6277 and
+        CVE-2014-6278) and the parser-state shape that creates a file rather
+        than writing to stdout (CVE-2014-7169). A target patched against 6271
+        alone answers ``negative`` here, and that is narrower than "not
+        vulnerable to Shellshock"."""
+        if self._sink_shape_declared():
+            return []
+        ctx = self.gen.contexts.get(record.context, {})
+        if ctx.get("prefix") or ctx.get("suffix"):
+            return []
+        arith = f"$(({a}+{b}))"
+        # Concatenated rather than one f-string: the braces are the payload
+        # here, and doubling them to escape the formatting would hide the one
+        # thing a reader needs to recognise.
+        core = "() { :;}; echo; echo; echo " + f"{t1}{arith}{t2}"
+        return [Probe(payload=self._wrap_context(record, core),
+                      expected=f"{t1}{total}{t2}", forbidden=arith,
+                      carrier="shellshock", separator=None)]
 
     def _extended_probes(self, record: "PayloadRecord", a: int, b: int, total: int,
                          t1: str, t2: str, t3: str, core: str) -> List[Probe]:

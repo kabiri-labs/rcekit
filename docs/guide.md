@@ -211,7 +211,17 @@ while the target stays trivially exploitable through a plain `;`. The extra
 shapes use `awk`, and two sets comment out whatever the application appends
 after the injection point. Pass `--probe-depth quick` on a rate-limited target
 to halve the requests and send only the canonical probes — measured on a Unix
-sink, 36 probes per point at `full` against 18 at `quick`.
+sink, 37 probes per point at `full` against 19 at `quick`.
+
+Two shapes ignore the setting and ship at **both** depths, because each costs
+one request and neither is about a filter the other probes already try: the
+space-free one below, and the [Shellshock
+shape](reference.md#the-shellshock-shape), which reaches a header a CGI server
+put in the environment rather than a command the application built. The second
+is dropped if you declare the sink's shape — `--sink-raw`, `--sink-shape` or
+`--separators` — since each of those says the value lands inside a command,
+which a Shellshock sink does not have. Narrowing with `--environments` and
+`--contexts` keeps it.
 
 It governs probe *shapes* only — never which break-outs are tried. Both depths
 sweep every separator, and both screen every separator in `--methods time`,
