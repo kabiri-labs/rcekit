@@ -65,8 +65,11 @@ _OUTCOMES_WITHOUT_A_METHOD = ("negative", "inconclusive", "error", "nothing-test
 def _reported_tiers() -> set:
     """Every verdict a detection method can emit: its ceiling and the weaker
     ones it really reports. `tier` alone was not enough -- `write` reports
-    `needs-review` for a write that is served but not interpreted, and `deser`
-    for a shape fingerprint, so a case pinning either was guessing."""
+    `file-write` for a write that is served but not interpreted, and `deser`
+    reports `needs-review` for a shape fingerprint, so a case pinning either
+    was guessing. Both are read off `also_reports`, so this sentence is the one
+    place the pair can go stale -- and it had, naming `needs-review` for both
+    long after 3.0.0 gave the first its own tier."""
     tiers = set()
     for method in rcekit.DETECTION_METHODS.values():
         tiers.add(method.tier)

@@ -81,12 +81,12 @@
     "expect": "negative"
   },
   "notes": [
-    "The expectation is `deserialization-sink`, not `confirmed`, and the",
+    "The expectation is `deserialization-sink`, not `executed`, and the",
     "distinction is the point of the tier. A callback proves the application",
     "reconstructed an object graph RCEKit supplied -- fastjson resolved the type",
     "name and instantiated it. Reaching execution from there depends on gadgets",
     "on the classpath, which this gadget deliberately does not carry: URLDNS",
-    "resolves a name and does nothing else. A case expecting `confirmed` here",
+    "resolves a name and does nothing else. A case expecting `executed` here",
     "would be asserting the promotion the tier rule forbids.",
     "The control is class attribution. The payload reaches fastjson either way --",
     "in the control it arrives as a JSON string value the parser reads -- and",
