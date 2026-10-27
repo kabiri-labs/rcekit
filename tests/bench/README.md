@@ -207,11 +207,22 @@ fast case is most of the run.
     | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
 
-That is every row in the repository README's coverage ledger. 9 cases cover its
-11 rows, because the two `time` rows are the *control* halves of the Webmin and
-OpenTSDB cases rather than cases of their own — a tier ceiling is a claim about
-a method that must not be promoted, and the place that claim belongs is a
-control.
+Three more were added after that sweep and each was run on its own, so they are
+listed apart from it rather than folded into a figure no run produced:
+
+    | RCE class | Target | Method | Verdict | Control | Result | Time |
+    |---|---|---|---|---|---|---|
+    | Predicate sink, nothing rendered (Mongo `$where`) | mongo-express 0.53.0 on MongoDB 3.4 | `boolean` | `evaluation-sink` | `negative` | pass | 29.9s |
+    | OS command injection, found by enumeration | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `negative` | pass | 4m32s |
+    | Blind command injection, timing as the subject | Webmin 1.910 -- CVE-2019-15107 | `time` | `timing-sink` | `negative` | pass | 21m21s |
+
+13 cases now cover the ledger's 12 rows. More cases than rows, in both
+directions and for different reasons: the OpenTSDB `time` row is still the
+*control* half of that case rather than one of its own, because a tier ceiling
+is a claim about a method that must not be promoted and the place that claim
+belongs is a control; while `webmin-cve-2019-15107-enumerated` has no row at
+all, because what it proves is the enumerator rather than a method or a tier,
+and the ledger is organised by method.
 
 ### The fourth row now has one, and it needed the harness to grow
 
@@ -458,30 +469,77 @@ defends the wrong claim: `webmin-cve-2019-15107` already separates those classes
 and nothing in it would catch `file` confirming from a response rather than a
 fetch.
 
-### `boolean` ships without a case, and this is the reason
+### `boolean` has a case now, and the target is not the one named here
 
 `--methods boolean` reads a sink that evaluates a predicate and renders nothing
 of it. The target that shape was designed against is MongoDB `$where`, and the
 case would be a Mongo image with an application in front of it.
 
-The runtime is no longer what stands in the way -- 9 cases run under Docker at
-2.45.7 -- so the honest statement is narrower: the case is not written yet. The
-candidate is Chartbrew CVE-2026-25887, where a Mongo query reaches `Function()`
-behind authentication, across a 4-container stack. `boolean` is now the **only**
-method without a case.
+The case is `mongo-express-where-boolean`, and `boolean` is no longer the
+method without one. The question a fixture could not settle -- "does an ordinary
+application's response hold still enough between two requests to carry one bit"
+-- is the one this case answers, because this oracle reads the *shape* of a real
+response and real responses carry timestamps, counters and pagination that a
+fixture only imitates.
 
-So the method ships on its unit suite, as the contribution guide allows, and the
-gap is worth stating precisely rather than leaving implied. What a fixture
-proves here is narrower than usual: this oracle reads the *shape* of a real
-response, and real responses carry session tokens, timestamps, counters and
-pagination that a fixture only imitates. Its guards were measured against
-fixtures wearing that chrome deliberately, and the unit suite keeps them there
--- but the question "does an ordinary application's response hold still enough
-between two requests to carry one bit" is exactly the question a fixture cannot
-settle, and it is the one this method lives or dies on.
+**Chartbrew CVE-2026-25887 was the candidate named here and it cannot be
+written.** Its sink is behind a login and three setup steps -- project,
+connection, dataset -- and a case can only `docker compose up` and then run one
+invocation. There is no setup hook in the runner, so a captured session token
+and dataset id do not survive the `down -v` between the halves. That is the
+chain machinery roadmap phase 3 is for, not something a case can work around.
 
-The control, when the case is written, is the point of it. A vulnerable
-`$where` endpoint must reach `evaluation-sink`, and a patched build of the same
-application must come back `negative` rather than `inconclusive` -- because an
-`inconclusive` from a stable target would mean the signature is reading noise
-that is not there.
+MongoDB's `$where` on a one-document collection a fresh `mongo:3.4` already
+has needs none of it. Measured by hand on
+`/db/admin/system.version` before the case was written: a true predicate returns
+60 table rows and 19707 bytes, a false one 54 rows and 17452 bytes. Through the
+tool, `evaluation-sink` on the `raw` and `html` contexts over 81 probes.
+
+The control is **class attribution**, not the `patched-build` this section used
+to specify, and the reason is that `$where` is MongoDB's documented feature
+rather than a defect -- no patched build removes it, and mongo-express 0.54.0
+fixes a different sink (`/checkValid`, CVE-2019-10758). So the control moves the
+payload from `{"$where": ...}` to `{"version": ...}`: same endpoint, same
+parameter, same query document, but a position MongoDB compares literally
+instead of evaluating. Measured identical for true and false -- 17450 bytes and
+54 rows either way -- and `negative` on all three contexts. A differential here
+therefore requires an evaluator, not merely a value that reaches the query.
+`patched-build` still has no shipped user.
+
+`/checkValid`, the actual CVE-2019-10758 sink, was tried first and measured
+`negative` over 129 probes at `--verify-active-risk stateful`. It answers
+`Valid` in 5 bytes for a true predicate, a false one and an arbitrary
+expression alike. An endpoint that answers yes or no *about* an expression is
+not the same thing as one whose answer depends on that expression's value, and
+that distinction is worth keeping: it is what sent the first draft of this case
+at the wrong endpoint.
+
+### Second-order has no case, and the reason is the harness
+
+`--observe-url` is advertised in the repository README's comparison matrix as a
+reach no other tool in it has: the payload lands on one request and executes on
+another, and the observed endpoint is differenced against a snapshot taken
+before any probe went out. It has no case, and after looking for a target it is
+clear that is not for want of trying a few.
+
+What the shape needs is an **unauthenticated write that renders on an
+unauthenticated read**. Everything in a vulhub checkout that stores a value and
+renders it elsewhere puts the store behind a login or behind several steps:
+`shiro/CVE-2016-4437` is a cookie deserialization and in-band;
+`teamcity/CVE-2024-27198` and `wordpress/CVE-2026-63030` are multi-step
+privilege chains rather than second-order injections; `tikiwiki/CVE-2020-15906`
+is a login bypass; `flask/ssti` renders in the same response, so `eval`
+confirms it directly and nothing is deferred; `django/CVE-2017-12794` is an XSS
+on a debug page and executes nothing.
+
+So this gap is the same one `Chartbrew` ran into, reached from the other side: a
+case can bring a stack up and fire one invocation, and nothing in the schema
+seeds application state. Saving something is what a second-order sink requires,
+and saving something is what a case cannot do. The missing piece is the chain
+machinery -- setup steps carrying a session -- that roadmap phase 3 merges with
+the oracles, and a `setup` hook bolted onto the runner before then would be
+that feature arriving under another name.
+
+Worth stating because the alternative is worse: a case built on a target
+brought up by hand, which passes on one machine and nowhere else, or a fixture,
+which is the one thing a bench case exists not to be.
