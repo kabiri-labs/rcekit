@@ -3355,6 +3355,29 @@ class RCEKit:
             f"rcekit-control-{self._generate_canary()}", url, method, data, headers,
             url_location, resolved_body_location, timeout, mark, header_location)
 
+        # A blob point needs a *second* baseline, and only for refusal
+        # classification. The control above carries the canary inside the blob,
+        # which means it carries a rewritten one -- and a rewritten JWT no longer
+        # matches its signature, so a target that verifies refuses the control
+        # exactly as it refuses every probe. `payload_refused` requires the
+        # control to have got through, so it answered no, and a run that reached
+        # no sink at all reported `negative` about every probe.
+        #
+        # The baseline puts the captured value back verbatim, reproducing the
+        # request as captured, and lends only its *status*: the evidence
+        # differential still rests on the canary control's channels, which is
+        # the comparison that has to hold the payload constant.
+        baseline = next(
+            (location for location in
+             (url_location, resolved_body_location, header_location)
+             if isinstance(location, BlobLocation)), None)
+        if baseline is not None and baseline.spec.original:
+            accepted, _b, _c, _e = self._fire_channels(
+                baseline.spec.original, url, method, data, headers,
+                "raw", "raw", timeout, mark, "raw")
+            if accepted is not None:
+                control_status = accepted
+
         # The observed channel's control has to be taken *before* any probe is
         # sent, not after: the whole premise is that a probe changes what that
         # endpoint renders, so a control taken afterwards would already contain
@@ -8042,6 +8065,13 @@ _B64_RE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
 _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]{16,}={0,2}$")
 _JWT_RE = re.compile(r"^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{16,})\.([A-Za-z0-9_-]*)$")
 
+# `Authorization: Bearer <token>` carries the blob behind a scheme word, and the
+# patterns above anchor on the encoded form alone, so the header value as read
+# matched none of them and a bearer token was advertised and never reached. The
+# scheme is split off before decoding and put back when the value is rebuilt:
+# stripping it without restoring it would send a header the target cannot parse.
+_AUTH_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9!#$%&'*+.^_`|~-]*)[ \t]+(\S+)$")
+
 
 @dataclass
 class BlobSpec:
@@ -8072,6 +8102,17 @@ class BlobSpec:
     prefix: str = ""
     suffix: str = ""
     padded: bool = True
+    # An `Authorization: Bearer <token>` scheme word, restored in front of the
+    # rebuilt value. Empty for a bare carrier.
+    scheme: str = ""
+    # The carrier value exactly as the capture carried it, on the wire. Not for
+    # rebuilding -- `render` does that -- but for the *baseline* request, which
+    # reproduces the capture byte for byte so refusal classification has
+    # something that was accepted to compare against. Rewriting a signed blob
+    # refuses the payload-free control as well, and a control that was itself
+    # refused makes `payload_refused` answer no, so every probe read `negative`
+    # about a sink none of them reached.
+    original: str = ""
 
     def render(self, value: str) -> str:
         """The whole carrier value again, with ``value`` at ``tokens``."""
@@ -8085,7 +8126,7 @@ class BlobSpec:
             core = base64.urlsafe_b64encode(inner).decode("ascii")
         if not self.padded:
             core = core.rstrip("=")
-        return self.prefix + core + self.suffix
+        return self.scheme + self.prefix + core + self.suffix
 
 
 # Which registry encoder the rebuilt blob still has to go through, and which of
@@ -8152,7 +8193,8 @@ def point_locations(point: "InjectionPoint") -> Dict[str, Any]:
 
 
 def blob_points(outer: "InjectionPoint", value: str,
-                limit: int = _BLOB_POINT_LIMIT) -> List["InjectionPoint"]:
+                limit: int = _BLOB_POINT_LIMIT,
+                wire: Optional[str] = None) -> List["InjectionPoint"]:
     """Every leaf inside ``value``'s encoded blob, as points of their own.
 
     ``[]`` when the value is not an encoded JSON blob, which is the usual
@@ -8165,7 +8207,15 @@ def blob_points(outer: "InjectionPoint", value: str,
     run's whole budget on one value. A second slice here would be dead code --
     mutation testing found it never bites, because the walk cannot return more
     leaves than it was asked for."""
-    decoded = _blob_decode(value)
+    scheme = ""
+    token = value
+    carrier = _AUTH_SCHEME_RE.match(value or "")
+    if carrier is not None:
+        # `Authorization: Bearer <token>`. The scheme is not part of the blob
+        # and the patterns below would refuse the pair, so it is split off here
+        # and restored by `render`.
+        scheme, token = carrier.group(1) + " ", carrier.group(2)
+    decoded = _blob_decode(token)
     if decoded is None:
         return []
     codec, template, prefix, suffix, padded = decoded
@@ -8176,7 +8226,8 @@ def blob_points(outer: "InjectionPoint", value: str,
     points: List["InjectionPoint"] = []
     for tokens in _json_leaf_tokens(document, limit=limit):
         inner = _render_json_path(tokens)
-        spec = BlobSpec(codec, template, tokens, prefix, suffix, padded)
+        spec = BlobSpec(codec, template, tokens, prefix, suffix, padded,
+                        scheme=scheme, original=wire if wire is not None else value)
         points.append(InjectionPoint(
             "blob", f"{outer.name}>{inner}",
             f"{codec} blob in {outer.label}, field '{inner}'",
@@ -8906,13 +8957,15 @@ def enumerate_injection_points(req: Dict[str, Any], kinds: Optional[Tuple[str, .
                 continue
             value = _point_value(target, headers, body, carrier)
             if value:
-                nested.extend(blob_points(carrier, value))
+                nested.extend(blob_points(
+                    carrier, value,
+                    wire=_point_value(target, headers, body, carrier, decode=False)))
         points.extend(nested)
     return [point for point in points if point.kind in requested]
 
 
 def _point_value(target: str, headers: List[List[str]], body: str,
-                 point: InjectionPoint) -> Optional[str]:
+                 point: InjectionPoint, decode: bool = True) -> Optional[str]:
     """What a point currently carries, or ``None`` when it carries nothing.
 
     The read counterpart of :func:`place_injection_point`, and only used to ask
@@ -8930,7 +8983,10 @@ def _point_value(target: str, headers: List[List[str]], body: str,
             if not sep or strip_bom(key) != point.name:
                 continue
             if index is None or position == index:
-                return urllib.parse.unquote(raw)
+                # `decode=False` returns the value as the capture carried it,
+                # which is what the baseline request has to put back to
+                # reproduce the capture byte for byte.
+                return urllib.parse.unquote(raw) if decode else raw
         return None
     if point.kind == "cookie":
         for name, value in headers:

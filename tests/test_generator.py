@@ -7914,6 +7914,193 @@ class EncodedBlobTestCase(unittest.TestCase):
         self.assertNotIn("blob", RCEKit.body_location_choices())
 
 
+class BlobAuthSchemeTestCase(unittest.TestCase):
+    """`Authorization: Bearer <token>` was advertised and never reached.
+
+    The patterns anchor on the encoded form alone, so the header value as read
+    matched none of them and the bearer case produced no points at all while
+    the reference doc named it. The scheme is split off before decoding and put
+    back when the value is rebuilt -- stripping it without restoring it would
+    send a header the target cannot parse."""
+
+    def _header_capture(self, value):
+        raw = ("GET /s HTTP/1.1\r\nHost: target.example\r\n"
+               "Authorization: " + value + "\r\n\r\n")
+        return parse_raw_request(raw)
+
+    def _claims(self):
+        return json.dumps({"user": "ali", "role": "guest"})
+
+    def _jwt(self):
+        return _b64u('{"alg":"HS256"}') + "." + _b64u(self._claims()) + ".c2ln"
+
+    def test_a_bearer_token_is_reached(self):
+        req = self._header_capture("Bearer " + self._jwt())
+        names = [p.name for p in rcekit.enumerate_injection_points(req, thorough=True)
+                 if p.kind == "blob"]
+        self.assertEqual(names, ["Authorization>user", "Authorization>role"])
+
+    def test_the_scheme_comes_back_or_the_header_is_invalid(self):
+        req = self._header_capture("Bearer " + self._jwt())
+        point = next(p for p in rcekit.enumerate_injection_points(req, thorough=True)
+                     if p.kind == "blob" and p.name.endswith("role"))
+        rebuilt = point.blob.render("; id")
+        self.assertTrue(rebuilt.startswith("Bearer "), rebuilt)
+        token = rebuilt.split(" ", 1)[1].split(".")[1]
+        payload = token + "=" * (-len(token) % 4)
+        self.assertEqual(
+            json.loads(base64.urlsafe_b64decode(payload).decode())["role"], "; id")
+
+    def test_a_token_with_no_scheme_still_works_and_records_none(self):
+        # The near neighbour: a cookie or a bare header carries no scheme, and
+        # restoring one that was never there would corrupt the value.
+        req = self._header_capture(self._jwt())
+        point = next(p for p in rcekit.enumerate_injection_points(req, thorough=True)
+                     if p.kind == "blob" and p.name.endswith("role"))
+        self.assertEqual(point.blob.scheme, "")
+        self.assertFalse(point.blob.render("x").startswith(" "))
+
+    def test_a_scheme_whose_token_is_not_a_blob_yields_nothing(self):
+        # `Basic dXNlcjpwYXNz` decodes to `user:pass`, which is not JSON, so it
+        # is refused for the reason every non-blob value is.
+        for value in ("Basic " + _b64("username:password-long-enough"),
+                      "Bearer not-a-blob-at-all", "Negotiate " + _b64("plain text here")):
+            req = self._header_capture(value)
+            self.assertFalse(
+                [p for p in rcekit.enumerate_injection_points(req, thorough=True)
+                 if p.kind == "blob"], value)
+
+
+class BlobRefusalBaselineTestCase(unittest.TestCase):
+    """A rewritten signed blob refuses the control as well as the probes.
+
+    The payload-free control carries the canary *inside* the blob, so it carries
+    a rewritten one -- and a rewritten JWT no longer matches its signature. A
+    target that verifies refuses the control exactly as it refuses every probe,
+    `payload_refused` requires the control to have got through, and a run that
+    reached no sink at all reported `negative` about every probe. That is the
+    one outcome this tool exists to refuse, and the documentation claimed
+    `blocked`.
+
+    A second baseline puts the captured value back verbatim and lends only its
+    *status*. The evidence differential still rests on the canary control's
+    channels, which is the comparison that has to hold the payload constant."""
+
+    def _claims(self):
+        return json.dumps({"user": "ali", "role": "guest"})
+
+    def _jwt(self):
+        return _b64u('{"alg":"HS256"}') + "." + _b64u(self._claims()) + ".c2ln"
+
+    def _run(self, route, param_value, kinds=("blob",)):
+        gen = RCEKit()
+        with local_target(route) as base:
+            host = base.split("//", 1)[1]
+            capture = ("GET /s?tok=" + param_value + " HTTP/1.1\r\n"
+                       "Host: " + host + "\r\n\r\n")
+            req = parse_raw_request(capture)
+            point = next(p for p in rcekit.enumerate_injection_points(req, kinds=kinds)
+                         if p.kind == kinds[0])
+            url, method, data, headers, _l = rcekit.build_request_inputs(
+                capture, point=point, scheme="http")
+            overrides = rcekit.point_locations(point)
+            records = list(gen.generate_payload_records(
+                selected_contexts=["raw"], selected_environments=["unix"],
+                mode="detection"))
+            return gen.run_detection(
+                iter(records), url=url, methods=["reflected"], method=method,
+                data=data, headers=headers, timeout=5.0, max_payloads=3,
+                url_location=overrides.get("url") or "query_value",
+                body_location=overrides.get("body"),
+                config={"probe_depth": "quick"},
+                header_location=overrides.get("header") or "header")
+
+    def test_a_verifying_target_reports_blocked_not_a_clean_negative(self):
+        token = self._jwt()
+
+        def route(method, path, params, headers, body):
+            # Anything but the captured token is a signature mismatch.
+            if params.get("tok") == token:
+                return 200, "welcome"
+            return 401, "invalid signature"
+
+        results = self._run(route, token)
+        self.assertTrue(results)
+        self.assertEqual({r["verdict"] for r in results}, {"blocked"})
+
+    def test_a_target_that_does_not_verify_is_unaffected(self):
+        # The near neighbour: with nothing rejecting the rewrite, the baseline
+        # changes no verdict and the run reads as it did before.
+        token = self._jwt()
+
+        def route(method, path, params, headers, body):
+            return 200, "ok"
+
+        results = self._run(route, token)
+        self.assertTrue(results)
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+
+    def test_the_baseline_is_fired_only_for_a_blob_point(self):
+        # One extra pre-probe request for a blob point and none for an ordinary
+        # one, so an unrelated run does not pay for this.
+        token = self._jwt()
+        counts = {"n": 0}
+
+        def route(method, path, params, headers, body):
+            counts["n"] += 1
+            return 200, "ok"
+
+        counts["n"] = 0
+        self._run(route, token, kinds=("blob",))
+        with_blob = counts["n"]
+        counts["n"] = 0
+        self._run(route, token, kinds=("query",))
+        plain = counts["n"]
+        self.assertEqual(with_blob - plain, 1,
+                         "a blob point costs exactly one baseline request more")
+
+    def test_the_baseline_lends_its_status_and_not_its_body(self):
+        # The evidence differential must stay on the canary control. A target
+        # that echoes whatever it receives would otherwise have the captured
+        # blob standing in for a payload-free response.
+        token = self._jwt()
+        seen = []
+
+        def route(method, path, params, headers, body):
+            value = params.get("tok", "")
+            seen.append(value)
+            return 200, "echo " + value
+
+        results = self._run(route, token)
+        self.assertTrue(any(v == token for v in seen),
+                        "the baseline must send the captured value verbatim")
+
+        # The canary is *inside* the blob, so it is base64 on the wire and no
+        # literal search finds it. An earlier version of this test looked for
+        # the string and failed for that reason -- the third fixture in this
+        # file to assert on content an encoding had already consumed.
+        def claims_of(value):
+            segments = value.split(".")
+            if len(segments) != 3:
+                return {}
+            payload = segments[1] + "=" * (-len(segments[1]) % 4)
+            try:
+                return json.loads(base64.urlsafe_b64decode(payload).decode())
+            except Exception:
+                return {}
+
+        carried = [claims_of(v) for v in seen]
+        self.assertTrue(
+            any(any(str(field).startswith("rcekit-control-") for field in claim.values())
+                for claim in carried),
+            "the canary control must still go through the blob for the differential")
+        # And it goes through the blob rather than replacing it, so the control
+        # differs from a probe in the field under test and in nothing else.
+        self.assertTrue(any(set(claim) == {"user", "role"} for claim in carried if claim),
+                        "the control keeps the document's shape")
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+
+
 class JsonScalarLeafTestCase(unittest.TestCase):
     """A boolean and a `null` are places the application reads input too.
 
