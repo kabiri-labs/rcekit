@@ -11407,17 +11407,18 @@ class ResponseChannelTestCase(unittest.TestCase):
         self.assertEqual(channels[0], ("response body", '{"a": 1}'))
         self.assertIn(("header X-Debug", "v"), channels)
 
-    def test_a_marked_json_response_loses_its_leaf_channels(self):
-        # NOT an endorsement of this behaviour, and not a target to preserve.
-        # It pins the response half of the byte-order-mark gap 3.1.2 closed on
-        # the request side, so that closing this half is a deliberate act with a
-        # failing test in front of it rather than something done by accident.
+    def test_a_marked_json_response_keeps_its_leaf_channels(self):
+        # The response half of the byte-order-mark gap 3.1.2 closed on the
+        # request side. `json.loads` rejects the mark outright, so a marked
+        # body used to yield no leaves at all; the earlier version of this test
+        # pinned that and said in as many words that closing it should be a
+        # deliberate act with a failing test in front of it. This is that act.
         bom = rcekit._BOM
         body = '{"out": "RKAAAAA1234RKBBBBB"}'
-        self.assertEqual(self.gen._json_leaf_channels(body),
-                         [("JSON field out", "RKAAAAA1234RKBBBBB")])
-        self.assertEqual(self.gen._json_leaf_channels(bom + body), [],
-                         "json.loads rejects the mark outright")
+        leaves = [("JSON field out", "RKAAAAA1234RKBBBBB")]
+        self.assertEqual(self.gen._json_leaf_channels(body), leaves)
+        self.assertEqual(self.gen._json_leaf_channels(bom + body), leaves,
+                         "a mark must not cost the response its leaves")
 
     def test_a_mark_costs_the_channel_name_for_a_value_peeling_can_reach(self):
         # The common case, and the reason this is usually a loss of precision
@@ -11438,19 +11439,19 @@ class ResponseChannelTestCase(unittest.TestCase):
             self.assertEqual(self.method._search_channels("2058", channels),
                              "response body", candidate)
 
-    def test_a_mark_costs_the_finding_for_a_value_only_the_leaf_can_reach(self):
-        # The near neighbour of the test above, and the one that corrects it.
-        # JSON's `\/` escape and a surrogate pair are not among the forms
-        # _encoded_search peels, so the parsed leaf is the only channel that
-        # reaches such a value -- and a marked response has no leaves. This is a
-        # lost confirmation, not a lost label.
+    def test_a_value_only_the_leaf_can_reach_survives_a_mark(self):
+        # The case that made the leaf half worth fixing rather than only
+        # documenting. JSON's `\/` escape and a surrogate pair are not among the
+        # forms _encoded_search peels, so the parsed leaf is the ONLY channel
+        # that reaches such a value -- and before 3.7.1 a marked response had no
+        # leaves, so it was found on no channel at all. That was a lost
+        # confirmation, not a lost label, and this asserts it is recovered.
         #
-        # No method is exposed to it today, because every `expected` value the
+        # No method was ever exposed to it, because every `expected` value the
         # methods build is tag-bracketed decimal digits and no conforming JSON
-        # encoder escapes [A-Za-z0-9]. That is a property of the probes rather
-        # than of the channel, so it is asserted over the whole registry in
-        # test_no_method_builds_a_non_alphanumeric_expected_value below --
-        # here it is only the reason this loss costs nothing yet.
+        # encoder escapes [A-Za-z0-9] -- asserted over the whole registry in
+        # test_no_method_builds_a_non_alphanumeric_expected_value below. That is
+        # what made the gap survivable while it stood, not a reason it was fine.
         import warnings
         bs = chr(92)
         bom = rcekit._BOM
@@ -11474,7 +11475,7 @@ class ResponseChannelTestCase(unittest.TestCase):
                     [("Content-Type", "application/json")], bom + body)
                 found_marked = self.method._search_channels(wanted, marked)
             self.assertEqual(found_clean, "JSON field p", body)
-            self.assertIsNone(found_marked, body)
+            self.assertEqual(found_marked, "JSON field p", body)
 
     def test_no_method_builds_a_non_alphanumeric_expected_value(self):
         """The reason the leaf-only loss above costs nothing today.
@@ -11533,18 +11534,37 @@ class ResponseChannelTestCase(unittest.TestCase):
                 checked += 1
         self.assertGreater(checked, 500, "the sweep should cover the whole registry")
 
-    def test_a_marked_json_response_takes_the_weaker_shape_reading(self):
-        # The other half, and the reason the first is left alone: this function
-        # is the input to `boolean`'s verdict. Stripping the mark in one and not
-        # the other would make the two disagree about what a response is, which
-        # is the shape of the request-side bug. Pinned so that moving them
-        # together is a choice someone makes on purpose, with live-target
-        # evidence -- `boolean` has no bench case, so there is nothing yet to
-        # validate it against.
+    def test_a_marked_json_response_takes_the_structural_shape_reading(self):
+        # The other half, and it had to move with the first: these are two
+        # readings of the same body, and stripping the mark in one and not the
+        # other makes them disagree about what a response *is* -- the shape of
+        # the request-side bug 3.1.2 fixed, reached from the other direction.
+        #
+        # This function is `boolean`'s oracle input, which is why it waited for
+        # the mongo-express bench case: changing what a detection method reads
+        # is not settleable on a fixture. The direction is toward fewer false
+        # positives, not more. The structural reading drops every scalar, so a
+        # request id or a timestamp cannot make two identical answers differ;
+        # the word-count fallback a marked body used to get cannot.
         bom = rcekit._BOM
         body = '{"rows": [{"a": 1}, {"a": 2}]}'
         self.assertEqual(rcekit.response_shape(200, body)[:2], ("json", 200))
-        self.assertEqual(rcekit.response_shape(200, bom + body)[:2], ("text", 200))
+        self.assertEqual(rcekit.response_shape(200, bom + body)[:2], ("json", 200))
+        # And the two readings now agree, which is the property that matters
+        # more than either of them alone.
+        self.assertEqual(rcekit.response_shape(200, bom + body),
+                         rcekit.response_shape(200, body))
+
+    def test_a_marked_body_that_is_not_json_still_takes_the_text_reading(self):
+        # The near neighbour. Stripping the mark must not make the shape reader
+        # credulous about what it is looking at: a body that is still not JSON
+        # once the mark is gone goes down exactly the path it did before.
+        bom = rcekit._BOM
+        for body in ("plain words here", "<html><p>x</p></html>"):
+            self.assertEqual(rcekit.response_shape(200, bom + body)[:2],
+                             rcekit.response_shape(200, body)[:2], body)
+        self.assertEqual(rcekit.response_shape(200, bom + "plain words")[0], "text")
+        self.assertEqual(rcekit.response_shape(200, bom + "<a><b/></a>")[0], "markup")
 
     def test_leaf_walk_is_bounded_by_depth_and_count(self):
         nested = json.dumps({"a": {"b": {"c": "deep"}}})
