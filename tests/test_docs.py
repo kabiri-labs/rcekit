@@ -168,6 +168,7 @@ class ConfirmationContractTestCase(unittest.TestCase):
     CHANNEL_FOR = {
         "reflected": "present in the response",
         "eval": "present in the response",
+        "argv": "present in the response",
         "oob": "out-of-band callback",
         "file": "fetched back",
         "write": "fetched back",

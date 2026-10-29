@@ -514,6 +514,53 @@ not the same thing as one whose answer depends on that expression's value, and
 that distinction is worth keeping: it is what sent the first draft of this case
 at the wrong endpoint.
 
+### `argv` has a case, and its control is the target's own security property
+
+`gitlist-cve-2018-1000533-argv` passed in 18.3s from a cold `compose down -v`:
+`executed` on the vulnerable half in one probe, `negative` on the control.
+
+Most controls here have to be constructed — a different method, a different
+endpoint, a payload moved to a position nothing evaluates. This one is not
+constructed at all. GitList calls `escapeshellarg($query)` and does it
+**correctly**, so the value reaches `git grep -i --line-number <value> <branch>`
+as one argv element with no shell anywhere. `--methods reflected` at
+`--probe-depth full` sends 37 probes and reports `negative` on every one, on the
+same endpoint and the same build that `argv` confirms. The control is the thing
+the application got right, which is as close as this harness gets to measuring
+a method against the reason it exists.
+
+Three details of the probe were measured against the live target rather than
+reasoned, and each is the difference between confirming and reporting a clean
+negative on a build that executes:
+
+- **The probe ends in `#`, not the `;` the published write-ups use.** git
+  appends the path it would have paged, so `;` leaves `README.md` as a bare
+  command: it fails, git exits 255, and GitList's
+  `catch (RuntimeException) { return false; }` discards the output. Measured in
+  the container, the two forms are exit 255 against exit 0 — the command runs
+  either way and only one of them comes back.
+- **The pager's output imitates git grep's own `tree:file:line:match` format.**
+  Whatever consumes that stdout is an application parsing git grep output;
+  GitList matches `([\w-._]+):([^:]+):([0-9]+):(.+)` and renders only group 4,
+  so a bare `echo <value>` arrives and is dropped by the app's own regex.
+- **The URL's branch segment has to be a pattern that matches file content.**
+  Once the query is consumed as an option, the branch becomes git grep's
+  *pattern*, and the pager only opens when there is a file to page. The stock
+  vulhub repo is a 62-byte README containing `repository` and not `master`, so
+  `/example/tree/master/search` finds nothing and the pager never runs against a
+  target that is fully exploitable. The case uses
+  `/example/tree/repository/search`. That is a property of the fixture, not of
+  the method: a real GitList hosts repos whose content contains the branch name
+  constantly.
+
+`patched-build` was considered for this case and is still unused. A GitList
+patched with commit `87b8c26` — which moves the query behind `-e` — would make
+the identical option inert, which is exactly what that control kind is for. It
+is not used here because a case carries one control and class attribution is
+the stronger of the two: it shows the method reaching a sink no other method
+can, rather than showing a patch closing it. A second case could carry it, and
+would need an image vulhub does not ship.
+
 ### Second-order has no case, and the reason is the harness
 
 `--observe-url` is advertised in the repository README's comparison matrix as a
