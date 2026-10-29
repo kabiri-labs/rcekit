@@ -8,44 +8,6 @@ formats, or the template schema.
 
 ## [Unreleased]
 
-### Documentation
-
-- **The response side of the byte-order mark is a decision, and nothing said
-  so.** 3.1.2 stripped the mark everywhere RCEKit decides what a *request* body
-  is. The response side was left alone on purpose and that purpose was written
-  down nowhere, so the next reader had no way to tell a boundary from an
-  oversight. Both halves are now stated where someone would meet them, with
-  what each costs measured rather than asserted.
-
-  `_json_leaf_channels`: a marked response yields no leaves, because
-  `json.loads` rejects the mark. Mostly that costs only the precision of the
-  channel name a finding reports — `response body` carries the whole document
-  and the encoded-value search peels URL, HTML, `\uXXXX`, base64 and hex out of
-  it. But a value whose JSON rendering uses an escape that peeling does not undo
-  (`\/`, or a surrogate pair) is reachable *only* through the parsed leaf, and
-  measured, it is found on no channel at all once the mark is there. That is a
-  lost confirmation rather than a lost label. No method is exposed to it today
-  because every expected value is tag-bracketed decimal digits or a lowercase
-  token, and no conforming encoder escapes `[A-Za-z0-9]` — a property of the
-  probes rather than of the channel, so it is asserted across the **whole**
-  registry: every method in `DETECTION_METHODS`, every probe it builds over a
-  spread of environments and contexts, with a method that builds none failing
-  rather than passing quietly. `time` and `boolean` are named as the two that
-  search no value at all, so a third falling silent is something to look at
-  rather than absorb. A method whose expected value stopped being alphanumeric
-  now fails loudly instead of quietly losing findings.
-
-  `response_shape`: a marked JSON response takes the word-count reading instead
-  of the structural one, which is the weaker guard, so `boolean`'s resistance to
-  a false `evaluation-sink` is lower against a mark-emitting JSON API.
-
-  Neither is fixed here, and the reason is the same for both: this is the input
-  to a detection method's verdict, which this project does not settle on a
-  fixture, and `boolean` is the one method with no bench case to settle it
-  against. Pinned by tests worded so that closing either half is a deliberate
-  act with a failing test in front of it, rather than something done by
-  accident — and so that neither reads as an endorsement.
-
 ### Added
 
 - **A coverage ledger, so a measured result and a reproduced one stop looking
@@ -377,6 +339,54 @@ formats, or the template schema.
   being told to, which is the point of reading the registry instead of a list.
 
   No version bump -- this is documentation and tests only.
+
+## [3.7.1] — 2026-10-29
+
+### Fixed
+
+- **A byte-order mark on a JSON *response* cost it its leaf channels and its
+  shape reading.** 3.1.2 stripped the mark everywhere RCEKit decides what a
+  request body is. The response side was left alone, and the previous change
+  documented that as a decision rather than an oversight — with what each half
+  cost measured, because the obvious answer was wrong in both directions. This
+  closes it, and that documentation is what made it safe to close.
+
+  `json.loads` rejects a mark outright, so `_json_leaf_channels` returned
+  nothing for a marked body and `response_shape` fell from its structural
+  reading to the word-count fallback. Both now strip the mark through the same
+  shared helpers the request side uses, and they had to move **together**: they
+  are two readings of one body, and stripping in one and not the other makes
+  them disagree about what a response *is* — the shape of the request-side bug,
+  reached from the other direction.
+
+  What the leaf half cost was mostly the precision of a channel name, since
+  `response body` carries the whole document and the encoded-value search peels
+  URL, HTML, `\uXXXX`, base64 and hex out of it. But a value whose JSON
+  rendering uses an escape that peeling does not undo — `\/`, or a surrogate
+  pair — was reachable *only* through the parsed leaf, and measured, it was
+  found on no channel at all once the mark was there. That is a lost
+  confirmation rather than a lost label, and it is recovered: measured again,
+  `JSON field p` with the mark and without it.
+
+  The shape half is the one that needed the wait. `response_shape` is
+  `boolean`'s oracle input, so changing it changes what a detection method
+  reports, which this project does not settle on a fixture — and `boolean` was
+  the one method with no bench case. It has had one since 3.6.1, and
+  `mongo-express-where-boolean` was run on this tree **before and after**: pass
+  in 21.2s both times, `evaluation-sink` against `negative` both times. That is
+  the no-regression evidence the change was blocked on. It does not exercise
+  the fix, because mongo-express emits no mark; the behaviour change itself is
+  shown by fixtures, and saying which evidence covers which half is the point.
+
+  **The direction is toward fewer false positives.** The structural reading
+  drops every scalar, so a request id or a timestamp cannot make two identical
+  answers look different; the word-count fallback a marked body used to get
+  cannot. A JSON API that emits a mark now gets the same guard every other JSON
+  target gets. No tier changes and no new verdict.
+
+  A mark is still not a licence to guess: a body that is not JSON once the mark
+  is gone takes exactly the path it did before, which a test pins for plain text
+  and for markup.
 
 ## [3.7.0] — 2026-10-29
 
@@ -3479,6 +3489,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.7.1]: https://github.com/kabiri-labs/rcekit/compare/v3.7.0...v3.7.1
 [3.7.0]: https://github.com/kabiri-labs/rcekit/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/kabiri-labs/rcekit/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/kabiri-labs/rcekit/compare/v3.5.0...v3.6.0
