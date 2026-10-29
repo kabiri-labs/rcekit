@@ -13522,6 +13522,16 @@ class ArgvCatalogueTestCase(unittest.TestCase):
             self.assertIn(spec.get("sink_env", "unix"), rcekit.SINK_ENVIRONMENTS, name)
             self.assertIn(spec.get("safety", "safe"), rcekit.SAFETY_ORDER, name)
             self.assertTrue(str(spec.get("notes", "")).strip(), f"{name} has no notes")
+            # Every entry states what evidence stands behind it. Two entries
+            # were shipped on documented behaviour and cut on review: `ssh
+            # -oProxyCommand=` and `rsync --rsh=` both work as options and
+            # neither can return the value, because one's stdout is the SSH
+            # transport and the other's is the rsync protocol stream. The
+            # option working is not the bar; the command's stdout reaching the
+            # caller is, and it is a property of the program rather than of
+            # the option.
+            self.assertTrue(str(spec.get("verified", "")).strip(),
+                            f"{name} does not say what evidence stands behind it")
 
     def test_a_primitive_above_the_run_s_safety_tier_is_held_back(self):
         held = self._method(argv_binaries=("auto",), max_safety="safe")

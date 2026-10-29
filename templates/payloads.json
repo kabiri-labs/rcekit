@@ -742,26 +742,6 @@
       "notes": "git runs its pager through `sh -c` and appends the path it would have paged. Three things in this template were measured against vulhub gitlist/CVE-2018-1000533 rather than reasoned, and each one is the difference between confirming and reporting a clean negative on a target that executes. (1) The trailing `#` comments out that appended path. The published write-ups use `;`, which leaves the path as a bare command: git then exits 255, and an application that checks the exit status -- GitList catches the RuntimeException and returns false -- throws the output away, so the command runs and nothing comes back. (2) The output imitates git grep's own `tree:file:line:match` format, because whatever consumes this pager's stdout is an application parsing git grep output: GitList matches `([\\w-._]+):([^:]+):([0-9]+):(.+)` and renders group 4, so a bare line reaches it and is dropped. (3) The command is run in a substitution so its stdout lands in that fourth field. This is the clearest statement of why the argv method exists: `escapeshellarg` quotes the value correctly, every shell metacharacter is inert, and a separator-based method reaches nothing while the value still lands where git reads options.",
       "verified": "confirmed executed against vulhub gitlist/CVE-2018-1000533"
     },
-    "ssh_proxycommand": {
-      "binaries": ["ssh", "scp", "sftp"],
-      "shape": "option-names-a-command",
-      "sink_env": "unix",
-      "safety": "safe",
-      "template": "-oProxyCommand=__CMD__",
-      "requires": ["the value reaches ssh as one argv element, before the destination"],
-      "notes": "ProxyCommand is run through `sh -c` to open the connection, so it executes before any authentication is attempted and needs no reachable host. Written without a space after -o so the whole option is a single argv element; `-o ProxyCommand=...` needs the sink to split, which the single-element shapes here do not assume.",
-      "verified": "not validated here; documented ssh_config behaviour"
-    },
-    "rsync_rsh": {
-      "binaries": ["rsync"],
-      "shape": "option-names-a-command",
-      "sink_env": "unix",
-      "safety": "safe",
-      "template": "--rsh=__CMD__",
-      "requires": ["the value reaches rsync as one argv element, and the transfer names a remote path"],
-      "notes": "--rsh is the long form of -e and takes the command rsync uses to reach a remote shell. The equals form keeps it to one argv element. It only fires when rsync decides the transfer is remote, which is the narrower prerequisite recorded above.",
-      "verified": "not validated here; documented rsync behaviour"
-    },
     "gs_output_pipe": {
       "binaries": ["gs", "ghostscript"],
       "shape": "option-names-a-pipe-or-file",
@@ -769,8 +749,8 @@
       "safety": "safe",
       "template": "-sOutputFile=%pipe%__CMD__",
       "requires": ["the value reaches ghostscript as one argv element, in option position"],
-      "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, which it runs through a shell. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
-      "verified": "not validated here; documented Ghostscript output-device behaviour"
+      "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, via popen(), which runs it through a shell. The command's own stdout is inherited from Ghostscript rather than consumed by it -- Ghostscript writes the rendered page INTO the command's stdin -- which is what makes an in-band proof possible here. That property is the one to check before adding a primitive: two candidates were cut from this catalogue for failing it. ssh -oProxyCommand= runs through a shell but its stdout IS the SSH transport, and rsync --rsh= does not use a shell at all and its stdout IS the rsync protocol stream, so neither can return a computed value to the caller however well the option works. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
+      "verified": "not validated against a live Ghostscript here; the popen() path and the inherited stdout are documented output-device behaviour"
     }
   },
   "deser_probes": {
