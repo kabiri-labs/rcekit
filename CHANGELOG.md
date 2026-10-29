@@ -411,15 +411,25 @@ formats, or the template schema.
 
   The catalogue lives in the corpus as `argv_primitives`, the seam the bridges
   and eval carriers already use, so an option shape can be added without
-  touching Python. Four ship: `git --open-files-in-pager=`, `ssh
-  -oProxyCommand=`, `rsync --rsh=` and `gs -sOutputFile=%pipe%`. Each is a
-  **single argv element** — `-oProxyCommand=x`, never `-o ProxyCommand=x` —
-  because a sink that hands the value over as one argument is the shape that
-  makes the class reachable, and a two-element option is inert there while
-  looking like coverage. A test fails if one is added.
+  touching Python. Two ship: `git --open-files-in-pager=` and
+  `gs -sOutputFile=%pipe%`. Each is a **single argv element** —
+  `-sOutputFile=x`, never `-s OutputFile=x` — because a sink that hands the
+  value over as one argument is the shape that makes the class reachable, and a
+  two-element option is inert there while looking like coverage. A test fails if
+  one is added.
 
-  `--argv-binary` selects by primitive name or by the binary (`git`, `ssh`,
-  `rsync`, `gs`), and refuses an unknown one rather than narrowing the run to
+  An entry also has to be able to return the value **through the channel this
+  method has**, and that is the harder bar. `ssh -oProxyCommand=` and
+  `rsync --rsh=` were written, reviewed and cut for failing it: a ProxyCommand
+  runs through a shell but its stdout *is* the SSH transport, and rsync does not
+  use a shell at all — measured, `--rsh="echo RK$((111+222))RK"` yields
+  `protocol version mismatch` and no computed value, where the same string
+  through a shell yields it. Both options work; neither can hand the result
+  back. They are the reason the catalogue's remaining notes state where each
+  primitive's stdout goes.
+
+  `--argv-binary` selects by primitive name or by the binary (`git`, `gs`),
+  and refuses an unknown one rather than narrowing the run to
   nothing: a typo that selected no option at all would read exactly like a run
   that tried them and came back clean.
 

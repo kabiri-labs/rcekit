@@ -292,7 +292,7 @@ python rcekit.py --acknowledge-consent \
 ```
 
 **Name the binary, because the option is specific to it.** `--argv-binary` takes
-a program (`git`, `ssh`, `rsync`, `gs`) or a primitive name from the corpus, and
+a program (`git`, `gs`) or a primitive name from the corpus, and
 `argv` builds nothing until you give it one — there is no generic option that
 makes an arbitrary program run a command. `auto` tries them all, which is cheap:
 one probe per shape.

@@ -6576,11 +6576,24 @@ class ArgvInjection(DetectionMethod):
 
     The catalogue lives in the corpus (``argv_primitives``) rather than here, so
     an option shape can be added without touching Python -- the seam the bridges
-    and the eval carriers already use. Every shipped entry is a **single argv
-    element**: ``-oProxyCommand=x`` rather than ``-o ProxyCommand=x``, because a
-    sink that hands the value over as one argument is the shape that makes this
-    class reachable at all, and a two-element option silently tests nothing
-    there."""
+    and the eval carriers already use. Two conditions decide whether an entry
+    belongs in it, and the second is the one that is easy to miss.
+
+    It must be a **single argv element**: ``-sOutputFile=x`` rather than
+    ``-s OutputFile=x``, because a sink that hands the value over as one
+    argument is the shape that makes this class reachable at all, and a
+    two-element option silently tests nothing there.
+
+    And the command's **stdout has to reach the caller**, because an in-band
+    computed value is the only proof this method has. That is a property of the
+    program, not of the option, and two otherwise-correct entries were cut for
+    failing it: ``ssh -oProxyCommand=`` runs through a shell, but a
+    ProxyCommand's stdout *is* the SSH transport; ``rsync --rsh=`` does not use
+    a shell at all -- measured, the arithmetic arrives literally and rsync
+    answers ``protocol version mismatch`` -- and its stdout is the rsync
+    protocol stream. Both options work on a real target and neither can hand
+    the result back, so shipping them would have been coverage reported and not
+    delivered. Each remaining entry's notes say where its stdout goes."""
     name = "argv"
     tier = "executed"
     safety = "safe"
@@ -10046,7 +10059,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--argv-binary", default=None, metavar="NAMES",
                         help="(--methods argv) Which spawned program's options to inject: none "
                              "(default), auto, a primitive name from the corpus 'argv_primitives' "
-                             "section, or the binary it targets (git, ssh, rsync, gs). --methods "
+                             "section, or the binary it targets (git, gs). --methods "
                              "argv builds nothing until one is named, because the option that "
                              "makes a program run a command is specific to that program. Use it "
                              "when the value reaches a binary as one of its ARGUMENTS and no "
@@ -11988,26 +12001,6 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "notes": "git runs its pager through `sh -c` and appends the path it would have paged. Three things in this template were measured against vulhub gitlist/CVE-2018-1000533 rather than reasoned, and each one is the difference between confirming and reporting a clean negative on a target that executes. (1) The trailing `#` comments out that appended path. The published write-ups use `;`, which leaves the path as a bare command: git then exits 255, and an application that checks the exit status -- GitList catches the RuntimeException and returns false -- throws the output away, so the command runs and nothing comes back. (2) The output imitates git grep's own `tree:file:line:match` format, because whatever consumes this pager's stdout is an application parsing git grep output: GitList matches `([\\w-._]+):([^:]+):([0-9]+):(.+)` and renders group 4, so a bare line reaches it and is dropped. (3) The command is run in a substitution so its stdout lands in that fourth field. This is the clearest statement of why the argv method exists: `escapeshellarg` quotes the value correctly, every shell metacharacter is inert, and a separator-based method reaches nothing while the value still lands where git reads options.",
       "verified": "confirmed executed against vulhub gitlist/CVE-2018-1000533"
     },
-    "ssh_proxycommand": {
-      "binaries": ["ssh", "scp", "sftp"],
-      "shape": "option-names-a-command",
-      "sink_env": "unix",
-      "safety": "safe",
-      "template": "-oProxyCommand=__CMD__",
-      "requires": ["the value reaches ssh as one argv element, before the destination"],
-      "notes": "ProxyCommand is run through `sh -c` to open the connection, so it executes before any authentication is attempted and needs no reachable host. Written without a space after -o so the whole option is a single argv element; `-o ProxyCommand=...` needs the sink to split, which the single-element shapes here do not assume.",
-      "verified": "not validated here; documented ssh_config behaviour"
-    },
-    "rsync_rsh": {
-      "binaries": ["rsync"],
-      "shape": "option-names-a-command",
-      "sink_env": "unix",
-      "safety": "safe",
-      "template": "--rsh=__CMD__",
-      "requires": ["the value reaches rsync as one argv element, and the transfer names a remote path"],
-      "notes": "--rsh is the long form of -e and takes the command rsync uses to reach a remote shell. The equals form keeps it to one argv element. It only fires when rsync decides the transfer is remote, which is the narrower prerequisite recorded above.",
-      "verified": "not validated here; documented rsync behaviour"
-    },
     "gs_output_pipe": {
       "binaries": ["gs", "ghostscript"],
       "shape": "option-names-a-pipe-or-file",
@@ -12015,8 +12008,8 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "safety": "safe",
       "template": "-sOutputFile=%pipe%__CMD__",
       "requires": ["the value reaches ghostscript as one argv element, in option position"],
-      "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, which it runs through a shell. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
-      "verified": "not validated here; documented Ghostscript output-device behaviour"
+      "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, via popen(), which runs it through a shell. The command's own stdout is inherited from Ghostscript rather than consumed by it -- Ghostscript writes the rendered page INTO the command's stdin -- which is what makes an in-band proof possible here. That property is the one to check before adding a primitive: two candidates were cut from this catalogue for failing it. ssh -oProxyCommand= runs through a shell but its stdout IS the SSH transport, and rsync --rsh= does not use a shell at all and its stdout IS the rsync protocol stream, so neither can return a computed value to the caller however well the option works. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
+      "verified": "not validated against a live Ghostscript here; the popen() path and the inherited stdout are documented output-device behaviour"
     }
   },
   "deser_probes": {
