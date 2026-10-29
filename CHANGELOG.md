@@ -378,6 +378,78 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.7.0] — 2026-10-29
+
+### Added
+
+- **`--methods argv`: argument injection into a program spawned with no shell.**
+  This class was in the README's excluded list until now, and the reason it
+  moved is the reason it is worth having. It is not a weaker case of command
+  injection; it is the case where the application did the **correct** thing.
+  GitList calls `escapeshellarg($query)` exactly as documented, so the value
+  reaches `git grep -i --line-number <value> <branch>` as one argv element with
+  no shell anywhere and every separator inert. What quoting cannot stop is that
+  argument being read as an **option**, and `git`'s `--open-files-in-pager=`
+  names a command git then runs. Measured against vulhub
+  `gitlist/CVE-2018-1000533`: `--methods reflected` at `--probe-depth full`
+  sends 37 probes and reports `negative` on all 37, while `--methods argv`
+  reports `executed` on the same endpoint in one probe. A separator ladder
+  cannot reach that sink by construction, not by bad luck.
+
+  **The oracle did not change, and that is the point.** The option names a
+  command, so the command is the same arithmetic core the results-based probes
+  already build, and `_confirm_computed` differences it against the payload-free
+  control exactly as it does for `reflected`. A new vector needed no new
+  definition of proof, and `executed` still rests on the channels it rested on
+  before.
+
+  It is a **method rather than a carrier**, unlike the query-language bridges it
+  otherwise resembles. A carrier would have printed this finding as
+  `[reflected/...]`, which asserts a shell of that family ran the input; on an
+  argv sink no shell ran it, a program parsed it and chose to run something
+  else. Naming the wrong class is the error 3.0.1 removed a probe shape for.
+
+  The catalogue lives in the corpus as `argv_primitives`, the seam the bridges
+  and eval carriers already use, so an option shape can be added without
+  touching Python. Four ship: `git --open-files-in-pager=`, `ssh
+  -oProxyCommand=`, `rsync --rsh=` and `gs -sOutputFile=%pipe%`. Each is a
+  **single argv element** — `-oProxyCommand=x`, never `-o ProxyCommand=x` —
+  because a sink that hands the value over as one argument is the shape that
+  makes the class reachable, and a two-element option is inert there while
+  looking like coverage. A test fails if one is added.
+
+  `--argv-binary` selects by primitive name or by the binary (`git`, `ssh`,
+  `rsync`, `gs`), and refuses an unknown one rather than narrowing the run to
+  nothing: a typo that selected no option at all would read exactly like a run
+  that tried them and came back clean.
+
+  **In-band only, deliberately.** A blind argv sink is real — an image converter
+  spawned on an upload renders nothing — and reaching it means carrying an
+  out-of-band core instead of an arithmetic one, which is a small change to this
+  class and no change to its shape. It is left out because there is no target to
+  prove it against, and a path shipped without a case that exercises it is a
+  claim the bench cannot reproduce.
+
+- **A bench case for it**, `gitlist-cve-2018-1000533-argv`, passing in 18.3s
+  with the strongest control this harness can carry: the negative half is the
+  target's **own security property** rather than a contrivance, since
+  `escapeshellarg` is what makes `reflected` come back clean on a build that is
+  genuinely exploitable.
+
+  Three details of the probe were measured there rather than reasoned, and each
+  is the difference between confirming and reporting a clean negative against a
+  target that executes. The probe ends in `#`, not the `;` the published
+  write-ups use: git appends the path it would have paged, so `;` leaves it as a
+  bare command, git exits 255, and GitList's
+  `catch (RuntimeException) { return false; }` throws the output away — the
+  command runs and nothing comes back. The pager's output imitates git grep's
+  own `tree:file:line:match` format, because whatever consumes that stdout is an
+  application parsing git grep output, and a bare line reaches GitList and is
+  dropped by its own regex. And the URL's branch segment has to be a pattern
+  that matches file content, because once the query is consumed as an option the
+  branch becomes git grep's pattern and the pager only opens when there is a
+  file to page.
+
 ## [3.6.1] — 2026-10-27
 
 ### Fixed
@@ -3397,6 +3469,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.7.0]: https://github.com/kabiri-labs/rcekit/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/kabiri-labs/rcekit/compare/v3.6.0...v3.6.1
 [3.6.0]: https://github.com/kabiri-labs/rcekit/compare/v3.5.0...v3.6.0
 [3.5.0]: https://github.com/kabiri-labs/rcekit/compare/v3.4.0...v3.5.0

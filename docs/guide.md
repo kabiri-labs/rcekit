@@ -201,6 +201,7 @@ reported separately.
 | The parameter takes a serialized object | `deser` | 4 payloads per ecosystem and no listener at all — but that differential is a parser fingerprint, `needs-review`, not proof. `deserialization-sink` comes only from the DNS gadget, which needs a **delegated name** and a listener, and which only `java` and `fastjson` ship (see [Deserialization sinks](reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce)). Either way, **not** execution |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 | The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
+| My value becomes an argument of a program run without a shell, and every separator is inert | `argv` | One probe per option shape you select with `--argv-binary`. The cheapest method here, and the only one that reaches a sink where `escapeshellarg` did its job |
 
 **Probe depth trades requests for coverage.** By default (`--probe-depth full`)
 each sink gets three extra probe shapes beyond the canonical ones, because the
@@ -252,6 +253,62 @@ shape; `--environments windows` remains the way to get `cmd.exe` probes. The
 data-layer environments (`sql`, `graphql`, `mongodb`) are excluded from the shell
 methods — reaching a shell from those needs a different escalation, so `eval` is
 what applies there.
+
+---
+
+## When no separator works because there is no shell
+
+Every section below this one is about getting a separator past something. This
+one is about a sink where no separator can ever work, and where the application
+is not even doing anything wrong.
+
+GitList searches a repository by running `git grep`, and it quotes your input
+first:
+
+```php
+$query = escapeshellarg($query);
+$results = $this->getClient()->run($this, "grep -i --line-number {$query} $branch");
+```
+
+That is correct. `escapeshellarg` does exactly what it documents, so `;`, `|`,
+`&&` and `$()` all arrive at `git` as literal characters inside **one argument**,
+and no shell ever sees them. Point `reflected` at it and you get `negative` from
+37 probes against a target that is fully exploitable.
+
+What quoting cannot do is stop that argument being read as an **option**. `git
+grep` accepts `--open-files-in-pager=`, which names a command git then runs:
+
+```bash
+python rcekit.py --acknowledge-consent \
+  --verify-url "https://target.example/example/tree/master/search" \
+  --verify-method POST --verify-data "query=FUZZ" \
+  --methods argv --argv-binary git
+```
+
+```
+[detect] EXECUTED (1):
+  [argv/unix/raw] --open-files-in-pager=echo rk:rk:1:$(echo RK…$((a+b))RK…) #
+      (target computed 'RK…952886…RK…' via the git_pager carrier)
+```
+
+**Name the binary, because the option is specific to it.** `--argv-binary` takes
+a program (`git`, `ssh`, `rsync`, `gs`) or a primitive name from the corpus, and
+`argv` builds nothing until you give it one — there is no generic option that
+makes an arbitrary program run a command. `auto` tries them all, which is cheap:
+one probe per shape.
+
+**How to recognise the sink.** The giveaways are a `negative` from `reflected`
+on something you are confident about, plus any sign that your value is handed to
+a named program — a stack trace naming `proc_open`, `subprocess`, `ProcessBuilder`
+or `escapeshellarg`, an error message quoting a command line, or a feature that
+is obviously a wrapper (search, export, convert, clone, send).
+
+**Two things it cannot do yet.** The probe confirms in band, so a blind argv sink
+— an image converter spawned on an upload, rendering nothing — is not reached;
+that needs an out-of-band core and is not built. And every shipped option is a
+**single argv element**, because a sink that splits your value on spaces is a
+different sink; `-o ProxyCommand=x` would be inert where `-oProxyCommand=x`
+works.
 
 ---
 

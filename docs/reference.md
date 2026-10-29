@@ -87,6 +87,7 @@ starting point — this page is for looking things up once you know what you wan
 | `time` | Blind execution, via a `0/N/2N` regression | `safe` | `timing-sink` only — proven, and not execution |
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
 | `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `evaluation-sink` only — proven, and not execution |
+| `argv` | **Argument injection** into a program spawned with no shell: the value is one of its arguments, so every separator is inert, and an option it names runs a command. Builds nothing until `--argv-binary` names the program, because the option that does this is specific to it | `safe` | `executed` |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
 run's tier is refused **by name** rather than skipped, because a run that

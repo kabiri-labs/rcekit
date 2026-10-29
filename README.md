@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.6.1** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.7.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -42,6 +42,7 @@ against a payload-free control:
 | Spring Boot on fastjson 1.2.83 | — | Deserialization sink | `deser` | `deserialization-sink` | yes | — |
 | Apache Tomcat 8.5.19 | CVE-2017-12615 | Write primitive (PUT a JSP) | `write` | **`executed`** | yes | — |
 | mongo-express 0.53.0 on MongoDB 3.4 | — | Predicate sink, nothing rendered (Mongo `$where`) | `boolean` | `evaluation-sink` | yes | — |
+| GitList 0.6.0 | CVE-2018-1000533 | Argument injection (no-shell `argv` sink) | `argv` | **`executed`** | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -51,15 +52,16 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 12 rows do; `python tests/bench/runner.py --all` was last green at
+control. All 13 rows do; `python tests/bench/runner.py --all` was last green at
 **3.0.1** (2026-10-01), 10/10 cases in 55m48s. That is a point-in-time claim:
 the benchmark runs on a cadence, not on every change.
 
-The suite holds 13 cases now, and the 3 added last were each run on their own
+The suite holds 14 cases now, and the 4 added last were each run on their own
 rather than as part of an `--all` sweep: `mongo-express-where-boolean` passed in
-29.9s, `webmin-cve-2019-15107-enumerated` in 4m32s and
-`webmin-cve-2019-15107-time` in 21m21s. So the figure above still describes the
-last full sweep, which is the claim it was making.
+29.9s, `webmin-cve-2019-15107-enumerated` in 4m32s,
+`webmin-cve-2019-15107-time` in 21m21s and `gitlist-cve-2018-1000533-argv` in
+18.3s. So the figure above still describes the last full sweep, which is the
+claim it was making.
 
 The controls are not in this table and two of them are the point. On a Webmin
 1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
@@ -330,8 +332,9 @@ python rcekit.py --acknowledge-consent \
   --verify-active-risk stateful --insecure --detect-json findings.json
 ```
 
-That is 7 of the 9 methods; `file` and `write` need a path only you can supply
-and are scenarios 3 and 4 above. `--auto-params all` takes every query value,
+That is 7 of the 10 methods; `file` and `write` need a path only you can supply
+and are scenarios 3 and 4 above, and `argv` needs you to name the binary whose
+options it should inject. `--auto-params all` takes every query value,
 JSON leaf — booleans and `null` included — XML element, attribute and CDATA
 section, form field, multipart part and upload filename, cookie and header, with
 each occurrence of a repeated query or form key counted separately, and the
@@ -528,6 +531,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
 | **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
+| **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
 
 Three things widen where those methods can reach, without changing what any of
 them will call `executed`:
@@ -570,14 +574,23 @@ Mix methods freely: `--methods reflected,eval,time` runs all three and reports e
 tier separately.
 
 > **Honest scope.** RCEKit confirms RCE that is reachable by **injecting into a
-> request** and interpreted by a shell or an evaluator. It does **not** cover
-> memory-corruption bugs (buffer overflow, UAF) or argument injection into a
-> no-shell `argv` array — those are different problems. **Deserialization gadget
-> chains stay out of scope too**: `--methods deser` proves an endpoint
-> *deserializes* attacker data and says so in its own tier, but which gadget (if
-> any) turns that into execution depends on the target's classpath, and RCEKit
-> does not claim to know. It aims to be excellent at the injection-driven RCE
-> classes above rather than mediocre at everything.
+> request** and interpreted by a shell, an evaluator, or the option parser of a
+> program spawned without one. It does **not** cover memory-corruption bugs
+> (buffer overflow, UAF) — a different problem. **Deserialization gadget chains
+> stay out of scope too**: `--methods deser` proves an endpoint *deserializes*
+> attacker data and says so in its own tier, but which gadget (if any) turns
+> that into execution depends on the target's classpath, and RCEKit does not
+> claim to know. It aims to be excellent at the injection-driven RCE classes
+> above rather than mediocre at everything.
+>
+> Argument injection was in that excluded list until 3.7.0, and the reason it
+> moved is worth stating: it is not a weaker case of command injection but the
+> case where the application did the **correct** thing. `escapeshellarg` quotes
+> the value exactly as documented, every separator is inert, and `reflected`
+> comes back `negative` on a target that is exploitable — because the value is
+> one argument of a program whose own options can name a command to run. That
+> is a sink the separator ladder cannot reach by construction, not one it
+> happens to miss.
 
 ---
 
@@ -607,6 +620,7 @@ one:
 | Second-order — lands here, runs there | ✅ | — | — | — |
 | Query-language bridge to the OS | ✅ | — | — | per template |
 | Deserialization sink — `deser` | ✅ *own tier, never called RCE* | — | — | per template |
+| Argument injection — no-shell `argv` sink — `argv` | ✅ *option shapes from the corpus, named in the finding* | — | — | — |
 | **All of the above, one CLI, one run** | **✅** | — | — | — |
 
 <sub>Coverage per each project's own documented technique list. SSTImap is the
@@ -702,8 +716,9 @@ which is the same method fighting a filter, a quote or an encoding.
 | The sink interpolates `${…}` rather than shelling out | `lookup` | a delegated domain | `lookup-sink` |
 | The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
 | The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
+| Your value becomes an argument of a program spawned with no shell | `argv` | the binary it is spawned as, for `--argv-binary` | **`executed`** |
 
-Only the first four reach **`executed`**. `timing-sink`, `lookup-sink`,
+Only `reflected`, `eval`, `oob`, `file`, `write` and `argv` reach **`executed`**. `timing-sink`, `lookup-sink`,
 `evaluation-sink` and `deserialization-sink` are proven findings about something
 else. `needs-review` is the exception: it is the parser fingerprint `deser`
 reads when it has no gadget to fire, a real candidate and **not proof** — review
@@ -725,6 +740,7 @@ target shapes.
 | The sink strips `;` | [When the sink filters separators](docs/guide.md#when-the-sink-filters-separators) |
 | My input lands inside `'quotes'` | [Injecting inside quotes](docs/guide.md#injecting-inside-quotes) |
 | The sink runs my input as the whole command | [Whole-command sinks](docs/guide.md#whole-command-sinks) |
+| Nothing I inject works, and the app looks like it quotes correctly | [When no separator works because there is no shell](docs/guide.md#when-no-separator-works-because-there-is-no-shell) |
 | The target is Windows or the sink is PowerShell | [Windows and PowerShell sinks](docs/guide.md#windows-and-powershell-sinks) |
 | The endpoint is a CGI script and the header never reaches a command | [The Shellshock shape](docs/reference.md#the-shellshock-shape) |
 | There's a WAF | [Working around a WAF](docs/guide.md#working-around-a-waf) |

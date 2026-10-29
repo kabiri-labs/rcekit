@@ -1988,6 +1988,126 @@ class DetectionMethodTestCase(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_argv_confirms_on_an_option_parsing_sink_only(self):
+        # The /vuln vs /reflect gate for `argv`, and it has a third route the
+        # other methods do not need.
+        #
+        # /vuln models the GitList shape faithfully: the value arrives as ONE
+        # argv element of a program spawned with no shell, so no separator in
+        # it can do anything, and only an option the program itself honours
+        # runs a command. /reflect names the value back instead. /shell is the
+        # near neighbour that keeps the two methods apart -- an ordinary
+        # command-injection sink, where `reflected` works and `argv` should
+        # not be what finds it.
+        import http.server
+        import shlex
+        import socketserver
+        import threading
+        import urllib.parse as up
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                parsed = up.urlparse(self.path)
+                value = up.parse_qs(parsed.query).get("q", [""])[0]
+                self.send_response(200)
+                self.end_headers()
+                if parsed.path == "/vuln":
+                    # One argv element, exactly as escapeshellarg produces.
+                    # Nothing here splits it and nothing passes it to a shell.
+                    argv = ["grep", "-i", "--line-number", value, "master"]
+                    out = ""
+                    for arg in argv:
+                        if arg.startswith("--open-files-in-pager="):
+                            # git runs the pager through a shell and appends
+                            # the path it would have paged.
+                            pager = arg.split("=", 1)[1]
+                            pipe = sh_popen(pager + " /dev/null 2>&1")
+                            out = pipe.read()
+                            pipe.close()
+                elif parsed.path == "/shell":
+                    pipe = sh_popen("echo " + value + " 2>&1")
+                    out = pipe.read()
+                    pipe.close()
+                else:  # /reflect: name the value back, never run anything
+                    out = "no match for " + shlex.quote(value)
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+        config = {"argv_binaries": ("git",)}
+        try:
+            rec = make_record(environment="unix", context="raw")
+
+            vuln = self.gen.run_detection([rec], url=f"{base}/vuln?q=FUZZ",
+                                          methods=["argv"], config=config)
+            confirmed = [r for r in vuln if r["verdict"] == "executed"]
+            self.assertTrue(confirmed, "argv must confirm against an option-parsing sink")
+            self.assertTrue(all(r["tier"] == "executed" and r["method"] == "argv"
+                                for r in confirmed))
+
+            reflect = self.gen.run_detection([rec], url=f"{base}/reflect?q=FUZZ",
+                                             methods=["argv"], config=config)
+            self.assertFalse([r for r in reflect if r["verdict"] == "executed"],
+                             "a target that only names the value back must never be confirmed")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_reflected_cannot_reach_an_argv_sink_which_is_why_argv_exists(self):
+        # The property the whole method rests on, and the unit form of its
+        # bench control. The application is doing the correct thing -- the
+        # value is one argv element -- so every separator `reflected` builds
+        # is inert, and a method that reported otherwise would be naming the
+        # wrong class.
+        import http.server
+        import socketserver
+        import threading
+        import urllib.parse as up
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                value = up.parse_qs(up.urlparse(self.path).query).get("q", [""])[0]
+                argv = ["grep", "-i", "--line-number", value, "master"]
+                out = ""
+                for arg in argv:
+                    if arg.startswith("--open-files-in-pager="):
+                        pipe = sh_popen(arg.split("=", 1)[1] + " /dev/null 2>&1")
+                        out = pipe.read()
+                        pipe.close()
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(out.encode(errors="replace"))
+                except BrokenPipeError:
+                    pass
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            rec = make_record(environment="unix", context="raw")
+            results = self.gen.run_detection(
+                [rec], url=f"http://127.0.0.1:{port}/?q=FUZZ", methods=["reflected"])
+            self.assertFalse(
+                [r for r in results if r["verdict"] == "executed"],
+                "reflected must not confirm where escapeshellarg did its job; if this "
+                "starts passing, argv's negative control has stopped measuring anything")
+            self.assertTrue(results, "the probes must still have reached the target")
+        finally:
+            server.shutdown()
+            server.server_close()
+
     def test_confirms_echo_back_command_injection(self):
         # Regression for the most common real-world sink: a tool that echoes the
         # input back (e.g. "PING <input> ...") AND executes it. The reflected
@@ -6970,7 +7090,7 @@ class DetectionQuestionTestCase(unittest.TestCase):
     # twice: a test that recomputes the grouping rule agrees with the rule
     # whatever the rule became.
     EXPECTED_GROUPS = (
-        ("reflected", "eval", "file", "write", "oob", "time", "boolean"),
+        ("reflected", "eval", "file", "write", "oob", "time", "boolean", "argv"),
         ("lookup",),
         ("deser",),
     )
@@ -7022,7 +7142,7 @@ class DetectionQuestionTestCase(unittest.TestCase):
         self.assertEqual(
             rcekit.CHEAP_DETECTION_METHODS,
             {name for name, cls in rcekit.DETECTION_METHODS.items() if not cls.costly})
-        self.assertEqual(rcekit.CHEAP_DETECTION_METHODS, {"reflected", "eval"})
+        self.assertEqual(rcekit.CHEAP_DETECTION_METHODS, {"reflected", "eval", "argv"})
 
     def test_a_costly_method_says_so_on_its_own_class(self):
         for name in ("file", "write", "time", "oob", "lookup", "deser", "boolean"):
@@ -11383,6 +11503,7 @@ class ResponseChannelTestCase(unittest.TestCase):
             "oob_host": "oob.test", "oob_listener": None,
             "file_write_path": "/var/www/html", "file_read_url": "http://t.example/{name}",
             "write_read_url": "http://t.example/probe.jsp", "probe_depth": "full",
+            "argv_binaries": ("auto",),
         }
         checked = 0
         for name, cls in rcekit.DETECTION_METHODS.items():
@@ -13320,6 +13441,110 @@ class BooleanTargets:
 def _boolean_record(**overrides):
     overrides.setdefault("context", "raw")
     return make_record(**overrides)
+
+
+class ArgvCatalogueTestCase(unittest.TestCase):
+    """Selecting the option shapes, and the discipline the catalogue has to keep.
+
+    `argv` builds nothing until a binary is named, because the option that
+    makes a program run a command is specific to that program. The rest of
+    these are about the ways a catalogue entry can look fine and test
+    nothing."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _method(self, **config):
+        return rcekit.ArgvInjection(self.gen, config)
+
+    def _probes(self, **config):
+        return self._method(**config).build_probes(self.rec, random.Random(3))
+
+    def test_nothing_is_built_until_a_binary_is_named(self):
+        # Gated on configuration rather than a risk rung: with nothing named
+        # there is no option to inject, and naming a tier to raise would answer
+        # a question nobody asked.
+        self.assertFalse(self._method().applicable(self.rec))
+        self.assertEqual(self._probes(), [])
+        self.assertTrue(self._method(argv_binaries=("auto",)).applicable(self.rec))
+
+    def test_a_primitive_is_selectable_by_its_binary_as_well_as_its_name(self):
+        by_name = [p.carrier for p in self._probes(argv_binaries=("git_pager",))]
+        by_binary = [p.carrier for p in self._probes(argv_binaries=("git",))]
+        self.assertEqual(by_name, ["git_pager"])
+        self.assertEqual(by_binary, ["git_pager"])
+
+    def test_an_unknown_name_is_refused_rather_than_narrowing_the_run(self):
+        # A typo that selected nothing would make a run that injected no option
+        # at all read exactly like one that tried them and came back clean.
+        with self.assertRaises(ValueError) as caught:
+            self._method(argv_binaries=("gti",)).build_probes(self.rec, random.Random(1))
+        message = str(caught.exception)
+        self.assertIn("gti", message)
+        self.assertIn("git_pager", message)
+
+    def test_every_probe_carries_a_computed_value_the_payload_does_not(self):
+        for probe in self._probes(argv_binaries=("auto",)):
+            self.assertNotIn(probe.expected, probe.payload, probe.carrier)
+            self.assertIn(probe.forbidden, probe.payload, probe.carrier)
+            self.assertTrue(probe.expected.isalnum(), probe.carrier)
+
+    def test_a_probe_carries_no_separator_because_there_is_nothing_to_break_out_of(self):
+        # The value *is* an argument. A leading `;` would be part of the
+        # option's text, not a break-out, and would stop the option parsing.
+        for probe in self._probes(argv_binaries=("auto",)):
+            self.assertTrue(probe.payload.startswith("-"),
+                            f"{probe.carrier} should start at the option: {probe.payload!r}")
+
+    def test_every_shipped_primitive_is_a_single_argv_element(self):
+        # The shape that makes this class reachable is a sink that hands the
+        # value over as ONE argument. A two-element option (`-o ProxyCommand=x`)
+        # would be inert there while looking like coverage, so the catalogue
+        # keeps to attached forms and this fails if one is added.
+        for name, spec in self.gen.argv_primitives.items():
+            template = spec["template"]
+            # The option's *value* is a shell command and may contain spaces;
+            # what must not is the option itself, up to the `=` that attaches
+            # the value to it. `-o ProxyCommand=x` fails here, `-oProxyCommand=x`
+            # passes, and that is the whole distinction.
+            option = template.split("=")[0]
+            self.assertNotIn(" ", option,
+                             f"{name}'s option is split across argv elements: {template!r}")
+            self.assertTrue(option.startswith("-"), f"{name} does not start at an option")
+
+    def test_every_shipped_primitive_can_carry_a_command(self):
+        # A template with nowhere to put the command can never confirm, and an
+        # unconfirmable probe still counts toward the coverage a run reports.
+        for name, spec in self.gen.argv_primitives.items():
+            self.assertIn("__CMD__", spec["template"], name)
+            self.assertTrue(spec.get("binaries"), name)
+            self.assertIn(spec.get("sink_env", "unix"), rcekit.SINK_ENVIRONMENTS, name)
+            self.assertIn(spec.get("safety", "safe"), rcekit.SAFETY_ORDER, name)
+            self.assertTrue(str(spec.get("notes", "")).strip(), f"{name} has no notes")
+
+    def test_a_primitive_above_the_run_s_safety_tier_is_held_back(self):
+        held = self._method(argv_binaries=("auto",), max_safety="safe")
+        self.assertTrue(held.build_probes(self.rec, random.Random(3)))
+        # Every shipped entry is `safe`; this pins that the ordering is
+        # consulted at all, so a stateful entry added later cannot ride in
+        # because a detection method built it.
+        self.gen.argv_primitives = dict(self.gen.argv_primitives)
+        self.gen.argv_primitives["pretend_stateful"] = {
+            "binaries": ["x"], "sink_env": "unix", "safety": "stateful",
+            "template": "--x=__CMD__", "notes": "test only",
+        }
+        names = [n for n, _ in self._method(argv_binaries=("auto",),
+                                            max_safety="safe")._selected("unix")]
+        self.assertNotIn("pretend_stateful", names)
+        names = [n for n, _ in self._method(argv_binaries=("auto",),
+                                            max_safety="stateful")._selected("unix")]
+        self.assertIn("pretend_stateful", names)
+
+    def test_the_method_is_registered_and_reaches_the_execution_tier(self):
+        self.assertIs(rcekit.DETECTION_METHODS.get("argv"), rcekit.ArgvInjection)
+        self.assertEqual(rcekit.ArgvInjection.tier, rcekit.EXECUTION_TIER)
+        self.assertEqual(rcekit.ArgvInjection.question, "execution")
 
 
 class BooleanOracleTestCase(unittest.TestCase):
