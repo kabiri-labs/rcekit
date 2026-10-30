@@ -724,11 +724,24 @@ therefore cannot separate a target that ran the command from a page that merely
 contains the signature, and a server banner or a reflected header is enough. A
 verdict that cannot tell those apart is a candidate, not proof.
 
-So on a chain, prefer a `{callback}` payload and `--oob-host` when the target has
-egress. The in-band oracles that *do* reach `executed` — a value computed from
-random operands, differenced against a payload-free control — run on
-`--verify-url` and `-r` with `--methods`, which this path does not apply; it says
-so before it sends anything.
+So on a chain, prefer the out-of-band channel when the target has egress — and
+configure it in the **chain profile**, with the `callback_host` and `listen_port`
+fields the example above already carries. **`--oob-host` has no effect here**:
+this path reads only the profile, and the run says so. `{callback}` is
+substituted only when both fields are set; without them the placeholder goes to
+the target as a literal and the verdict stays `oob-pending` with nothing to
+resolve it.
+
+Note also what carries that marker. Of the shipped corpus only two payloads do —
+both `postgres` under `code_execution`, and `postgres` is not in the default
+environment set, so a default run generates none of them. Reaching the
+out-of-band channel means naming them (`--environments postgres --categories
+code_execution`) or supplying your own `--template-file`.
+
+The in-band oracles that *do* reach `executed` — a value computed from random
+operands, differenced against a payload-free control — run on `--verify-url` and
+`-r` with `--methods`, which this path does not apply; it says so before it sends
+anything.
 
 ```json
 {
