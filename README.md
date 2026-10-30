@@ -556,9 +556,10 @@ them will call `executed`:
   endpoint is differenced against a snapshot taken *before* any probe was sent.
   Where nothing runs until something asks — a queue a worker drains, a report
   generated on demand, a "run now" button — `--observe-trigger` is the missing
-  third act: inject, **trigger**, read. It fires before each poll and once for
-  the control, so the control and the reads differ in the payload and nothing
-  else, and its own response is never read for evidence.
+  third act: inject, **trigger**, read. It fires before every observed read —
+  once per probe, once per poll, once for the control — because a store that
+  overwrites keeps one value, so triggering only at the end would test the last
+  probe and none of the rest. Its own response is never read for evidence.
 - **Query-language bridges** (`--bridges`) — `COPY … FROM PROGRAM`,
   `xp_cmdshell`, `expect://`. A bridge is a carrier, not an oracle: it wraps the
   command the methods already build, so the same tiers apply through it.

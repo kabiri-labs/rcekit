@@ -2032,7 +2032,7 @@ def chain_profile(base):
 
 
 @contextlib.contextmanager
-def deferred_target(trigger_echoes=False):
+def deferred_target(trigger_echoes=False, overwrite=False):
     """A sink nothing executes until something asks it to.
 
     `/store` queues the value and returns nothing of it. `/run` is the worker:
@@ -2043,6 +2043,11 @@ def deferred_target(trigger_echoes=False):
     `trigger_echoes` makes `/run` return the queued value in its own response,
     which is the near neighbour: the trigger is fired to cause work and its
     response must never be read for evidence.
+
+    `overwrite` keeps only the latest value instead of queueing — the profile
+    field and single-setting shape. It is the harder case and the one the
+    per-probe trigger exists for: triggering only at the end of the batch runs
+    whatever the last probe left behind and never tests the rest.
 
     Yields `(base_url, counter)` with a count of `/run` requests, since the
     control is supposed to be triggered too."""
@@ -2087,6 +2092,9 @@ def deferred_target(trigger_echoes=False):
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             form = _up.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            if overwrite:
+                queue.clear()
+                output.clear()
             queue.append(form.get("cmd", [""])[0])
             self._reply("queued")
 
@@ -2138,6 +2146,30 @@ class ObserveTriggerTestCase(unittest.TestCase):
         self.assertIn("on the OBSERVED channel", with_trigger.stdout,
                       "the evidence has to be the second-order one")
 
+    def test_a_store_that_overwrites_is_triggered_per_probe_not_once(self):
+        """The case the per-probe trigger exists for, and the one it was missing.
+
+        Where the store keeps a single value — a profile field, one setting —
+        triggering only in the batch loop at the end runs whatever the *last*
+        probe left behind and nothing else. Every earlier shape is overwritten
+        before anything executes it, so the run tests one probe out of nineteen
+        and whether it confirms is down to which shape landed last.
+
+        Measured before the fix: the last stored shape was the Shellshock one,
+        which needs a CGI environment sink and cannot execute through `sh -c`,
+        so an exploitable sink reported `negative` for all 19. The inline
+        per-probe read already existed for exactly this reason; it just was not
+        triggering."""
+        with deferred_target(overwrite=True) as (base, counter):
+            result = self._run(*self._probe_args(base),
+                               "--observe-trigger", f"{base}/run")
+            fired = counter["run"]
+        self.assertIn("EXECUTED (", result.stdout, result.stdout[-1500:])
+        self.assertIn("on the OBSERVED channel", result.stdout)
+        # Control, then at least one probe's own read. Triggering only in the
+        # batch loop would leave this at 2 with the probe reads untriggered.
+        self.assertGreaterEqual(fired, 2)
+
     def test_the_trigger_response_is_never_read_for_evidence(self):
         """The near neighbour, and the one that would hide a false positive.
 
@@ -2176,7 +2208,15 @@ class ObserveTriggerTestCase(unittest.TestCase):
             result = self._run(*self._probe_args(base),
                                "--observe-trigger", f"{base}/run", "--max-payloads", "1")
         self.assertIn("triggering", result.stdout)
-        self.assertRegex(result.stdout, r"at most \d+ times including the control")
+        # The arithmetic the operator needs: this fires more often than anything
+        # else RCEKit sends, so each component is named rather than summed into
+        # one opaque number.
+        self.assertIn("before EVERY observed read", result.stdout)
+        self.assertIn("once per probe that can be judged there", result.stdout)
+        self.assertRegex(result.stdout, r"up to \d+ more while polling")
+        self.assertIn("one for the control", result.stdout)
+        # And why it is per probe, since that is the expensive half.
+        self.assertIn("a store that overwrites keeps one value", result.stdout)
         self.assertIn("never read for evidence", result.stdout)
 
     def test_a_trigger_without_an_observed_endpoint_is_refused(self):

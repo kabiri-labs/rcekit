@@ -58,7 +58,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--deser-formats` | (`deser`) Serialization ecosystems to probe: `auto`, or corpus names | `auto` |
 | `--bridges` | Query-language bridges the command probes ride: `none` (default), `auto`, or corpus names | `none` |
 | `--observe-url` | Second-order: endpoint polled for the computed value after the probes | None |
-| `--observe-trigger` | A request that *causes* the deferred execution, fired before each poll and once for the control. Needs `--observe-url`; its own response is never read for evidence | None |
+| `--observe-trigger` | A request that *causes* the deferred execution, fired before **every** observed read — once per probe, once per poll, and once for the control. Per probe because a store that overwrites keeps one value. Needs `--observe-url`; its own response is never read for evidence | None |
 | `--observe-trigger-request` | The same, as a captured request, for a trigger behind a session | None |
 | `--observe-request` | Raw HTTP request for that endpoint instead of `--observe-url` (no marker) | None |
 | `--observe-poll` | Seconds between polls of the observed endpoint | `5` |

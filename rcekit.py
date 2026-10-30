@@ -3994,6 +3994,21 @@ class RCEKit:
                     # value rides in their own payload are skipped.
                     if (observe is not None and verdict.status != "executed"
                             and self._observable(result)):
+                        # Triggered here too, and this is the case the trigger
+                        # exists for rather than an extra. Where the store
+                        # overwrites, the batch loop at the end runs whatever
+                        # the *last* probe left behind and nothing else, so 18
+                        # of 19 shapes are never executed at all -- and whether
+                        # the run confirms comes down to which shape happened to
+                        # land last. Measured on an overwriting target: the last
+                        # stored shape was the Shellshock one, which needs a CGI
+                        # environment sink, so an exploitable sink reported
+                        # `negative` for all 19.
+                        #
+                        # One trigger per probe that could be judged there, which
+                        # is the expensive half of this flag and why the
+                        # pre-flight counts it per probe rather than per poll.
+                        self._fire_trigger(observe_trigger(config or {}), timeout)
                         o_status, o_body, o_chans, _ = self._fire_observed(observe, timeout)
                         if o_status is not None:
                             observe_reached = True
@@ -11291,15 +11306,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if observe_trigger_url:
                     # The request count said before the traffic, as the cost
                     # line is: a trigger is usually a state-changing "run the
-                    # work" request, and firing it per poll is a number the
-                    # operator has to see rather than infer.
+                    # work" request, and this fires more often than anything
+                    # else RCEKit sends, so the number is the operator's to see
+                    # rather than infer.
                     polls = 1 + max(0, int(args.observe_timeout // max(
                         0.5, args.observe_poll))) if args.observe_timeout else 1
-                    print(f"[detect]   triggering {observe_trigger_url} before each poll "
-                          f"({observe_trigger_method}) -- at most {polls + 1} times including "
-                          "the control, so the control and the reads differ in the payload and "
-                          "nothing else. It is fired to cause work, and its own response is "
-                          "never read for evidence.")
+                    print(f"[detect]   triggering {observe_trigger_url} "
+                          f"({observe_trigger_method}) before EVERY observed read: once per "
+                          f"probe that can be judged there, up to {polls} more while polling, "
+                          "and one for the control -- so the control and the reads differ in "
+                          "the payload and nothing else.")
+                    print("[detect]   per probe and not only per poll because a store that "
+                          "overwrites keeps one value: triggering at the end alone runs "
+                          "whatever the last probe left and never tests the rest. It is fired "
+                          "to cause work, and its own response is never read for evidence.")
             if set(method_names) & SHELL_PROBE_METHODS:
                 # The ladder multiplies request count, so say which shapes are
                 # about to be tried before trying them. An operator on a
