@@ -340,6 +340,64 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.8.0] — 2026-10-30
+
+### Changed
+
+- **`--verify-chain`'s in-band verdict was `executed` on evidence the tier rule
+  forbids, and is now `needs-review`.** The oracle there is `record.match`, a
+  *static* signature from `_COMMAND_SIGNATURES` — `uname` is matched by the word
+  `Linux` appearing, `cat /etc/passwd` by a `root:` line, `id` by `uid=` — and
+  this path runs the chain once, with the payload, so there is no payload-free
+  control to difference it against.
+
+  Both halves of what `executed` requires were therefore missing: the value is
+  not one RCEKit generated at random for that probe, and nothing ruled out its
+  having been in the response anyway. Measured against a local target that
+  **executes nothing at all** — one fixed page containing `uid=0`, `root:x:0:0:`
+  and the word `Linux` — the previous behaviour reported `executed=6` for six of
+  six payloads. It now reports `needs-review=6`, with the reason on each row.
+
+  The two tests that pin this are deliberately a pair: a genuinely vulnerable
+  sink and that inert page reach the **same** verdict through this oracle. An
+  oracle that cannot separate those two was never entitled to the tier reserved
+  for execution. That the real sink now reports `needs-review` is the honest
+  ceiling of this channel, not a regression in detection.
+
+  A control was considered and rejected: it would rule out "it was already
+  there" and not "the target computed it", so it would buy a doubled chain cost
+  for a verdict that still could not be `executed`.
+
+- **The out-of-band chain verdict is unchanged, and that is not an oversight.**
+  A `{callback}` payload still reaches `executed`. Its token is twelve
+  characters minted for that payload and registered with the run's listener, so
+  a callback carrying it is a value only the target could have learned by
+  running what it was given — the tier rule's second clause, which needs no
+  control for the same reason `--methods oob` needs none.
+
+- **`--verify-chain` now says that `--methods` is not applied, before it sends
+  anything.** This path never consulted the flag, so a run that accepted it in
+  silence delivered the corpus oracle while the operator believed they had asked
+  for a tiered one — and a clean result then read as though the methods had been
+  tried. Not a refusal: the chain run is still worth making, and the operator can
+  decide once they know. The run also closes by naming its own ceiling whether or
+  not anything matched.
+
+### Migration
+
+A `--verify-chain` run that previously printed `EXECUTED` for an in-band match
+now prints a `NEEDS-REVIEW candidate(s)` section instead, and `executed` on that
+path is reachable only through a `{callback}` payload with a listener. Nothing
+about the chain's delivery changed — the same steps, substitutions and payloads
+go to the target — so a finding you reported from a previous run is not
+retracted by this; it is reclassified as something to confirm rather than
+something confirmed. To confirm it, either deliver it out of band on the chain,
+or reproduce the sink through `--verify-url` / `-r` with `--methods`, where the
+oracles that rest on a computed value and a payload-free control live.
+
+Exit status is unaffected: this path returned 0 regardless of outcome before and
+still does.
+
 ## [3.7.1] — 2026-10-29
 
 ### Fixed
@@ -3489,6 +3547,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.8.0]: https://github.com/kabiri-labs/rcekit/compare/v3.7.1...v3.8.0
 [3.7.1]: https://github.com/kabiri-labs/rcekit/compare/v3.7.0...v3.7.1
 [3.7.0]: https://github.com/kabiri-labs/rcekit/compare/v3.6.1...v3.7.0
 [3.6.1]: https://github.com/kabiri-labs/rcekit/compare/v3.6.0...v3.6.1

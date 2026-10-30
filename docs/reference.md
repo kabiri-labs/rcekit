@@ -42,7 +42,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--verify-delay` | Seconds between verification requests (rate limiting) | `0` |
 | `--verify-timeout` | Per-request timeout in seconds | `8` |
 | `--insecure` | Drop every TLS assurance: no certificate or hostname check, and OpenSSL's security level and minimum protocol version lowered so a legacy stack still completes a handshake | Off |
-| `--verify-chain` | JSON chain profile for multi-step, session-aware verification | None |
+| `--verify-chain` | JSON chain profile for multi-step, session-aware verification. Reaches `executed` out of band on a `{callback}` token; in band its static-signature oracle reaches `needs-review` only, and `--methods` is not applied on this path | None |
 
 ## Detection methods
 

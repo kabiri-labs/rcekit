@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.7.1"
+__version__ = "3.8.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4046,7 +4046,30 @@ class RCEKit:
                 pending_oob.append({"record": record, "token": token})
                 verdict, detail = "oob-pending", f"awaiting callback token {token}"
             elif record.match and self._encoded_search(record.match, confirm_body):
-                verdict, detail = "executed", f"matched /{record.match}/"
+                # `needs-review`, not `executed`, and the difference is the
+                # whole tier rule rather than a matter of degree.
+                #
+                # `record.match` is a *static* signature from
+                # `_COMMAND_SIGNATURES` -- `uname` is confirmed by the word
+                # `Linux` appearing, `cat /etc/passwd` by a `root:` line -- and
+                # this path runs the chain once, with the payload, so there is
+                # no payload-free control to difference it against. Both halves
+                # of what `executed` requires are therefore missing: the value
+                # is not one RCEKit generated at random for this probe, and
+                # nothing rules out its having been in the response anyway. A
+                # confirm step whose page merely contains the word `Linux` --
+                # a server banner, a reflected User-Agent, a documentation
+                # page -- used to report execution.
+                #
+                # A control would rule out the second half and not the first,
+                # so it would buy a doubled chain cost for a verdict that still
+                # could not be `executed`. The oracles that can reach it come
+                # with `--methods`, which the notice after the run names.
+                verdict = "needs-review"
+                detail = (f"a static signature matched /{record.match}/ in the confirm step. "
+                          "That is a candidate, not execution: the value is not one RCEKit "
+                          "generated for this probe, and this path takes no payload-free "
+                          "control, so nothing rules out its having been there already")
             elif record.match:
                 verdict, detail = "no-match", ""
             else:
@@ -4069,6 +4092,15 @@ class RCEKit:
             hit_tokens = {h.get("token") for h in listener.hits}
             for result in results:
                 if result["token"] in hit_tokens and result["verdict"] == "oob-pending":
+                    # This one *is* `executed`, and deliberately so -- it is not
+                    # an oversight left behind by the in-band path's demotion
+                    # above. The token is twelve characters minted for this
+                    # payload and registered with this run's listener, so a
+                    # callback carrying it is a value only the target could have
+                    # learned by running what it was given. That is the tier
+                    # rule's second clause verbatim, and it needs no control for
+                    # the same reason `oob` needs none: the oracle is the
+                    # token's unforgeability, not a response differential.
                     result["verdict"] = "executed"
                     result["detail"] = f"OOB callback received for token {result['token']}"
                 elif result["verdict"] == "oob-pending":
@@ -10325,21 +10357,55 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "fire reverse shells, download-execute, credential access, lateral movement and OOB.")
         print(f"[verify-chain] {chain.get('base')}  ({len(chain.get('steps', []))} steps, "
               f"{len(records)} payloads)  (authorised target)")
+        if args.methods:
+            # Said before the traffic, not after it. This path does not consult
+            # `--methods` at all, so a run that silently accepted the flag would
+            # deliver the corpus oracle while the operator believed they had
+            # asked for a tiered one -- and then read a clean result as though
+            # the methods had been tried. Not a refusal: the chain run itself is
+            # still worth making, and the operator can decide once they know.
+            print("[!] --methods is NOT applied on this path: --verify-chain delivers the "
+                  "payload corpus with its own in-band oracle. The method-driven engine runs "
+                  "on --verify-url and -r. Nothing below was tested with "
+                  f"{', '.join(sorted(set(m.strip() for m in args.methods.split(',') if m.strip())))}.")
         results = generator.run_verification_chain(
             records, chain, delay=args.verify_delay, timeout=args.verify_timeout,
             max_payloads=args.max_payloads)
         by_verdict: Dict[str, int] = {}
         for result in results:
             by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
-        executed = [r for r in results if r["verdict"] == "executed"]
+        executed = [r for r in results if r["verdict"] == EXECUTION_TIER]
         print(f"[verify-chain] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
         if executed:
             print(f"\n[verify-chain] EXECUTED ({len(executed)}):")
             for result in executed:
                 print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
-        else:
+        # Iterated from the one table rather than written out by verdict name.
+        # A hand-written block for a particular verdict is an ordering claim
+        # expressed as the position of a statement, and this report would then
+        # be free to disagree with the `[detect]` one about what the tier means
+        # or how it closes. `needs-review` is the only sectioned verdict this
+        # path produces today; a second one would print correctly for free.
+        # Each row's own `detail` carries why *this* channel reached it.
+        for verdict, heading, closing, _compact in NON_EXECUTION_SECTIONS:
+            rows = [r for r in results if r["verdict"] == verdict]
+            if not rows:
+                continue
+            print(f"\n[verify-chain] {len(rows)} {heading} — NOT proof of execution:")
+            for result in rows:
+                print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
+            print(f"  → {closing}")
+        if not executed:
             print("\n[verify-chain] No execution proven.")
+        # Named whether or not anything matched: the in-band oracle on this path
+        # cannot reach `executed` at all, so an operator who stops at a clean
+        # run here has not learned what the method-driven engine would say.
+        print("[verify-chain] this path's in-band oracle reaches needs-review at best, "
+              "because a static signature is not a value the target computed and no control "
+              "is taken. The oracles that reach executed in band run on --verify-url and -r "
+              "(--methods reflected, eval, ...), not on a chain. On a chain, a {callback} "
+              "payload with --oob-host reaches executed on the token alone.")
         return 0
 
     if args.verify_url or args.request_file:
