@@ -8,6 +8,45 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Two bench notes still named a blocker that phase 3 removed.** The
+  second-order row said "the reason is the harness" and the Chartbrew paragraph
+  said "there is no setup hook in the runner" — both true when written, both
+  false the moment a chain became the delivery the engine drives. A reason that
+  has expired is worse than no reason: it sends the next reader to fix something
+  already fixed, and it hides whatever is actually in the way now.
+
+  The harness half is settled and **measured rather than argued**. Run against a
+  local target whose store sits behind a login — `POST /login` hands out a
+  token, `POST /notes` requires it and answers `saved` with no echo, `GET
+  /render` renders the stored value through a shell — `--verify-chain` with
+  `--methods reflected --observe-url` reports `executed` on the OBSERVED
+  channel, on a computed value absent from that endpoint's pre-injection
+  control. Against the twin endpoint that renders the same value and executes
+  nothing, the same invocation sends 19 probes and reports `negative` on all 19.
+  No case schema change was needed: `invocation` already takes arbitrary flags
+  and `{bench}` already expands.
+
+  So the second-order row's blocker is now the absence of a target, and the note
+  says what a target must look like precisely enough to screen one — the store
+  may be authenticated, the **render may not be** behind the chain's own
+  session, because `_fire_observed` takes the flags' url, method, data and
+  headers and nothing else: no cookie jar, no chain state, no `{var}`. 16
+  vulhub environments were screened by class, and the note records each one's
+  disqualifier.
+
+  Chartbrew's obstacle did not disappear, it **moved** — from the harness, where
+  it was fixable, to the oracle, where it is not cheaply: a chain can now reach
+  its three setup steps, but `boolean` is refused on a chain by name
+  (`CHAIN_UNSUPPORTED_METHODS`) because it compares response shape across a
+  shuffled series, which a chain's setup steps change for reasons that have
+  nothing to do with the sink.
+
+  The local target is deliberately **not** proposed as a case. A purpose-written
+  vulnerable app composed under Docker is a fixture wearing Docker, and a
+  fixture is the one thing a bench case exists not to be.
+
 ### Added
 
 - **A coverage ledger, so a measured result and a reproduced one stop looking

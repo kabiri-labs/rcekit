@@ -484,10 +484,19 @@ fixture only imitates.
 
 **Chartbrew CVE-2026-25887 was the candidate named here and it cannot be
 written.** Its sink is behind a login and three setup steps -- project,
-connection, dataset -- and a case can only `docker compose up` and then run one
-invocation. There is no setup hook in the runner, so a captured session token
-and dataset id do not survive the `down -v` between the halves. That is the
-chain machinery roadmap phase 3 is for, not something a case can work around.
+connection, dataset -- which a case could not reach when this was written,
+because a case can only `docker compose up` and then run one invocation.
+
+That reason has since expired and been replaced by a better one, which is worth
+recording so nobody spends a container cycle rediscovering it. Phase 3 gave the
+runner what it lacked: a chain carries a login and substitutes `{var}` from an
+earlier step's `extract`, so those three setup steps are now expressible. But
+`boolean` is refused on a chain by name -- `CHAIN_UNSUPPORTED_METHODS` in
+`rcekit.py` -- because it compares response *shape* across a shuffled series,
+and a chain's setup steps and per-probe session change that shape for reasons
+that have nothing to do with the sink. So the obstacle moved from the harness,
+where it was fixable, to the oracle, where lifting it would be a change to what
+a detection method reports.
 
 MongoDB's `$where` on a one-document collection a fresh `mongo:3.4` already
 has needs none of it. Measured by hand on
@@ -561,32 +570,85 @@ the stronger of the two: it shows the method reaching a sink no other method
 can, rather than showing a patch closing it. A second case could carry it, and
 would need an image vulhub does not ship.
 
-### Second-order has no case, and the reason is the harness
+### Second-order has no case, and the reason is no longer the harness
 
 `--observe-url` is advertised in the repository README's comparison matrix as a
 reach no other tool in it has: the payload lands on one request and executes on
 another, and the observed endpoint is differenced against a snapshot taken
-before any probe went out. It has no case, and after looking for a target it is
-clear that is not for want of trying a few.
+before any probe went out. It still has no case. What stood in the way used to
+be this harness, and that is no longer true — the blocker is now the absence of
+a target, which is a different thing and worth not confusing with the first.
 
-What the shape needs is an **unauthenticated write that renders on an
-unauthenticated read**. Everything in a vulhub checkout that stores a value and
-renders it elsewhere puts the store behind a login or behind several steps:
-`shiro/CVE-2016-4437` is a cookie deserialization and in-band;
-`teamcity/CVE-2024-27198` and `wordpress/CVE-2026-63030` are multi-step
-privilege chains rather than second-order injections; `tikiwiki/CVE-2020-15906`
-is a login bypass; `flask/ssti` renders in the same response, so `eval`
-confirms it directly and nothing is deferred; `django/CVE-2017-12794` is an XSS
-on a debug page and executes nothing.
+**The harness is ready, and that is measured rather than argued.** Phase 3 made
+a chain the delivery the engine drives, so `--verify-chain` requires `--methods`
+and builds a `ChainDelivery` that `run_detection` fires — the same
+`run_detection` that owns the observed channel's pre-injection control, its
+per-probe poll and `--observe-trigger`. Nothing in the case schema needs to
+grow: `invocation` already takes arbitrary flags and `{bench}` already expands,
+so a case can pass `--verify-chain {bench}/chains/<name>.json --observe-url …`
+and the runner reads the verdict from `--detect-json` exactly as it does for
+every other case.
 
-So this gap is the same one `Chartbrew` ran into, reached from the other side: a
-case can bring a stack up and fire one invocation, and nothing in the schema
-seeds application state. Saving something is what a second-order sink requires,
-and saving something is what a case cannot do. The missing piece is the chain
-machinery -- setup steps carrying a session -- that roadmap phase 3 merges with
-the oracles, and a `setup` hook bolted onto the runner before then would be
-that feature arriving under another name.
+Run against a local target whose store is **behind a login** —
+`POST /login` hands out a token, `POST /notes` requires it and answers `saved`
+with no echo of what it stored, `GET /render` renders the stored value through a
+shell:
 
-Worth stating because the alternative is worse: a case built on a target
-brought up by hand, which passes on one machine and nowhere else, or a fixture,
-which is the one thing a bench case exists not to be.
+```
+[verify] chain http://127.0.0.1:60052 (2 steps)
+[detect] cost: ~19 probe(s) x 2 chain step(s) = at least 40 requests
+[detect] sent 1 probes (1 result(s)): executed=1
+  [reflected/unix/raw] ; echo RKCPGJB$((583113+788018))RKPCTRX$(echo RKCYQME)RKCPGJB
+      (target computed 'RKCPGJB1371131RKPCTRXRKCYQMERKCPGJB' on the OBSERVED
+       channel -- second-order execution: the value is absent from that
+       endpoint's pre-injection control and cannot be reflected, since the
+       payload never carried it)
+```
+
+Against the twin endpoint that renders the same stored value and executes
+nothing, the same invocation sends 19 probes and reports `negative` on all 19.
+So the authenticated-store half of the shape is solved: a chain logs in, carries
+the token it extracted, and stores a payload no response echoes.
+
+**What a target must still look like**, now stated precisely enough to screen
+one:
+
+- The **store may be authenticated.** A chain handles a login and `{var}`
+  substitution from an earlier step's `extract`.
+- The **render must be reachable without the chain's session.** `_fire_observed`
+  takes the url, method, data and headers the flags gave it and nothing else —
+  no cookie jar, no chain state, no `{var}` substitution. `--observe-request` is
+  a static file, so a token a chain extracted at run time cannot reach it. An
+  unauthenticated render, or one behind a credential the operator can write into
+  that file, is in reach; one behind the chain's own freshly minted session is
+  not.
+- The execution must surface a **computed value.** `_observable` requires an
+  expected value the payload does not itself carry, which is what stops a target
+  that merely stores and renders from reading as a confirmation — so the
+  computed-value methods qualify and the token-carrying ones do not.
+
+**No vulhub environment has that shape.** 16 were screened, by class rather
+than by hunch:
+
+| Candidate | Why not |
+|---|---|
+| `flask/ssti`, `confluence/CVE-2019-3396`, `confluence/CVE-2023-22527`, `jimureport/CVE-2023-4450`, `craftcms/CVE-2024-56145` | In-band: the render is the injected response, so `eval` confirms directly and nothing is deferred |
+| `comfyui/CVE-2025-67303`, `comfyui/CVE-2026-22777` | Config tampering ending in a git clone. No computed value surfaces anywhere, so there is nothing for `_observable` to confirm |
+| `elasticsearch/WooYun-2015-110216` | Stores a file and fetches *that file* — `write`'s shape, already covered by `tomcat/CVE-2017-12615` |
+| `gogs/CVE-2018-18925`, `cmsms/CVE-2021-26120` | Interactive install wizard before the vulnerability exists; a case cannot drive one reproducibly |
+| `jira/CVE-2019-11581` | Deferred, but the execution surfaces in **email** — no HTTP endpoint to observe |
+| `teamcity/CVE-2024-27198`, `wordpress/CVE-2026-63030` | Multi-step privilege chains rather than second-order injections |
+| `tikiwiki/CVE-2020-15906` | Login bypass |
+| `shiro/CVE-2016-4437` | Cookie deserialization, in-band |
+| `django/CVE-2017-12794` | XSS on a debug page; executes nothing |
+
+Worth stating because the alternative is worse: a case built on a target brought
+up by hand, which passes on one machine and nowhere else, or a purpose-written
+vulnerable app composed under Docker — which is a fixture wearing Docker, and a
+fixture is the one thing a bench case exists not to be. The local target above
+is evidence that the harness works and is deliberately **not** proposed as a
+case, for exactly that reason.
+
+So this row stays open, and what would close it is an image: a released
+application with a stored sink whose render is reachable without the store's
+session, pinned by a compose file of our own.
