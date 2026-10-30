@@ -488,15 +488,15 @@ connection, dataset -- which a case could not reach when this was written,
 because a case can only `docker compose up` and then run one invocation.
 
 That reason has since expired and been replaced by a better one, which is worth
-recording so nobody spends a container cycle rediscovering it. Phase 3 gave the
-runner what it lacked: a chain carries a login and substitutes `{var}` from an
-earlier step's `extract`, so those three setup steps are now expressible. But
-`boolean` is refused on a chain by name -- `CHAIN_UNSUPPORTED_METHODS` in
-`rcekit.py` -- because it compares response *shape* across a shuffled series,
-and a chain's setup steps and per-probe session change that shape for reasons
-that have nothing to do with the sink. So the obstacle moved from the harness,
-where it was fixable, to the oracle, where lifting it would be a change to what
-a detection method reports.
+recording so nobody spends a container cycle rediscovering it. The runner has
+since gained what it lacked: a chain carries a login and substitutes `{var}`
+from an earlier step's `extract`, so those three setup steps are now
+expressible. But `boolean` is refused on a chain by name --
+`CHAIN_UNSUPPORTED_METHODS` in `rcekit.py` -- because it compares response
+*shape* across a shuffled series, and a chain's setup steps and per-probe
+session change that shape for reasons that have nothing to do with the sink. So
+the obstacle moved from the harness, where it was fixable, to the oracle, where
+lifting it would be a change to what a detection method reports.
 
 MongoDB's `$where` on a one-document collection a fresh `mongo:3.4` already
 has needs none of it. Measured by hand on
@@ -579,15 +579,14 @@ before any probe went out. It still has no case. What stood in the way used to
 be this harness, and that is no longer true — the blocker is now the absence of
 a target, which is a different thing and worth not confusing with the first.
 
-**The harness is ready, and that is measured rather than argued.** Phase 3 made
-a chain the delivery the engine drives, so `--verify-chain` requires `--methods`
-and builds a `ChainDelivery` that `run_detection` fires — the same
-`run_detection` that owns the observed channel's pre-injection control, its
-per-probe poll and `--observe-trigger`. Nothing in the case schema needs to
-grow: `invocation` already takes arbitrary flags and `{bench}` already expands,
-so a case can pass `--verify-chain {bench}/chains/<name>.json --observe-url …`
-and the runner reads the verdict from `--detect-json` exactly as it does for
-every other case.
+**The harness is ready, and that is measured rather than argued.** A chain is
+now the delivery the engine drives: `--verify-chain` requires `--methods` and
+builds a `ChainDelivery` that `run_detection` fires — the same `run_detection`
+that owns the observed channel's pre-injection control, its per-probe poll and
+`--observe-trigger`. Nothing in the case schema needs to grow: `invocation`
+already takes arbitrary flags and `{bench}` already expands, so a case can pass
+`--verify-chain {bench}/chains/<name>.json --observe-url …` and the runner reads
+the verdict from `--detect-json` exactly as it does for every other case.
 
 Run against a local target whose store is **behind a login** —
 `POST /login` hands out a token, `POST /notes` requires it and answers `saved`
@@ -627,20 +626,35 @@ one:
   that merely stores and renders from reading as a confirmation — so the
   computed-value methods qualify and the token-carrying ones do not.
 
-**No vulhub environment has that shape.** 16 were screened, by class rather
-than by hunch:
+**No environment in a vulhub checkout has that shape.** All 332 of them were
+screened, and the funnel is recorded because the conclusion is only worth as
+much as the search behind it:
 
-| Candidate | Why not |
+| Step | Left |
 |---|---|
-| `flask/ssti`, `confluence/CVE-2019-3396`, `confluence/CVE-2023-22527`, `jimureport/CVE-2023-4450`, `craftcms/CVE-2024-56145` | In-band: the render is the injected response, so `eval` confirms directly and nothing is deferred |
-| `comfyui/CVE-2025-67303`, `comfyui/CVE-2026-22777` | Config tampering ending in a git clone. No computed value surfaces anywhere, so there is nothing for `_observable` to confirm |
-| `elasticsearch/WooYun-2015-110216` | Stores a file and fetches *that file* — `write`'s shape, already covered by `tomcat/CVE-2017-12615` |
-| `gogs/CVE-2018-18925`, `cmsms/CVE-2021-26120` | Interactive install wizard before the vulnerability exists; a case cannot drive one reproducibly |
-| `jira/CVE-2019-11581` | Deferred, but the execution surfaces in **email** — no HTTP endpoint to observe |
-| `teamcity/CVE-2024-27198`, `wordpress/CVE-2026-63030` | Multi-step privilege chains rather than second-order injections |
-| `tikiwiki/CVE-2020-15906` | Login bypass |
-| `shiro/CVE-2016-4437` | Cookie deserialization, in-band |
-| `django/CVE-2017-12794` | XSS on a debug page; executes nothing |
+| Environments with a `docker-compose.yml` | 332 |
+| After removing classes that cannot be a deferred *execution* sink — SQL injection (21), deserialization (36), path traversal and file read (48), auth bypass and privilege escalation (42), SSRF (7), information disclosure (7), DoS and memory safety (3), XXE (2), XSS (2) | 164 |
+| After keeping only those whose own documentation describes both a **store** and a **later act** on it | 18 |
+| After reading each of those 18 | **0** |
+
+The 18 were rejected for seven reasons, grouped by the reason rather than by the
+product, because the reason is the part that generalises:
+
+| Why not | Environments |
+|---|---|
+| **In-band**: the execution surfaces in the injected response, so `reflected` or `eval` confirms it directly and nothing is deferred | `craftcms/CVE-2023-41892` (both gadgets POST the same endpoint), `geoserver/CVE-2022-24816`, `goahead/CVE-2017-17562` (the shared object is POSTed and referenced as `/proc/self/fd/0` in one request), `h2database/CVE-2018-10054`, `h2database/CVE-2022-23221` |
+| **`write`'s shape**: the stored file is the thing fetched, which `tomcat/CVE-2017-12615` already covers | `weblogic/CVE-2018-2894`, `tomcat/tomcat8` |
+| **Not HTTP** | `zabbix/CVE-2017-2824` (trapper protocol on 10051), `spring/CVE-2018-1270` (STOMP over SockJS), `php/xdebug-rce` (DBGp) |
+| **No computed value reaches any response**, so there is nothing for `_observable` to confirm | `solr/CVE-2017-12629-RCE` — a real store-then-trigger, `/config` persisting a `RunExecutableListener` that `/update` fires, whose command output goes nowhere readable — and `comfyui/CVE-2025-67303`, `comfyui/CVE-2026-22777`, config tampering ending in a git clone |
+| **No HTTP application at all**: the environment is a library or CLI demo | `python/PIL-CVE-2018-16509`, `imagemagick/CVE-2020-29599` |
+| **Interactive setup before the vulnerability exists**, which a case cannot drive reproducibly | `cacti/CVE-2025-24367` — the closest miss: post-auth argument injection stored in a graph template and fired when the graph renders, but its own instructions are "click Next repeatedly" and then three GUI flows carrying per-install ids |
+| **Executes client-side**, or the store is not an endpoint of the application under test | `pdfjs/CVE-2024-4367`, `kibana/CVE-2020-7012` (needs a write to the Kibana index) |
+
+The template-injection environments — `flask/ssti`, `confluence/CVE-2019-3396`,
+`confluence/CVE-2023-22527`, `jimureport/CVE-2023-4450`,
+`craftcms/CVE-2024-56145` — survive the class filter and never reach the
+shortlist, because nothing in them is deferred: the render *is* the injected
+response.
 
 Worth stating because the alternative is worse: a case built on a target brought
 up by hand, which passes on one machine and nowhere else, or a purpose-written
