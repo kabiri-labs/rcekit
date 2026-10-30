@@ -2031,6 +2031,186 @@ def chain_profile(base):
     }
 
 
+@contextlib.contextmanager
+def deferred_target(trigger_echoes=False):
+    """A sink nothing executes until something asks it to.
+
+    `/store` queues the value and returns nothing of it. `/run` is the worker:
+    it drains the queue and only it executes anything. `/out` renders what ran.
+    That is the shape `--observe-url` alone cannot reach — the observed page
+    never changes, because the work never happens.
+
+    `trigger_echoes` makes `/run` return the queued value in its own response,
+    which is the near neighbour: the trigger is fired to cause work and its
+    response must never be read for evidence.
+
+    Yields `(base_url, counter)` with a count of `/run` requests, since the
+    control is supposed to be triggered too."""
+    import http.server
+    import socketserver
+    import threading
+    import urllib.parse as _up
+
+    queue, output = [], []
+    counter = {"run": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _reply(self, text):
+            body = text.encode("utf-8", "replace")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+        def do_GET(self):
+            if self.path.startswith("/run"):
+                counter["run"] += 1
+                echoed = []
+                while queue:
+                    command = queue.pop(0)
+                    pipe = sh_popen("echo " + command + " 2>&1")
+                    output.append(pipe.read())
+                    pipe.close()
+                    echoed.append(command)
+                self._reply("queue drained " + (" ".join(echoed) if trigger_echoes else ""))
+            elif self.path.startswith("/out"):
+                self._reply("<html>results: " + " ".join(output) + "</html>")
+            else:
+                self._reply("ok")
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            form = _up.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            queue.append(form.get("cmd", [""])[0])
+            self._reply("queued")
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", counter
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class ObserveTriggerTestCase(unittest.TestCase):
+    """Second-order detection has three acts, and the engine had two.
+
+    Inject then read is enough for a payload the target renders on its own next
+    page load. It is not enough for one waiting to be run — a queue drained by a
+    worker, a report generated on demand, a cache rebuilt by an admin action.
+    There the observed page never changes, and the run reports `negative` about
+    a sink that would execute the moment anything asked it to."""
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, str(SCRIPT), *args],
+                              cwd=str(REPO_ROOT), capture_output=True, text=True,
+                              timeout=600)
+
+    def _probe_args(self, base):
+        return ("--acknowledge-consent",
+                "--verify-url", f"{base}/store", "--verify-method", "POST",
+                "--verify-data", "cmd=FUZZ", "--methods", "reflected",
+                "--environments", "unix", "--contexts", "raw",
+                "--probe-depth", "quick",
+                "--observe-url", f"{base}/out",
+                "--observe-timeout", "3", "--observe-poll", "1")
+
+    def test_a_deferred_sink_is_missed_without_a_trigger_and_found_with_one(self):
+        # The pair, and the whole case. Same target, same probes; the only
+        # difference is whether anything asks the worker to run.
+        with deferred_target() as (base, _counter):
+            without = self._run(*self._probe_args(base))
+        with deferred_target() as (base, _counter):
+            with_trigger = self._run(*self._probe_args(base),
+                                     "--observe-trigger", f"{base}/run")
+        self.assertIn("negative=19", without.stdout,
+                      "nothing drains the queue, so nothing executes")
+        self.assertNotIn("EXECUTED (", without.stdout)
+        self.assertIn("EXECUTED (", with_trigger.stdout)
+        self.assertIn("on the OBSERVED channel", with_trigger.stdout,
+                      "the evidence has to be the second-order one")
+
+    def test_the_trigger_response_is_never_read_for_evidence(self):
+        """The near neighbour, and the one that would hide a false positive.
+
+        `/run` here returns the queued value in its own response while `/out`
+        does not. The trigger is fired to cause work; reading its response for a
+        value would be a second oracle with no control behind it, and would
+        confirm on a target whose observed channel showed nothing."""
+        with deferred_target(trigger_echoes=True) as (base, _counter):
+            # /out is pointed at a page that never carries the result.
+            result = self._run(
+                "--acknowledge-consent",
+                "--verify-url", f"{base}/store", "--verify-method", "POST",
+                "--verify-data", "cmd=FUZZ", "--methods", "reflected",
+                "--environments", "unix", "--contexts", "raw",
+                "--probe-depth", "quick",
+                "--observe-url", f"{base}/quiet",
+                "--observe-trigger", f"{base}/run",
+                "--observe-timeout", "3", "--observe-poll", "1")
+        self.assertNotIn("EXECUTED (", result.stdout,
+                         "the value came back on the trigger's own response, which is "
+                         "not a channel this oracle may read")
+
+    def test_the_control_is_triggered_too(self):
+        # So the control and every later read differ in the payload and nothing
+        # else -- the discipline the chain control follows by being a whole
+        # chain run. One trigger for the control, then one per poll.
+        with deferred_target() as (base, counter):
+            self._run(*self._probe_args(base), "--observe-trigger", f"{base}/run",
+                      "--max-payloads", "1")
+            fired = counter["run"]
+        self.assertGreaterEqual(fired, 2,
+                                "the control must be triggered as well as the polls")
+
+    def test_the_preflight_counts_the_trigger_before_the_traffic(self):
+        with deferred_target() as (base, _counter):
+            result = self._run(*self._probe_args(base),
+                               "--observe-trigger", f"{base}/run", "--max-payloads", "1")
+        self.assertIn("triggering", result.stdout)
+        self.assertRegex(result.stdout, r"at most \d+ times including the control")
+        self.assertIn("never read for evidence", result.stdout)
+
+    def test_a_trigger_without_an_observed_endpoint_is_refused(self):
+        # It would fire a request at the target and measure nothing, which is a
+        # run that tests nothing while looking busy.
+        result = self._run("--acknowledge-consent",
+                           "--verify-url", "http://127.0.0.1:9/?q=FUZZ",
+                           "--methods", "reflected",
+                           "--observe-trigger", "http://127.0.0.1:9/run")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("--observe-trigger needs --observe-url", result.stdout)
+
+    def test_the_two_trigger_forms_cannot_both_be_given(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            capture = Path(tmp) / "trigger.txt"
+            capture.write_text("GET /run HTTP/1.1\nHost: t.example\n\n", encoding="utf-8")
+            result = self._run("--acknowledge-consent",
+                               "--verify-url", "http://127.0.0.1:9/?q=FUZZ",
+                               "--methods", "reflected",
+                               "--observe-url", "http://127.0.0.1:9/out",
+                               "--observe-trigger", "http://127.0.0.1:9/run",
+                               "--observe-trigger-request", str(capture))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("name the same request two ways", result.stdout)
+
+    def test_the_resolver_returns_none_without_a_trigger(self):
+        self.assertIsNone(rcekit.observe_trigger({}))
+        self.assertIsNone(rcekit.observe_trigger({"observe_url": "http://t.example/out"}))
+        resolved = rcekit.observe_trigger({"observe_trigger_url": "http://t.example/run"})
+        self.assertEqual(resolved["url"], "http://t.example/run")
+        self.assertEqual(resolved["method"], "GET")
+
+
 class ChainAsDetectionCarrierTestCase(unittest.TestCase):
     """A chain is a transport the detection engine drives, not a second engine.
 

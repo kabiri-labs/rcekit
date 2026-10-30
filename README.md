@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.9.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.10.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -554,6 +554,11 @@ them will call `executed`:
   request and runs on another: stored SSTI rendered on a profile page, a payload
   written to a log a template engine later renders, a queued job. The observed
   endpoint is differenced against a snapshot taken *before* any probe was sent.
+  Where nothing runs until something asks — a queue a worker drains, a report
+  generated on demand, a "run now" button — `--observe-trigger` is the missing
+  third act: inject, **trigger**, read. It fires before each poll and once for
+  the control, so the control and the reads differ in the payload and nothing
+  else, and its own response is never read for evidence.
 - **Query-language bridges** (`--bridges`) — `COPY … FROM PROGRAM`,
   `xp_cmdshell`, `expect://`. A bridge is a carrier, not an oracle: it wraps the
   command the methods already build, so the same tiers apply through it.

@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.9.0"
+__version__ = "3.10.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -358,6 +358,32 @@ def observe_request(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "headers": config.get("observe_headers"),
         "poll": config.get("observe_poll"),
         "timeout": config.get("observe_timeout"),
+    }
+
+
+def observe_trigger(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The request that *causes* the deferred execution, or ``None``.
+
+    Second-order detection has three acts and the engine only had two. Inject,
+    then read is enough for a payload the target renders on its own next page
+    load; it is not enough for one that waits for something to run it -- a
+    report generated on demand, a queue drained by a worker, a cache rebuilt by
+    an admin action, a "run now" button. For those, polling the observed
+    endpoint forever reads a page that will never change, and the run reports
+    `negative` about a sink that would execute the moment anything asked it to.
+
+    Resolved beside :func:`observe_request` and in the same shape, because the
+    two forms have the same problem: the endpoint that triggers the work is
+    usually behind the same login as the endpoint that shows it, and a URL alone
+    cannot carry that session."""
+    url = config.get("observe_trigger_url")
+    if not url:
+        return None
+    return {
+        "url": str(url),
+        "method": config.get("observe_trigger_method") or "GET",
+        "data": config.get("observe_trigger_data"),
+        "headers": config.get("observe_trigger_headers"),
     }
 
 
@@ -3607,6 +3633,14 @@ class RCEKit:
         observe_control: List[Tuple[str, str]] = []
         observe_reached = False
         if observe is not None:
+            # The trigger fires for the control too, so the control and every
+            # later read differ in the payload and in nothing else -- the same
+            # discipline the chain control follows by being a whole chain run.
+            # Without it, anything the trigger itself renders ("report
+            # generated at ...") would be in the reads and not in the control,
+            # and the difference between them would no longer be only the
+            # payload. It costs one request, and the pre-flight counts it.
+            self._fire_trigger(observe_trigger(config or {}), timeout)
             o_status, o_body, o_channels, _ = self._fire_observed(observe, timeout)
             observe_reached = o_status is not None
             observe_control = o_channels or ([("response body", o_body)] if o_body else [])
@@ -3865,7 +3899,8 @@ class RCEKit:
                     # cannot notice a budget that was gone before it started.
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
-                            results, observe, observe_control, observe_reached, timeout)
+                            results, observe, observe_control, observe_reached, timeout,
+                            observe_trigger(config or {}))
                     seen.add(probe.payload)
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
@@ -3979,9 +4014,11 @@ class RCEKit:
                         time.sleep(delay)
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
-                            results, observe, observe_control, observe_reached, timeout)
+                            results, observe, observe_control, observe_reached, timeout,
+                            observe_trigger(config or {}))
         return self._resolve_observed(
-            results, observe, observe_control, observe_reached, timeout)
+            results, observe, observe_control, observe_reached, timeout,
+            observe_trigger(config or {}))
 
     # A probe's expected value may only be looked for on the observed channel
     # when the payload does not already carry it. That single rule is what keeps
@@ -4006,11 +4043,38 @@ class RCEKit:
             "", observe["url"], observe.get("method") or "GET", observe.get("data"),
             observe.get("headers"), "raw", "raw", timeout)
 
+    def _fire_trigger(self, trigger: Optional[Dict[str, Any]], timeout: float) -> None:
+        """Ask the target to run the thing, if the operator named a way to ask.
+
+        No payload and no oracle: the response is discarded on purpose. This
+        request exists to cause work, not to be read -- what it caused is read
+        on the observed channel, which is where the differential lives. Reading
+        this response for a value would be a second, uncontrolled oracle.
+
+        A failure is not fatal and not reported here. The observed poll that
+        follows is the measurement, and it already says when the channel never
+        answered; a trigger that 500s on one poll and succeeds on the next would
+        otherwise abort a run that was about to confirm."""
+        if trigger is None:
+            return
+        try:
+            self._fire_channels(
+                "", trigger["url"], trigger.get("method") or "GET",
+                trigger.get("data"), trigger.get("headers"), "raw", "raw", timeout)
+        except Exception:  # pragma: no cover - delivery errors already return None
+            pass
+
     def _resolve_observed(self, results: List[Dict[str, Any]],
                           observe: Optional[Dict[str, Any]],
                           observe_control: List[Tuple[str, str]],
                           observe_reached: bool,
-                          timeout: float) -> List[Dict[str, Any]]:
+                          timeout: float,
+                          # Appended, and passed rather than read off the
+                          # instance: `config_evade` set the other precedent,
+                          # but hidden state on a method with three call sites
+                          # is a thing a future caller forgets to set.
+                          trigger: Optional[Dict[str, Any]] = None
+                          ) -> List[Dict[str, Any]]:
         """Poll the observed channel and upgrade the probes whose value lands there.
 
         Execution frequently happens on a *different* request than injection:
@@ -4049,6 +4113,15 @@ class RCEKit:
         # observed run that polled zero times and reported negatives would be
         # the "tested nothing, looks clean" failure in a new place.
         while True:
+            # Before the read, every time. A trigger is usually the thing that
+            # runs the queued work, and a run that polls without asking reads a
+            # page that will never change. Firing it per poll rather than once
+            # is deliberate: a single fire can race the store it is meant to
+            # process, and the shapes this reaches -- drain the queue, rebuild
+            # the cache, generate the report -- are ones a target is expected to
+            # tolerate being asked twice. The count is polls + 1 including the
+            # control, and the pre-flight says so before any of it happens.
+            self._fire_trigger(trigger, timeout)
             status, body, channels, _ = self._fire_observed(observe, timeout)
             if status is not None:
                 observe_reached = True
@@ -10378,6 +10451,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="(--methods) Raw HTTP request for the observed endpoint, instead of "
                              "--observe-url. No FUZZ marker: it is read, never injected into. Use "
                              "this when the page the payload renders on needs a session.")
+    parser.add_argument("--observe-trigger", default=None, metavar="URL",
+                        help="(--observe-url) A request that CAUSES the deferred execution, "
+                             "fired before each poll of the observed endpoint. Second-order "
+                             "detection has three acts and inject-then-read is only two: a "
+                             "payload waiting for a worker, a report generated on demand or a "
+                             "cache rebuilt by an admin action never runs, so the observed page "
+                             "never changes and the run reports negative about a sink that would "
+                             "execute the moment anything asked it to. Fired polls + 1 times "
+                             "(the extra is the control, so the two differ in the payload and "
+                             "nothing else); the pre-flight prints the count.")
+    parser.add_argument("--observe-trigger-request", default=None, metavar="FILE",
+                        help="(--observe-url) Raw HTTP request for the trigger, instead of "
+                             "--observe-trigger. No FUZZ marker: it is fired, never injected "
+                             "into. Use this when the endpoint that runs the work needs the "
+                             "same session as the one that shows it.")
     parser.add_argument("--observe-poll", type=float, default=5.0, metavar="SECONDS",
                         help="(--observe-url) Seconds between polls of the observed endpoint "
                              "(default 5).")
@@ -10499,6 +10587,31 @@ def main(argv: Optional[List[str]] = None) -> int:
         except (OSError, ValueError) as exc:
             print(f"[!] Unable to use --observe-request {args.observe_request}: {exc}")
             return 1
+    # The trigger, from either form, resolved beside the endpoint it acts on.
+    observe_trigger_url = args.observe_trigger
+    observe_trigger_method, observe_trigger_data, observe_trigger_headers = "GET", None, None
+    if args.observe_trigger_request:
+        if observe_trigger_url:
+            print("[!] --observe-trigger and --observe-trigger-request name the same request "
+                  "two ways; pass one.")
+            return 1
+        try:
+            with open(args.observe_trigger_request, "r", encoding="utf-8") as trigger_fh:
+                trigger_raw = trigger_fh.read()
+            (observe_trigger_url, observe_trigger_method, observe_trigger_data,
+             observe_trigger_headers) = build_plain_request(trigger_raw, args.request_scheme)
+        except (OSError, ValueError) as exc:
+            print(f"[!] Unable to use --observe-trigger-request "
+                  f"{args.observe_trigger_request}: {exc}")
+            return 1
+    if observe_trigger_url and not observe_url:
+        # A trigger with nothing to read afterwards would fire a request at the
+        # target and measure nothing, which is the shape of a run that tests
+        # nothing while looking busy.
+        print("[!] --observe-trigger needs --observe-url (or --observe-request): the trigger "
+              "causes the execution and the observed endpoint is where it is read. Without "
+              "one, the request would be sent and nothing would be measured.")
+        return 1
     eval_engines_raw = from_profile(args.eval_engines, "eval_engines")
     if isinstance(eval_engines_raw, str):
         eval_engines_raw = None if eval_engines_raw.strip() == "auto" else [
@@ -10951,6 +11064,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 # held back by the same flag rather than riding
                                 # in because a detection method built it.
                                 "max_safety": verify_max_safety,
+                                "observe_trigger_url": observe_trigger_url,
+                                "observe_trigger_method": observe_trigger_method,
+                                "observe_trigger_data": observe_trigger_data,
+                                "observe_trigger_headers": observe_trigger_headers,
                                 "observe_poll": args.observe_poll,
                                 "observe_timeout": args.observe_timeout,
                                 "eval_engines": eval_engines,
@@ -11171,6 +11288,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("[detect]   only probes whose expected value is NOT in their own payload "
                       "are looked for there -- a stored payload rendered back would otherwise "
                       "confirm by reflection.")
+                if observe_trigger_url:
+                    # The request count said before the traffic, as the cost
+                    # line is: a trigger is usually a state-changing "run the
+                    # work" request, and firing it per poll is a number the
+                    # operator has to see rather than infer.
+                    polls = 1 + max(0, int(args.observe_timeout // max(
+                        0.5, args.observe_poll))) if args.observe_timeout else 1
+                    print(f"[detect]   triggering {observe_trigger_url} before each poll "
+                          f"({observe_trigger_method}) -- at most {polls + 1} times including "
+                          "the control, so the control and the reads differ in the payload and "
+                          "nothing else. It is fired to cause work, and its own response is "
+                          "never read for evidence.")
             if set(method_names) & SHELL_PROBE_METHODS:
                 # The ladder multiplies request count, so say which shapes are
                 # about to be tried before trying them. An operator on a
