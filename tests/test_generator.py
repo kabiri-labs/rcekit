@@ -1669,8 +1669,17 @@ class EncodedOracleTestCase(unittest.TestCase):
 
 class VerifyChainTestCase(unittest.TestCase):
     """O2: the session-aware multi-step chain runner reaches sinks a single
-    stateless request cannot — confirming in-band (match oracle) and out-of-band
-    (a {callback} URL received by the built-in listener)."""
+    stateless request cannot — authenticated flows, injection carried in an
+    upload's content, blind and async execution.
+
+    What it reaches there differs by channel, and the two are not interchangeable.
+    Out of band it reaches `executed`, on a token minted per payload that only
+    the target could return. In band it reaches `needs-review` and no further:
+    the oracle is a static signature from `_COMMAND_SIGNATURES` and this path
+    takes no payload-free control, so it cannot separate a target that ran the
+    command from a page that merely contains the signature. The two in-band
+    tests below are exactly that pair — a real sink and an inert page — and they
+    land on the same verdict."""
 
     def setUp(self):
         self.gen = RCEKit()
@@ -1684,7 +1693,7 @@ class VerifyChainTestCase(unittest.TestCase):
         s.close()
         return port
 
-    def test_chain_confirms_in_band_via_multi_step_flow(self):
+    def test_the_in_band_oracle_reaches_its_own_tier_on_a_real_sink(self):
         import http.server, socketserver, threading, re as _re, urllib.parse as up
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1725,9 +1734,97 @@ class VerifyChainTestCase(unittest.TestCase):
                 selected_categories=["basic_enum"], selected_environments=["unix"],
                 selected_contexts=["raw"], selected_encodings=["none"]))
             results = self.gen.run_verification_chain(records, chain)
-            confirmed = [r for r in results if r["verdict"] == "executed"]
-            self.assertTrue(confirmed, "the chain must confirm at least one RCE")
-            self.assertTrue(any(r["payload"] == "; id" for r in confirmed))
+            # The target here genuinely executes -- the handler shells `cmd`.
+            # The chain still reaches `needs-review` and not `executed`, and
+            # that is the honest ceiling of this oracle rather than a failure of
+            # the sink: `record.match` is a static signature and this path takes
+            # no payload-free control, so it cannot tell a target that ran the
+            # command from a page that happened to contain the signature. The
+            # test below is that same page, and it reaches the same verdict --
+            # which is the whole argument for the demotion.
+            candidates = [r for r in results if r["verdict"] == "needs-review"]
+            self.assertTrue(candidates, "the chain must still reach its own tier")
+            self.assertTrue(any(r["payload"] == "; id" for r in candidates))
+            self.assertFalse([r for r in results if r["verdict"] == "executed"],
+                             "a static signature with no control is not execution")
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_methods_is_announced_as_not_applied_on_this_path(self):
+        # This path never consults `--methods`. Accepting the flag in silence
+        # would deliver the corpus oracle while the operator believed they had
+        # asked for a tiered one, and a clean result would then read as though
+        # the methods had been tried. Said before the traffic, not after it.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            chain_path = Path(tmp) / "chain.json"
+            chain_path.write_text(json.dumps({
+                "base": f"http://127.0.0.1:{self._free_port()}",
+                "steps": [{"name": "run", "method": "POST", "path": "/run",
+                           "form": {"cmd": "FUZZ"}}],
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-chain", str(chain_path), "--methods", "reflected",
+                 "--categories", "basic_enum", "--environments", "unix",
+                 "--contexts", "raw", "--max-payloads", "1"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+        self.assertIn("--methods is NOT applied on this path", result.stdout)
+        self.assertIn("reflected", result.stdout)
+        # And the run says what its ceiling is, whether or not anything matched.
+        self.assertIn("reaches needs-review at best", result.stdout)
+
+    def test_the_in_band_oracle_cannot_tell_execution_from_a_static_page(self):
+        """Why the in-band chain verdict is not `executed`, demonstrated.
+
+        The target below runs nothing at all. It serves one fixed page that
+        happens to contain `uid=0`, `root:x:0:0:` and the word `Linux` -- a
+        server banner, a reflected header and a documentation snippet are each
+        enough in the wild. Before this change it reported `executed` for every
+        payload whose signature the page satisfied.
+
+        Paired with the test above deliberately: a genuinely vulnerable target
+        and a completely inert one reach the *same* verdict through this oracle.
+        An oracle that cannot separate those two was never entitled to the tier
+        reserved for execution."""
+        import http.server, socketserver, threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self):
+                body = b"<html>Powered by Linux. uid=0 root:x:0:0: inet 10.0.0.1</html>"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except BrokenPipeError:
+                    pass
+
+            do_GET = do_POST = _send
+
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            chain = {
+                "base": f"http://127.0.0.1:{port}",
+                "steps": [{"name": "run", "method": "POST", "path": "/run",
+                           "form": {"cmd": "FUZZ"}}],
+            }
+            records = list(self.gen.generate_payload_records(
+                selected_categories=["basic_enum"], selected_environments=["unix"],
+                selected_contexts=["raw"], selected_encodings=["none"]))
+            results = self.gen.run_verification_chain(records, chain, max_payloads=6)
+            self.assertFalse(
+                [r for r in results if r["verdict"] == "executed"],
+                "a target that executes nothing must never be reported as executing")
+            matched = [r for r in results if r["verdict"] == "needs-review"]
+            self.assertTrue(matched, "the signature does match, which is the point")
+            self.assertIn("static signature", matched[0]["detail"])
+            self.assertIn("no payload-free control", matched[0]["detail"])
         finally:
             server.shutdown(); server.server_close()
 
@@ -1766,6 +1863,13 @@ class VerifyChainTestCase(unittest.TestCase):
             rec = make_record(payload="run {callback}", category="oob",
                               expected_channel="response", match=None)
             results = self.gen.run_verification_chain([rec], chain)
+            # The near neighbour of the demotion above, and the reason it is a
+            # demotion rather than a blanket one: this verdict stays `executed`.
+            # The token is minted for this payload and registered with this
+            # run's listener, so a callback carrying it is a value only the
+            # target could have learned by running what it was given -- the
+            # tier rule's second clause, which needs no control for the same
+            # reason `oob` needs none.
             self.assertEqual(results[0]["verdict"], "executed")
             self.assertIn("callback", results[0]["detail"])
         finally:

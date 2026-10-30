@@ -707,9 +707,28 @@ listener's address.
 A single request cannot reach a sink that sits behind a login, arrives inside
 **uploaded file content**, or executes **blind/async** minutes later.
 `--verify-chain` drives an ordered, cookie-aware flow — login → CSRF extraction →
-prerequisites → payload delivery → trigger — and confirms either **in-band** (a
-`match` oracle on a chosen step) or **out-of-band** (a `{callback}` URL received by
-the built-in listener).
+prerequisites → payload delivery → trigger — and reads the result either
+**in-band** (a `match` oracle on a chosen step) or **out-of-band** (a `{callback}`
+URL received by the built-in listener).
+
+**What each channel can reach differs, and the difference matters more than the
+chain machinery.** Out of band it reaches **`executed`**: the token is minted for
+that payload and registered with the run's listener, so a callback carrying it is
+a value only the target could have learned by running what it was given.
+
+In band it reaches **`needs-review`** and no further. The oracle there is a
+*static* signature — `uname` is matched by the word `Linux` appearing, `cat
+/etc/passwd` by a `root:` line — and this path runs the chain once, with the
+payload, so there is no payload-free control to difference it against. It
+therefore cannot separate a target that ran the command from a page that merely
+contains the signature, and a server banner or a reflected header is enough. A
+verdict that cannot tell those apart is a candidate, not proof.
+
+So on a chain, prefer a `{callback}` payload and `--oob-host` when the target has
+egress. The in-band oracles that *do* reach `executed` — a value computed from
+random operands, differenced against a payload-free control — run on
+`--verify-url` and `-r` with `--methods`, which this path does not apply; it says
+so before it sends anything.
 
 ```json
 {
@@ -746,7 +765,7 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 |---|---|---|
 | **`executed`** | Execution proven. The evidence line shows the exact value the target computed. | Put it in the report. |
 | **`timing-sink`** / **`file-write`** / **`evaluation-sink`** / **`deserialization-sink`** / **`lookup-sink`** | Proven, and about something other than execution: a delay honoured, a file written, an evaluator that consumed the input, an object graph reconstructed, a lookup URI resolved. | Report what the tier says. Do not call any of them RCE. |
-| **`needs-review`** | A real candidate that is not proof on its own — `deser`'s parser fingerprint. | Manual follow-up. Never report as proven. |
+| **`needs-review`** | A real candidate that is not proof on its own — `deser`'s parser fingerprint, and `--verify-chain`'s in-band signature match, which has no control behind it. | Manual follow-up. Never report as proven. |
 | **`negative`** | Reached the target, found no evidence. | Suspect [encoding](#landing-the-payload-intact) or [sink shape](#whole-command-sinks) before concluding it's safe. |
 | **`inconclusive`** | Evidence appeared, but also appears *without* the payload — so it isn't attributable to execution. | Not a finding. This is the false positive that never made it out. |
 | **`error`** | The request never reached the target — a delivery or TLS failure. | Fix connectivity, then re-run. For a self-signed cert, add `--insecure`. |

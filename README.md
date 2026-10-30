@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.7.1** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.8.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -463,7 +463,7 @@ sure RCEKit is:
 | **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
-| **`needs-review`** | A real signal that is not proof on its own — the parser fingerprint `deser` reads without a listener. The one verdict here that is genuinely a candidate. |
+| **`needs-review`** | A real signal that is not proof on its own: the parser fingerprint `deser` reads without a listener, and the static-signature match `--verify-chain` reads in band, which has no payload-free control behind it. The one verdict here that is genuinely a candidate. |
 | **`inconclusive`** | Nothing here can be attributed to execution. Either the evidence appeared and the payload-free control carried it too, or the run never gathered it — a response channel too unsteady to carry an answer, or a measurement `--max-payloads` could not afford to finish. It outranks `negative`, because a run that did not look is not a run that found nothing. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
 | **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
@@ -721,8 +721,9 @@ which is the same method fighting a filter, a quote or an encoding.
 Only `reflected`, `eval`, `oob`, `file`, `write` and `argv` reach **`executed`**. `timing-sink`, `lookup-sink`,
 `evaluation-sink` and `deserialization-sink` are proven findings about something
 else. `needs-review` is the exception: it is the parser fingerprint `deser`
-reads when it has no gadget to fire, a real candidate and **not proof** — review
-it by hand rather than reporting it. [What a verdict
+reads when it has no gadget to fire — and, off this table, the static signature
+`--verify-chain` matches in band without a control. Both are real candidates and
+**not proof** — review them by hand rather than reporting them. [What a verdict
 means](#what-a-verdict-means) spells each one out,
 [Choosing methods](docs/guide.md#choosing-methods) has the costs, and the
 [Quick start](#quick-start) scenarios have a worked command for each row in both
