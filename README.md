@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.8.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.9.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -172,11 +172,16 @@ Every example below uses the second spelling, which works from a checkout and
 from the single downloaded file. An installed copy answers to `rcekit` with
 exactly the same arguments.
 
-RCEKit takes a target in **two shapes**, and neither is a fallback for the
-other. A `--verify-url` carries a URL and nothing else; `-r` takes a request
-saved from your proxy whole — method, path, headers, body and cookies — which is
-what a sink behind a session needs. Mark the injection point with `FUZZ` (or
-`*`), or name a field with `-p`. Each scenario below is shown in both shapes.
+RCEKit takes a target in **three shapes**, and none is a fallback for another. A
+`--verify-url` carries a URL and nothing else; `-r` takes a request saved from
+your proxy whole — method, path, headers, body and cookies — which is what a
+replayable session needs; and `--verify-chain` takes an ordered flow of requests,
+which is what a session the tool has to *establish* needs — a login, a CSRF
+token read out of one response and spent in the next, a payload in an upload's
+content, a trigger that runs it later. Mark the injection point with `FUZZ` (or
+`*`), or name a field with `-p`. The scenarios below are shown in the first two
+shapes; the third is [Multi-step chains](docs/guide.md#multi-step-chains), and
+with `--methods` it carries the same oracles as the other two.
 
 **Internal targets usually need `--insecure`.** A self-signed or mismatched
 certificate fails the handshake, and RCEKit reports that as `error`, never as
@@ -306,10 +311,12 @@ CVE-2017-12615 shape and one of the benchmark's cases.
 
 ### 5. Everything the tool has — the widest run
 
-Two things are reachable only from a captured request: **injection-point
-enumeration** (`--auto-params`), and any sink that needs a session. So the
-fullest run RCEKit can make starts from `-r`, which is worth knowing before
-concluding a target is clean.
+**Injection-point enumeration** (`--auto-params`) is reachable only from a
+captured request, so the widest single-request run starts from `-r` — worth
+knowing before concluding a target is clean. A sink whose session RCEKit has to
+*establish* rather than replay is the other direction: that is
+`--verify-chain --methods`, which drives these same oracles through an ordered
+flow, and is in [Multi-step chains](docs/guide.md#multi-step-chains).
 
 ```bash
 # query string — the widest a single point can carry
@@ -533,9 +540,16 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 | **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
 
-Three things widen where those methods can reach, without changing what any of
+Four things widen where those methods can reach, without changing what any of
 them will call `executed`:
 
+- **Multi-step chains** (`--verify-chain` with `--methods`) — a sink behind a
+  login, a CSRF token read from one response and spent in the next, a payload
+  carried in an upload's content, a trigger that runs it later. The chain is the
+  *delivery* the engine sends through, so the oracles are the ones above and the
+  payload-free control is a chain run of its own. `time` and `boolean` are
+  refused by name there: both read the shape of a response series, which a
+  chain's setup steps and per-probe session change rather than the sink.
 - **Second-order execution** (`--observe-url`) — when the payload lands on one
   request and runs on another: stored SSTI rendered on a profile page, a payload
   written to a log a template engine later renders, a queued job. The observed

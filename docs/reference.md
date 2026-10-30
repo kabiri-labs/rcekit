@@ -42,7 +42,7 @@ starting point — this page is for looking things up once you know what you wan
 | `--verify-delay` | Seconds between verification requests (rate limiting) | `0` |
 | `--verify-timeout` | Per-request timeout in seconds | `8` |
 | `--insecure` | Drop every TLS assurance: no certificate or hostname check, and OpenSSL's security level and minimum protocol version lowered so a legacy stack still completes a handshake | Off |
-| `--verify-chain` | JSON chain profile for multi-step, session-aware verification. Reaches `executed` out of band on a `{callback}` token, configured by the profile's own `callback_host` and `listen_port` — **not** by `--oob-host`, which this path never reads. In band its static-signature oracle reaches `needs-review` only, and `--methods` is not applied here | None |
+| `--verify-chain` | JSON chain profile for multi-step, session-aware verification. **With `--methods`** the chain becomes the delivery the detection engine drives, so every oracle, the payload-free control (a chain run of its own) and the full tier vocabulary apply — `time` and `boolean` excepted, refused by name. **Without it**, the legacy oracle runs: `executed` out of band on a `{callback}` token configured by the profile's own `callback_host` and `listen_port` (**not** `--oob-host`, which this path never reads), and `needs-review` at best in band | None |
 
 ## Detection methods
 

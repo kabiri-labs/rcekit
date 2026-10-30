@@ -738,10 +738,47 @@ environment set, so a default run generates none of them. Reaching the
 out-of-band channel means naming them (`--environments postgres --categories
 code_execution`) or supplying your own `--template-file`.
 
-The in-band oracles that *do* reach `executed` — a value computed from random
-operands, differenced against a payload-free control — run on `--verify-url` and
-`-r` with `--methods`, which this path does not apply; it says so before it sends
-anything.
+### Driving the engine through the chain
+
+Add **`--methods`** to the same command and the chain stops being a separate
+engine: it becomes the delivery the detection engine sends through, so every
+oracle, the payload-free control and the whole tier vocabulary apply to a sink
+behind a login.
+
+```bash
+python rcekit.py --acknowledge-consent --verify-chain chain.json \
+  --methods reflected,eval --environments unix --contexts raw
+```
+
+```
+[detect] cost: ~19 probe(s) x 2 chain step(s) = at least 40 requests (the payload-free control is a chain run of its own)
+[detect] sent 1 probes (1 result(s)): executed=1
+
+[detect] EXECUTED (1):
+  [reflected/unix/raw] ; echo RKWMREG$((434972+202568))RKLDXTR$(echo RKAWILM)RKWMREG
+      (target computed 'RKWMREG637540RKLDXTRRKAWILMRKWMREG' (random operands, absent from control))
+```
+
+That is the same evidence a `--verify-url` run produces, reached through a
+session the URL form cannot hold. Four things to know:
+
+- **The control is a whole chain run**, with a canary where the payload goes —
+  the same steps, the same session, the same confirm step. Anything less would
+  not be comparable to what it is meant to rule out. So a run costs
+  `(probes + 1) × steps` requests, and the cost line says so before it sends.
+- **`--max-payloads` stays a payload allowance**, not a request budget, so a
+  run is never stopped between a chain's login and its trigger — which would
+  abandon a payload and leave target state the run cannot describe.
+- **A fresh session per probe.** Sharing one would cost a single login instead
+  of one per probe, and would let a probe's own state reach the next, which is
+  the thing the control exists to rule out.
+- **`--methods time` and `--methods boolean` are refused by name** on a chain.
+  Both read the shape of a response *series*, and a chain's setup steps and
+  per-probe session change that series rather than the sink. Measure them with
+  `--verify-url` or `-r` against the same sink instead.
+
+Without `--methods`, the chain keeps the legacy oracle described above and its
+`needs-review` ceiling.
 
 ```json
 {
