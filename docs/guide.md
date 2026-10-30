@@ -651,10 +651,15 @@ with the same differential as any other second-order finding.
 
 Four things to know:
 
-- **It fires before each poll**, not once. A single fire can race the store it
-  is meant to process, and the shapes this reaches — drain the queue, rebuild
-  the cache — are ones a target is expected to tolerate being asked twice. The
-  count is `polls + 1`, and the pre-flight prints it before any of it happens.
+- **It fires before every observed read**, which means once per probe as well
+  as once per poll. Per probe is the expensive half and the necessary one: where
+  the store keeps a single value — a profile field, one setting — triggering
+  only at the end of the batch runs whatever the *last* probe left behind and
+  never tests the rest. Measured on such a target, the last stored shape was the
+  Shellshock one, which needs a CGI environment sink, so an exploitable sink
+  reported `negative` for all 19. The pre-flight names each component of the
+  count before any of it happens, because this fires more often than anything
+  else RCEKit sends.
 - **The control is triggered too**, so the control and every later read differ
   in the payload and in nothing else. Without that, anything the trigger itself
   renders would be in the reads and not in the control.

@@ -362,11 +362,15 @@ formats, or the template schema.
 
   Four properties, each of which is a decision rather than a default:
 
-  - **Fired before each poll**, not once. A single fire can race the store it is
-    meant to process, and the shapes this reaches are ones a target is expected
-    to tolerate being asked twice. The count is `polls + 1` and the pre-flight
-    prints it, because a trigger is usually a state-changing request and that
-    number is the operator's to judge, not the tool's to hide.
+  - **Fired before every observed read** — once per probe, once per poll, once
+    for the control. Per poll alone is not enough and per probe is the expensive
+    half: where the store keeps a single value, triggering only at the end of
+    the batch runs whatever the last probe left behind and never tests the rest.
+    Measured on an overwriting target, the last stored shape was the Shellshock
+    one, which needs a CGI environment sink, so an exploitable sink reported
+    `negative` for all 19. The pre-flight names each component of the count,
+    because this fires more often than anything else RCEKit sends and that
+    number is the operator's to judge rather than the tool's to hide.
   - **The control is triggered too**, so the control and every later read differ
     in the payload and in nothing else — the discipline the chain control
     follows by being a whole chain run. Without it, anything the trigger itself
