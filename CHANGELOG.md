@@ -10,12 +10,14 @@ formats, or the template schema.
 
 ### Documentation
 
-- **Two bench notes still named a blocker that phase 3 removed.** The
+- **Two bench notes still named a blocker that had already been removed.** The
   second-order row said "the reason is the harness" and the Chartbrew paragraph
   said "there is no setup hook in the runner" — both true when written, both
   false the moment a chain became the delivery the engine drives. A reason that
   has expired is worse than no reason: it sends the next reader to fix something
-  already fixed, and it hides whatever is actually in the way now.
+  already fixed, and it hides whatever is actually in the way now. Both now
+  describe the state of the code, which is the only thing a reader of this
+  repository can check them against.
 
   The harness half is settled and **measured rather than argued**. Run against a
   local target whose store sits behind a login — `POST /login` hands out a
@@ -32,9 +34,18 @@ formats, or the template schema.
   says what a target must look like precisely enough to screen one — the store
   may be authenticated, the **render may not be** behind the chain's own
   session, because `_fire_observed` takes the flags' url, method, data and
-  headers and nothing else: no cookie jar, no chain state, no `{var}`. 16
-  vulhub environments were screened by class, and the note records each one's
-  disqualifier.
+  headers and nothing else: no cookie jar, no chain state, no `{var}`.
+
+  **All 332 environments** in a vulhub checkout were then screened against that,
+  and the note records the funnel rather than only the conclusion: 168 removed
+  by a class that cannot be a deferred execution sink, 164 left, 18 whose own
+  documentation describes both a store and a later act on it, and 0 surviving a
+  read of those 18. They are grouped by the seven reasons they failed rather
+  than by product, because the reason is the part that generalises — in-band
+  renders, `write`'s shape, non-HTTP protocols, no computed value reaching any
+  response, library demos with no HTTP surface, an interactive setup wizard, and
+  client-side execution. `cacti/CVE-2025-24367` is the closest miss and is named
+  as such.
 
   Chartbrew's obstacle did not disappear, it **moved** — from the harness, where
   it was fixable, to the oracle, where it is not cheaply: a chain can now reach
