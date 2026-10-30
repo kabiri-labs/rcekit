@@ -624,6 +624,50 @@ does not already contain it. That last rule is why `file` and `oob` sit this out
 — their expected value is a token that rides in the payload, so a page that
 simply stores and re-renders your input would hand it back and "confirm" nothing.
 
+### When nothing runs until something asks
+
+Inject, then read is two acts, and some sinks need three. A payload sitting in a
+queue until a worker drains it, a report generated on demand, a cache rebuilt by
+an admin action, a "run now" button — the observed page never changes, because
+the work never happens. Polling it is reading a page that will not move, and the
+run comes back `negative` about a sink that would execute the moment anything
+asked it to.
+
+`--observe-trigger` is the missing middle:
+
+```bash
+python rcekit.py --acknowledge-consent \
+  --verify-url "https://target.example/store" --verify-method POST \
+  --verify-data "cmd=FUZZ" --methods reflected \
+  --observe-url "https://target.example/results" \
+  --observe-trigger "https://target.example/jobs/run" \
+  --observe-poll 5 --observe-timeout 60
+```
+
+Measured against a target that queues the value on `POST /store`, executes it
+only when `/run` is asked, and shows the output on `/out`: without the trigger
+the run reports `negative=19`; with it, `executed=19`, on the observed channel
+with the same differential as any other second-order finding.
+
+Four things to know:
+
+- **It fires before each poll**, not once. A single fire can race the store it
+  is meant to process, and the shapes this reaches — drain the queue, rebuild
+  the cache — are ones a target is expected to tolerate being asked twice. The
+  count is `polls + 1`, and the pre-flight prints it before any of it happens.
+- **The control is triggered too**, so the control and every later read differ
+  in the payload and in nothing else. Without that, anything the trigger itself
+  renders would be in the reads and not in the control.
+- **Its own response is never read for evidence.** The trigger is fired to cause
+  work; reading what it returns would be a second oracle with no control behind
+  it. A trigger that echoes your payload confirms nothing.
+- **A trigger needs `--observe-url`.** Alone it would send a request and measure
+  nothing, so the run refuses it.
+
+If the endpoint that runs the work needs the same session as the one that shows
+it, `--observe-trigger-request` takes a captured request instead — no `FUZZ`
+marker, because it is fired, never injected into.
+
 Two costs to know about. The observed page is read once after **each** probe as
 well as polled after the batch, because a store that *overwrites* (a profile
 field) keeps only the last probe by the time a batch poll runs — so a run with

@@ -340,6 +340,45 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.10.0] — 2026-10-30
+
+### Added
+
+- **`--observe-trigger`, because second-order detection has three acts and the
+  engine had two.** Inject then read is enough for a payload the target renders
+  on its own next page load. It is not enough for one waiting to be run: a queue
+  a worker drains, a report generated on demand, a cache rebuilt by an admin
+  action, a "run now" button. There the observed page never changes, because the
+  work never happens — so polling it reads a page that will not move, and the
+  run reports `negative` about a sink that would execute the moment anything
+  asked it to.
+
+  Measured against a target that queues the value on `POST /store`, executes it
+  only when `/run` is asked, and renders the output on `/out`: the same probes
+  report `negative=19` without the trigger and `executed=19` with it, on the
+  observed channel with the same differential as any other second-order finding.
+  `--observe-trigger-request` takes a captured request instead, for a trigger
+  behind the same session as the page that shows the result.
+
+  Four properties, each of which is a decision rather than a default:
+
+  - **Fired before each poll**, not once. A single fire can race the store it is
+    meant to process, and the shapes this reaches are ones a target is expected
+    to tolerate being asked twice. The count is `polls + 1` and the pre-flight
+    prints it, because a trigger is usually a state-changing request and that
+    number is the operator's to judge, not the tool's to hide.
+  - **The control is triggered too**, so the control and every later read differ
+    in the payload and in nothing else — the discipline the chain control
+    follows by being a whole chain run. Without it, anything the trigger itself
+    renders would be in the reads and absent from the control.
+  - **Its own response is never read for evidence.** The trigger is fired to
+    cause work; reading what it returns would be a second oracle with no control
+    behind it. A test points the trigger at an endpoint that echoes the payload
+    and the observed channel at one that does not: nothing is confirmed.
+  - **It requires `--observe-url`.** Alone it would send a request and measure
+    nothing, which is a run that tests nothing while looking busy, so the run
+    refuses it by name.
+
 ## [3.9.0] — 2026-10-30
 
 ### Added
@@ -3653,6 +3692,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.10.0]: https://github.com/kabiri-labs/rcekit/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/kabiri-labs/rcekit/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/kabiri-labs/rcekit/compare/v3.7.1...v3.8.0
 [3.7.1]: https://github.com/kabiri-labs/rcekit/compare/v3.7.0...v3.7.1
