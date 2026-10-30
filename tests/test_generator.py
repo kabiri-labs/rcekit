@@ -2114,6 +2114,48 @@ class ChainAsDetectionCarrierTestCase(unittest.TestCase):
         self.assertIsNone(status, "a step that never completed has no status")
         self.assertEqual(channels, [], "no channels, so every oracle reports error")
 
+    def test_a_failed_step_is_an_error_even_when_the_confirm_step_answers(self):
+        """A chain fails in places the confirm step cannot see.
+
+        The finding this pins, and it was a false clean of exactly the kind this
+        project exists to refuse. `ChainDelivery.send` read only the confirm
+        step's status, so an injected step that never connected left the confirm
+        step answering perfectly well about a payload it never received — and
+        the computed value being absent from that response read as `negative`.
+
+        `ChainOutcome` had carried a `delivery_failed` flag for this since the
+        change was written. It was set, returned, and never read.
+
+        Paired with a fully reachable chain below it, because a guard that
+        answers `None` unconditionally would pass this half on its own."""
+        import socket
+        with chain_target(True) as (base, _counter):
+            closed = socket.socket()
+            closed.bind(("127.0.0.1", 0))
+            dead = closed.getsockname()[1]
+            closed.close()
+            chain = {
+                "base": base,
+                "confirm_step": "check",
+                "steps": [
+                    {"name": "inject", "method": "POST",
+                     "path": f"http://127.0.0.1:{dead}/run", "form": {"cmd": "FUZZ"}},
+                    {"name": "check", "method": "GET", "path": "/session"},
+                ],
+            }
+            broken = rcekit.ChainDelivery(self.gen, chain).send("; id", 3.0)
+            # The near neighbour: every step reachable, same shape otherwise.
+            chain["steps"][0]["path"] = "/run"
+            whole = rcekit.ChainDelivery(self.gen, chain).send("; id", 3.0)
+        status, detail, channels, _elapsed = broken
+        self.assertIsNone(status, "a step that never completed cannot yield a verdict")
+        self.assertEqual(channels, [], "no channels, so every oracle reports error")
+        self.assertIn("inject", detail, "the detail must name the step that failed")
+        self.assertIsNotNone(whole[0],
+                             "a reachable chain must still produce a status, or this "
+                             "guard would pass by always failing")
+        self.assertTrue(whole[2], "and its response channels")
+
     def test_the_cost_line_counts_chain_steps_not_probes(self):
         """The pre-flight must not understate the traffic by the chain's length.
 
