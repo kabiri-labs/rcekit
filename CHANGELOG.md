@@ -389,6 +389,16 @@ formats, or the template schema.
   other, from a request that never completed, which yields no channels and so
   reports `error` through every oracle.
 
+  **Any** failed step, not only the confirm one, and that distinction is the
+  whole of a chain being several requests. A chain fails in places the confirm
+  step cannot see: an injected step that never connected leaves the confirm step
+  answering perfectly well about a payload it never received. Measured against
+  an unreachable injection step followed by a reachable confirm step, reading
+  only the confirm status reported `negative` — the false clean this project is
+  built to refuse, reached through the code written to refuse it. Failed steps
+  are now collected by name and the detail says which, because "something in the
+  chain broke" is not something an operator can act on.
+
 - **The pre-flight counts chain steps.** A chain run is one probe and several
   requests, and the plan line counts payloads — so without this the traffic was
   understated by the length of the chain, for the operator who has least room to

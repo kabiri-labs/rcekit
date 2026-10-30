@@ -748,7 +748,18 @@ class ChainOutcome:
     ctx: Dict[str, str]
     confirm: ChainStepResult
     injected_elapsed: float = 0.0
-    delivery_failed: bool = False
+    # Every step whose request never completed, named. A chain fails in places
+    # the confirm step cannot see: a login that never connected leaves the
+    # injected step answering 403, and an injected step that never connected
+    # leaves the confirm step answering perfectly well about a payload it never
+    # received. Reading only the confirm step's status calls both of those
+    # `negative`, which is a run that tested nothing reported as a target with
+    # nothing to find.
+    failed_steps: List[str] = dataclass_field(default_factory=list)
+
+    @property
+    def delivery_failed(self) -> bool:
+        return bool(self.failed_steps)
 
 
 class ProbeDelivery:
@@ -853,11 +864,28 @@ class ChainDelivery(ProbeDelivery):
             callback_host=self.callback_host, listen_port=self.listen_port,
             mark=self.mark)
         confirm = outcome.confirm
-        if confirm.status is None:
+        if confirm.status is None or outcome.failed_steps:
             # No channels, exactly as a failed single request produces none, so
-            # every oracle reports `error` rather than `negative`. A chain whose
-            # login step never answered has not found the sink clean.
-            return None, confirm.body, [], outcome.injected_elapsed
+            # every oracle reports `error` rather than `negative`.
+            #
+            # `failed_steps` and not just the confirm step's status, which is
+            # the whole of a chain being several requests. A chain fails in
+            # places the confirm step cannot see: an injected step that never
+            # connected leaves the confirm step answering perfectly well about
+            # a payload it never received, and reading only that status reports
+            # `negative` about a sink nothing was ever put in front of.
+            # Measured against an unreachable injection step followed by a live
+            # confirm step, which is how this was found.
+            #
+            # Any failed step, not only the ones before the confirm: the
+            # conservative direction is the correct one here. An `error` the
+            # operator investigates costs a look; a `negative` costs the
+            # finding.
+            detail = confirm.body
+            if outcome.failed_steps:
+                detail = (f"chain step(s) {', '.join(outcome.failed_steps)} never "
+                          f"completed: {confirm.body}")
+            return None, detail, [], outcome.injected_elapsed
         channels = self.gen._response_channels(
             confirm.headers, confirm.body, confirm.reason, confirm.url, self.url)
         return confirm.status, confirm.body, channels, outcome.injected_elapsed
@@ -4136,7 +4164,7 @@ class RCEKit:
                                       "context": "chain"}
         confirm = ChainStepResult(status=None, body="", headers=[], reason=None, url=None)
         injected_elapsed = 0.0
-        delivery_failed = False
+        failed_steps: List[str] = []
         for index, step in enumerate(steps):
             path = subst(step["path"], ctx)
             url = path if path.startswith("http") else base + path
@@ -4210,7 +4238,7 @@ class RCEKit:
                 # is how the engine tells "the target answered badly" from
                 # "the target never answered".
                 text = str(exc)
-                delivery_failed = True
+                failed_steps.append(str(step.get("name", index)))
             elapsed = time.time() - started
             if carried_mark:
                 injected_elapsed = elapsed
@@ -4225,7 +4253,7 @@ class RCEKit:
                                           url=final_url or url)
         return ChainOutcome(ctx=ctx, confirm=confirm,
                             injected_elapsed=injected_elapsed,
-                            delivery_failed=delivery_failed)
+                            failed_steps=failed_steps)
 
     def run_verification_chain(self, records: Iterator[PayloadRecord], chain: Dict[str, Any],
                                delay: float = 0.0, timeout: float = 20.0,
