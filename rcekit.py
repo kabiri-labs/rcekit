@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.8.0"
+__version__ = "3.9.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -718,6 +718,153 @@ class PayloadRecord:
     oob_host: Optional[str] = None
     match: Optional[str] = None
     expected_delay_ms: Optional[int] = None
+
+
+@dataclass
+class ChainStepResult:
+    """One chain step's response, in the shape a response channel is built from.
+
+    ``status is None`` means the request never completed -- a connection
+    refused, a TLS failure, a timeout. It is kept separate from a 4xx or 5xx,
+    whose body is read like any other, because the two mean opposite things
+    about the target: one is a target that answered and one is a target that was
+    never reached, and only the second must never be read as "not vulnerable"."""
+    status: Optional[int]
+    body: str
+    headers: List[Tuple[str, str]] = dataclass_field(default_factory=list)
+    reason: Optional[str] = None
+    url: Optional[str] = None
+
+
+@dataclass
+class ChainOutcome:
+    """What one run of a chain produced.
+
+    ``confirm`` is the step whose response the oracle reads. ``injected_elapsed``
+    times only the last step that carried the marker, because a login and a CSRF
+    fetch are not part of what the sink did. ``delivery_failed`` is true when any
+    step never completed, which is a statement about the run rather than about
+    the sink."""
+    ctx: Dict[str, str]
+    confirm: ChainStepResult
+    injected_elapsed: float = 0.0
+    delivery_failed: bool = False
+
+
+class ProbeDelivery:
+    """How one probe's payload reaches the target, and what comes back.
+
+    A chain is a different **transport**, not a different oracle. Every
+    detection method was written against ``(status, body, channels, elapsed)``
+    and none of them needs to know how many requests produced it -- so the
+    engine asks a delivery for that tuple and keeps its oracles, its
+    payload-free control, its budget and its tier vocabulary unchanged.
+
+    The alternative was a second engine, which is what the chain had been: it
+    carried the session machinery and none of the oracles, so every sink behind
+    a login was reachable only by the weaker path. One of the two had to learn
+    the other's trick, and transport is the smaller thing to abstract.
+
+    ``steps`` is how many requests one ``send`` costs, which the budget and the
+    pre-flight cost line both need: metering a chain as one request understates
+    a run by the length of the chain."""
+
+    steps = 1
+    url: Optional[str] = None
+    headers: Optional[List[str]] = None
+
+    def send(self, payload: str, timeout: float
+             ) -> Tuple[Optional[int], str, List[Tuple[str, str]], float]:
+        raise NotImplementedError
+
+    def describe(self) -> str:
+        raise NotImplementedError
+
+
+class SingleRequestDelivery(ProbeDelivery):
+    """One probe, one request -- the shape the engine has always had.
+
+    Holds the nine delivery parameters that used to be threaded through
+    ``run_detection`` and ``_escalate`` side by side. That threading is not just
+    verbose: inserting one of them in the middle rather than appending it once
+    moved two positional slots and raised ``TypeError`` for a positional caller,
+    which is a defect a bundle cannot have."""
+
+    def __init__(self, gen: "RCEKit", url: str, method: str, data: Optional[str],
+                 headers: Optional[List[str]], url_location: str, body_location: str,
+                 mark: str = "FUZZ", header_location: Any = "header"):
+        self.gen = gen
+        self.url = url
+        self.method = method
+        self.data = data
+        self.headers = headers
+        self.url_location = url_location
+        self.body_location = body_location
+        self.mark = mark
+        self.header_location = header_location
+
+    def send(self, payload: str, timeout: float
+             ) -> Tuple[Optional[int], str, List[Tuple[str, str]], float]:
+        return self.gen._fire_channels(
+            payload, self.url, self.method, self.data, self.headers,
+            self.url_location, self.body_location, timeout, self.mark,
+            self.header_location)
+
+    def describe(self) -> str:
+        return f"{self.method} {self.url}"
+
+
+class ChainDelivery(ProbeDelivery):
+    """One probe through an ordered, session-aware chain.
+
+    Reaches what a single stateless request cannot: a sink behind a login, a
+    payload carried in an upload's content, a trigger that runs the delivery
+    minutes later. What it hands back is what any other delivery hands back, so
+    the oracles are the ones that already exist.
+
+    A fresh cookie jar per probe, which is the expensive choice and the correct
+    one. Sharing a session across probes would cost one login instead of one per
+    probe, and would also let a probe's own state reach the next -- the thing
+    the payload-free control exists to rule out. Honest cost first; a shared
+    session is a later option with its own risk to argue."""
+
+    def __init__(self, gen: "RCEKit", chain: Dict[str, Any], mark: str = "FUZZ",
+                 listener: Optional["OOBListener"] = None,
+                 callback_host: Optional[str] = None, listen_port: int = 0):
+        self.gen = gen
+        self.chain = chain
+        self.mark = mark
+        self.listener = listener
+        self.callback_host = callback_host
+        self.listen_port = listen_port
+        self.url = (chain.get("base") or "").rstrip("/")
+        self.headers = None
+
+    @property
+    def steps(self) -> int:  # type: ignore[override]
+        return max(1, len(self.chain.get("steps") or []))
+
+    def send(self, payload: str, timeout: float
+             ) -> Tuple[Optional[int], str, List[Tuple[str, str]], float]:
+        token = "".join(random.choice(string.ascii_lowercase + string.digits)
+                        for _ in range(12))
+        outcome = self.gen._run_chain_steps(
+            self.chain, payload, token, timeout, listener=self.listener,
+            callback_host=self.callback_host, listen_port=self.listen_port,
+            mark=self.mark)
+        confirm = outcome.confirm
+        if confirm.status is None:
+            # No channels, exactly as a failed single request produces none, so
+            # every oracle reports `error` rather than `negative`. A chain whose
+            # login step never answered has not found the sink clean.
+            return None, confirm.body, [], outcome.injected_elapsed
+        channels = self.gen._response_channels(
+            confirm.headers, confirm.body, confirm.reason, confirm.url, self.url)
+        return confirm.status, confirm.body, channels, outcome.injected_elapsed
+
+    def describe(self) -> str:
+        return f"chain {self.url} ({self.steps} steps)"
+
 
 class RCEKit:
     def __init__(
@@ -3153,14 +3300,11 @@ class RCEKit:
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
     def _escalate(self, meth: "DetectionMethod", probe: "Probe",
-                  record: "PayloadRecord", url: str,
-                  method: str, data: Optional[str], headers: Optional[List[str]],
-                  url_location: str, body_location: str, timeout: float,
+                  record: "PayloadRecord", delivery: "ProbeDelivery",
+                  timeout: float,
                   control_status: Optional[int],
                   started_requests: int = 0,
-                  max_payloads: Optional[int] = None,
-                  mark: str = "FUZZ",
-                  header_location: Any = "header"
+                  max_payloads: Optional[int] = None
                   ) -> Optional[Tuple[str, Any, Any, Any, float]]:
         """Re-send a refused probe, climbing the rungs to the run's ceiling.
 
@@ -3228,9 +3372,7 @@ class RCEKit:
             climbed = evade_body(probe.payload, rung, opens_closed=opens_closed)
             if climbed == probe.payload:
                 continue
-            status, body, chans, elapsed = self._fire_channels(
-                climbed, url, method, data, headers, url_location, body_location,
-                timeout, mark, header_location)
+            status, body, chans, elapsed = delivery.send(climbed, timeout)
             # A retry is a request the target receives, so it is charged to the
             # same meter as the probe that prompted it. `escalated_probes`
             # counts these too, but that number describes the ladder rather
@@ -3355,7 +3497,15 @@ class RCEKit:
                       mark: str = "FUZZ",
                       # Appended for the same reason, and the comment above is
                       # the evidence rather than the preference.
-                      header_location: Any = "header") -> List[Dict[str, Any]]:
+                      header_location: Any = "header",
+                      # Appended too, same reason. `None` builds a
+                      # SingleRequestDelivery from the arguments above, so every
+                      # existing caller is unchanged and the single-request path
+                      # sends the same requests in the same order. A
+                      # ChainDelivery here runs the whole engine -- oracles,
+                      # control, budget, tiers -- through a multi-step chain.
+                      delivery: Optional["ProbeDelivery"] = None
+                      ) -> List[Dict[str, Any]]:
         """Method-driven RCE detection against an AUTHORISED target.
 
         For each selected :class:`DetectionMethod`, build probes from the
@@ -3378,6 +3528,10 @@ class RCEKit:
         self.config_evade = (config or {}).get("evade") or "none"
         resolved_body_location = body_location or self._detect_body_location(
             data, headers, mark)
+        if delivery is None:
+            delivery = SingleRequestDelivery(
+                self, url, method, data, headers, url_location,
+                resolved_body_location, mark, header_location)
         selected = [DETECTION_METHODS[name](self, config) for name in methods
                     if name in DETECTION_METHODS]
 
@@ -3386,9 +3540,13 @@ class RCEKit:
         # to hold.
         # The status is kept, not discarded: a probe refused where this got
         # through is a payload a filter rejected, and that is not a negative.
-        control_status, control_body, control_channels, _ = self._fire_channels(
-            f"rcekit-control-{self._generate_canary()}", url, method, data, headers,
-            url_location, resolved_body_location, timeout, mark, header_location)
+        # Through the delivery, so a chain's control is a whole chain run with a
+        # canary in the payload's place -- the same steps, the same session, the
+        # same confirm step, differing from a probe in the payload and nothing
+        # else. A control taken any other way would not be comparable to what
+        # it is meant to rule out.
+        control_status, control_body, control_channels, _ = delivery.send(
+            f"rcekit-control-{self._generate_canary()}", timeout)
 
         # A blob point needs a *second* baseline, and only for refusal
         # classification. The control above carries the canary inside the blob,
@@ -3506,10 +3664,8 @@ class RCEKit:
                         for probe in batch:
                             fired += 1
                             req_timeout = timeout + (probe.delay_s or 0.0) + 2.0
-                            status, body, chans, elapsed = self._fire_channels(
-                                probe.payload, url, method, data, headers, url_location,
-                                resolved_body_location, req_timeout, mark,
-                                header_location)
+                            status, body, chans, elapsed = delivery.send(
+                                probe.payload, req_timeout)
                             self.delivered_probes += 1
                             # The same retry the per-probe path makes. `time`,
                             # `oob`, `lookup` and `deser` live in this branch,
@@ -3526,10 +3682,8 @@ class RCEKit:
                                     and not self._budget_spent(started_requests,
                                                                max_payloads)):
                                 climbed = self._escalate(
-                                    meth, probe, record, url, method, data, headers,
-                                    url_location, resolved_body_location, req_timeout,
-                                    control_status, started_requests, max_payloads, mark,
-                                    header_location)
+                                    meth, probe, record, delivery, req_timeout,
+                                    control_status, started_requests, max_payloads)
                                 if climbed is not None:
                                     sent, status, body, chans, elapsed = climbed
                                     probe = dataclass_replace(probe, payload=sent)
@@ -3685,9 +3839,7 @@ class RCEKit:
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout)
                     seen.add(probe.payload)
-                    status, body, chans, elapsed = self._fire_channels(
-                        probe.payload, url, method, data, headers, url_location,
-                        resolved_body_location, timeout, mark, header_location)
+                    status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
                     # A followup fetch (file-based self-OOB): retrieve the file the
                     # probe asked the target to write. Its body is the confirmation
@@ -3711,10 +3863,8 @@ class RCEKit:
                     if (payload_refused(status, control_status)
                             and not self._budget_spent(started_requests, max_payloads)):
                         climbed = self._escalate(
-                            meth, probe, record, url, method, data, headers,
-                            url_location, resolved_body_location, timeout,
-                            control_status, started_requests, max_payloads, mark,
-                            header_location)
+                            meth, probe, record, delivery, timeout,
+                            control_status, started_requests, max_payloads)
                         if climbed is not None:
                             sent, status, body, chans, elapsed = climbed
                             probe = dataclass_replace(probe, payload=sent)
@@ -3929,6 +4079,154 @@ class RCEKit:
                 return name
         return None
 
+    def _run_chain_steps(self, chain: Dict[str, Any], payload: str, token: str,
+                         timeout: float, listener: Optional["OOBListener"] = None,
+                         callback_host: Optional[str] = None, listen_port: int = 0,
+                         mark: str = "FUZZ") -> "ChainOutcome":
+        """Run one chain once, with ``payload`` substituted at ``mark``.
+
+        Extracted from :meth:`run_verification_chain` so the detection engine
+        can drive the same steps without a second copy of the substitution,
+        multipart and extraction logic. Seventy lines duplicated between two
+        delivery paths is seventy lines that drift.
+
+        The return value carries more than the legacy oracle needs, and the
+        extra is what makes a chain usable as a detection carrier:
+
+        * ``confirm.status`` is ``None`` when a request never completed, and an
+          integer when the target answered -- including 4xx and 5xx, whose
+          bodies are read rather than discarded. The legacy path put the
+          exception's text in the body and had no status at all, which for a
+          value oracle would turn a connectivity failure into `negative`: the
+          one reading this project refuses, since a target that cannot be
+          reached has not been found clean.
+        * ``confirm.headers``, ``reason`` and ``url`` so the engine can build
+          the same response channels a single request gets. A computed value
+          that surfaces in a header or a redirect target is found on a chain
+          for the same reason it is found without one.
+        * ``injected_elapsed`` times the *last step carrying the marker* rather
+          than the whole chain. A login and a CSRF fetch are not part of what
+          the sink did, and including them would make any timing read nonsense.
+          The marker may appear in several steps -- the chain substitutes in all
+          of them -- and the last is the one whose response could first show an
+          effect.
+        """
+        import time, http.cookiejar, urllib.request, urllib.parse
+
+        base = chain.get("base", "").rstrip("/")
+        steps = chain["steps"]
+        confirm_key = chain.get("confirm_step")
+
+        def subst(text: str, ctx: Dict[str, str]) -> str:
+            for key, val in ctx.items():
+                text = text.replace("{" + key + "}", val)
+            return text
+
+        cookie_jar = http.cookiejar.CookieJar()
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(cookie_jar))
+        # Seed the token so a profile can give each payload a unique filename /
+        # path ({token}) — essential when delivery writes to a shared location
+        # and an async trigger would otherwise read another payload's content.
+        ctx: Dict[str, str] = {"token": token}
+        if listener is not None and callback_host:
+            callback = f"http://{callback_host}:{listen_port}/{token}"
+            payload = payload.replace("{callback}", callback)
+            listener.tokens[token] = {"payload": payload, "category": "chain",
+                                      "context": "chain"}
+        confirm = ChainStepResult(status=None, body="", headers=[], reason=None, url=None)
+        injected_elapsed = 0.0
+        delivery_failed = False
+        for index, step in enumerate(steps):
+            path = subst(step["path"], ctx)
+            url = path if path.startswith("http") else base + path
+            headers = {k: subst(v, ctx).replace(mark, payload)
+                       for k, v in (step.get("headers") or {}).items()}
+            data = None
+            carried_mark = any(
+                mark in str(part) for part in (
+                    step.get("path", ""), step.get("body", ""), step.get("json", ""),
+                    *(step.get("form") or {}).values(),
+                    *(step.get("headers") or {}).values(),
+                    json.dumps(step.get("multipart") or {}),
+                ))
+            if "multipart" in step:
+                multipart = step["multipart"]
+                boundary = "----rcekitChain"
+                parts = []
+                for field_name, field_value in (multipart.get("fields") or {}).items():
+                    parts.append(
+                        f"--{boundary}\r\nContent-Disposition: form-data; "
+                        f"name=\"{field_name}\"\r\n\r\n"
+                        f"{subst(str(field_value), ctx).replace(mark, payload)}\r\n")
+                file_part = multipart.get("file")
+                body = "".join(parts).encode()
+                if file_part:
+                    content = subst(str(file_part.get("content", "")), ctx).replace(mark, payload)
+                    filename = subst(str(file_part.get("filename", "file")), ctx).replace(mark, payload)
+                    body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                             f"name=\"{file_part['field']}\"; "
+                             f"filename=\"{filename}\"\r\n"
+                             f"Content-Type: application/octet-stream\r\n\r\n").encode() + content.encode()
+                body += f"\r\n--{boundary}--\r\n".encode()
+                data = body
+                headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+            elif "json" in step:
+                data = subst(step["json"], ctx).replace(mark, payload).encode()
+                headers.setdefault("Content-Type", "application/json")
+            elif "form" in step:
+                form = {k: subst(str(v), ctx).replace(mark, payload)
+                        for k, v in step["form"].items()}
+                data = urllib.parse.urlencode(form).encode()
+                headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+            elif "body" in step:
+                data = subst(step["body"], ctx).replace(mark, payload).encode()
+            request = urllib.request.Request(
+                url, data=data, headers=headers,
+                method=step.get("method", "GET" if data is None else "POST"))
+            status: Optional[int] = None
+            response_headers: List[Tuple[str, str]] = []
+            reason: Optional[str] = None
+            final_url: Optional[str] = None
+            started = time.time()
+            try:
+                with opener.open(request, timeout=timeout) as response:
+                    text = decode_response_body(
+                        response.read(), response.headers.get("Content-Encoding"))
+                    status = getattr(response, "status", None) or response.getcode()
+                    response_headers = list(response.headers.items())
+                    reason = getattr(response, "reason", None)
+                    final_url = getattr(response, "url", None)
+            except urllib.error.HTTPError as exc:
+                text = decode_response_body(
+                    exc.read(), exc.headers.get("Content-Encoding"))
+                status = exc.code
+                response_headers = list(exc.headers.items())
+                reason = getattr(exc, "reason", None)
+                final_url = getattr(exc, "url", None)
+            except Exception as exc:
+                # The legacy oracle reads this text and nothing else, so it
+                # keeps the message it always had. `status` stays None, which
+                # is how the engine tells "the target answered badly" from
+                # "the target never answered".
+                text = str(exc)
+                delivery_failed = True
+            elapsed = time.time() - started
+            if carried_mark:
+                injected_elapsed = elapsed
+            for var, pattern in (step.get("extract") or {}).items():
+                found = re.search(pattern, text)
+                if found:
+                    ctx[var] = found.group(1)
+            if confirm_key in (step.get("name"), index) or (
+                    confirm_key is None and index == len(steps) - 1):
+                confirm = ChainStepResult(status=status, body=text,
+                                          headers=response_headers, reason=reason,
+                                          url=final_url or url)
+        return ChainOutcome(ctx=ctx, confirm=confirm,
+                            injected_elapsed=injected_elapsed,
+                            delivery_failed=delivery_failed)
+
     def run_verification_chain(self, records: Iterator[PayloadRecord], chain: Dict[str, Any],
                                delay: float = 0.0, timeout: float = 20.0,
                                max_payloads: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -3963,74 +4261,11 @@ class RCEKit:
             listener.start_http(listen_port)
             logger.info("Chain OOB listener on port %s", listen_port)
 
-        def subst(text: str, ctx: Dict[str, str]) -> str:
-            for key, val in ctx.items():
-                text = text.replace("{" + key + "}", val)
-            return text
-
         def run_steps(payload: str, token: str) -> Tuple[Dict[str, str], str]:
-            cj = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-            # Seed the token so a profile can give each payload a unique filename /
-            # path ({token}) — essential when delivery writes to a shared location
-            # and an async trigger would otherwise read another payload's content.
-            ctx: Dict[str, str] = {"token": token}
-            if listener is not None and callback_host:
-                cb = f"http://{callback_host}:{listen_port}/{token}"
-                payload = payload.replace("{callback}", cb)
-                listener.tokens[token] = {"payload": payload, "category": "chain", "context": "chain"}
-            confirm_body = ""
-            for idx, step in enumerate(steps):
-                path = subst(step["path"], ctx)
-                url = path if path.startswith("http") else base + path
-                headers = {k: subst(v, ctx).replace("FUZZ", payload)
-                           for k, v in (step.get("headers") or {}).items()}
-                data = None
-                if "multipart" in step:
-                    mp = step["multipart"]
-                    boundary = "----rcekitChain"
-                    parts = []
-                    for fname, fval in (mp.get("fields") or {}).items():
-                        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{fname}\"\r\n\r\n"
-                                     f"{subst(str(fval), ctx).replace('FUZZ', payload)}\r\n")
-                    fl = mp.get("file")
-                    body = "".join(parts).encode()
-                    if fl:
-                        content = subst(str(fl.get("content", "")), ctx).replace("FUZZ", payload)
-                        filename = subst(str(fl.get("filename", "file")), ctx).replace("FUZZ", payload)
-                        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{fl['field']}\"; "
-                                 f"filename=\"{filename}\"\r\n"
-                                 f"Content-Type: application/octet-stream\r\n\r\n").encode() + content.encode()
-                    body += f"\r\n--{boundary}--\r\n".encode()
-                    data = body
-                    headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-                elif "json" in step:
-                    data = subst(step["json"], ctx).replace("FUZZ", payload).encode()
-                    headers.setdefault("Content-Type", "application/json")
-                elif "form" in step:
-                    form = {k: subst(str(v), ctx).replace("FUZZ", payload) for k, v in step["form"].items()}
-                    data = urllib.parse.urlencode(form).encode()
-                    headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
-                elif "body" in step:
-                    data = subst(step["body"], ctx).replace("FUZZ", payload).encode()
-                req = urllib.request.Request(url, data=data, headers=headers,
-                                             method=step.get("method", "GET" if data is None else "POST"))
-                try:
-                    with opener.open(req, timeout=timeout) as resp:
-                        text = decode_response_body(
-                            resp.read(), resp.headers.get("Content-Encoding"))
-                except urllib.error.HTTPError as exc:
-                    text = decode_response_body(
-                        exc.read(), exc.headers.get("Content-Encoding"))
-                except Exception as exc:
-                    text = str(exc)
-                for var, rgx in (step.get("extract") or {}).items():
-                    m = re.search(rgx, text)
-                    if m:
-                        ctx[var] = m.group(1)
-                if confirm_key in (step.get("name"), idx) or (confirm_key is None and idx == len(steps) - 1):
-                    confirm_body = text
-            return ctx, confirm_body
+            outcome = self._run_chain_steps(
+                chain, payload, token, timeout,
+                listener=listener, callback_host=callback_host, listen_port=listen_port)
+            return outcome.ctx, outcome.confirm.body
 
         results: List[Dict[str, Any]] = []
         seen: Set[str] = set()
@@ -7558,6 +7793,15 @@ class DeserSink(DetectionMethod):
         return Verdict("inconclusive", "no deserialization probe produced a decision")
 
 
+# Methods a chain cannot carry, named here rather than at the one place that
+# checks so the reason sits with the registry it qualifies. Both read the shape
+# of a response *series* rather than one response: `time` fits a regression to
+# response time, and `boolean` compares response shape across a shuffled series
+# with anchors either side. A chain's setup steps and its per-probe session
+# change that series by construction, so what either would measure is the
+# carrier rather than the sink.
+CHAIN_UNSUPPORTED_METHODS = frozenset({"time", "boolean"})
+
 DETECTION_METHODS = {
     ReflectedMath.name: ReflectedMath,
     FileBased.name: FileBased,
@@ -10318,7 +10562,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not oob_domain:
             oob_domain = "oob.interact.sh"
 
-    if args.verify_chain:
+    # Without `--methods` this is the legacy path and its own oracle, kept
+    # working and reported in its own tiers. With `--methods` the chain becomes
+    # a delivery the detection engine drives, and the block below handles it
+    # alongside --verify-url and -r so there is one report, one budget and one
+    # set of tiers rather than a second copy of each.
+    if args.verify_chain and not args.methods:
         if not args.acknowledge_consent:
             print("[!] --verify-chain actively sends payloads to the target. Re-run with "
                   "--acknowledge-consent to confirm you are authorised to test it.")
@@ -10357,17 +10606,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "fire reverse shells, download-execute, credential access, lateral movement and OOB.")
         print(f"[verify-chain] {chain.get('base')}  ({len(chain.get('steps', []))} steps, "
               f"{len(records)} payloads)  (authorised target)")
-        if args.methods:
-            # Said before the traffic, not after it. This path does not consult
-            # `--methods` at all, so a run that silently accepted the flag would
-            # deliver the corpus oracle while the operator believed they had
-            # asked for a tiered one -- and then read a clean result as though
-            # the methods had been tried. Not a refusal: the chain run itself is
-            # still worth making, and the operator can decide once they know.
-            print("[!] --methods is NOT applied on this path: --verify-chain delivers the "
-                  "payload corpus with its own in-band oracle. The method-driven engine runs "
-                  "on --verify-url and -r. Nothing below was tested with "
-                  f"{', '.join(sorted(set(m.strip() for m in args.methods.split(',') if m.strip())))}.")
         results = generator.run_verification_chain(
             records, chain, delay=args.verify_delay, timeout=args.verify_timeout,
             max_payloads=args.max_payloads)
@@ -10403,14 +10641,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         # run here has not learned what the method-driven engine would say.
         print("[verify-chain] this path's in-band oracle reaches needs-review at best, "
               "because a static signature is not a value the target computed and no control "
-              "is taken. The oracles that reach executed in band run on --verify-url and -r "
-              "(--methods reflected, eval, ...), not on a chain. Out of band this path does "
-              "reach executed, on the callback token alone — but it is configured in the "
-              "chain profile's own 'callback_host' and 'listen_port' fields, not by "
-              "--oob-host, which this path never reads.")
+              "is taken. Add --methods to this same command and the engine's own oracles "
+              "run through these steps instead — a value computed from random operands, "
+              "differenced against a payload-free control that is a chain run of its own. "
+              "Out of band this path reaches executed on the callback token alone, "
+              "configured in the chain profile's own 'callback_host' and 'listen_port' "
+              "fields, not by --oob-host, which this path never reads.")
         return 0
 
-    if args.verify_url or args.request_file:
+    if args.verify_url or args.request_file or args.verify_chain:
         if not args.acknowledge_consent:
             print("[!] Verification actively sends payloads to the target. Re-run with "
                   "--acknowledge-consent to confirm you are authorised to test it.")
@@ -10424,6 +10663,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # carries; every other path keeps the FUZZ that the exports, the docs
         # and the inline marker all name.
         enumeration_mark = "FUZZ"
+        # Set only for a chain target; `None` keeps run_detection building its
+        # own single-request delivery, which is every other path unchanged.
+        chain_delivery: Optional[ProbeDelivery] = None
         if args.request_file:
             try:
                 with open(args.request_file, "r", encoding="utf-8") as request_fh:
@@ -10436,6 +10678,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             if not auto_kinds and any(p.lower() == "all" for p in params):
                 auto_kinds = "all"
                 params = [p for p in params if p.lower() != "all"]
+            if args.verify_chain:
+                print("[!] -r and --verify-chain are two ways to describe the same request, so "
+                      "only one can be the target. A chain profile carries its own steps, "
+                      "paths and bodies.")
+                return 1
             if auto_kinds and not args.methods:
                 print("[!] Enumerating injection points needs --methods: the classic per-payload "
                       "oracle fires a whole corpus per point, which is not a budget anyone wants "
@@ -10533,6 +10780,38 @@ def main(argv: Optional[List[str]] = None) -> int:
                     print(f"[!] This request carries {', '.join(sorted(set(exposed)))} and will be "
                           "replayed over plain HTTP. If the target is HTTPS, pass --request-scheme "
                           "https (with --insecure for a self-signed or mismatched certificate).")
+        elif args.verify_chain:
+            # A chain carries its own request shapes, so there is nothing here
+            # to build: the target is the profile's base and the marker sits in
+            # whichever step the profile put it in. `chain_delivery` is what
+            # makes the engine below drive those steps instead of one request.
+            if args.verify_url:
+                print("[!] --verify-url and --verify-chain are two ways to name the target, "
+                      "so only one can be used. A chain profile's 'base' and steps say where "
+                      "the requests go.")
+                return 1
+            try:
+                with open(args.verify_chain, "r", encoding="utf-8") as chain_file:
+                    chain = json.load(chain_file)
+            except (OSError, ValueError) as exc:
+                print(f"[!] Could not read --verify-chain {args.verify_chain}: {exc}")
+                return 1
+            steps = chain.get("steps") or []
+            if not steps:
+                print("[!] The chain profile declares no steps, so nothing would be sent.")
+                return 1
+            marked = [index for index, step in enumerate(steps)
+                      if "FUZZ" in json.dumps(step)]
+            if not marked:
+                print("[!] No FUZZ marker found in any chain step; add FUZZ where the "
+                      "payload should be injected — a step's body, json, form, a header, "
+                      "or an uploaded file's content or filename.")
+                return 1
+            verify_url = (chain.get("base") or "").rstrip("/")
+            verify_data = None
+            verify_headers = None
+            method = "CHAIN"
+            chain_delivery = ChainDelivery(generator, chain, mark="FUZZ")
         else:
             verify_url = args.verify_url
             verify_data = args.verify_data
@@ -10580,7 +10859,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if verify_max_safety == "safe":
             print("[plan] low-impact (safe) payloads only; pass --verify-active-risk intrusive to also "
                   "fire reverse shells, download-execute, credential access, lateral movement and OOB.")
-        print(f"[verify] {method} {verify_url}  (authorised target)")
+        print(f"[verify] {chain_delivery.describe() if chain_delivery else f'{method} {verify_url}'}"
+              "  (authorised target)")
         # Opt-in, method-driven detection. Additive: without --methods the
         # classic per-payload oracle below runs exactly as before. `executed`
         # and the weaker tiers are reported separately and never merged.
@@ -10591,6 +10871,33 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"[!] Unknown --methods: {', '.join(unknown)}. "
                       f"Available: {', '.join(sorted(DETECTION_METHODS))}.")
                 return 1
+            if chain_delivery is not None:
+                # Refused by name rather than dropped, which is the rule every
+                # other held-back method follows: a run that quietly tested
+                # less than it was asked to reads exactly like a clean target.
+                #
+                # Both of these measure the *shape of a response series*, and a
+                # chain changes what that series is. `time` fits a regression to
+                # response time, and a chain's own login and extraction steps
+                # move the server's timing in ways the drift term was never
+                # fitted against -- the delivery reports only the injected
+                # step's elapsed, which is the honest number and still not one
+                # measured through a chain. `boolean` compares response shape
+                # across a shuffled series and needs its anchors to hold still;
+                # a fresh session per probe is a new shape by construction.
+                #
+                # Neither runs on a chain today either, so naming them costs
+                # nothing and claims nothing. Lifting the refusal is a change to
+                # what a detection method reports, which this project does not
+                # settle on a fixture.
+                through_chain = sorted(set(method_names) & CHAIN_UNSUPPORTED_METHODS)
+                if through_chain:
+                    print(f"[!] --methods {', '.join(through_chain)} cannot run through a "
+                          "chain: both read the shape of a response *series*, and a chain's "
+                          "setup steps and per-probe session change that series rather than "
+                          "the sink. Drop them, or measure them with --verify-url / -r "
+                          "against the same sink.")
+                    return 1
             detection_config = {"webroot": args.webroot, "web_base_url": args.web_base_url,
                                 "file_write_path": args.file_write_path,
                                 "file_read_url": args.file_read_url,
@@ -11011,6 +11318,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                           f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
             else:
+                if chain_delivery is not None:
+                    # A chain run is one probe and several requests, and the
+                    # plan line above counts payloads. Without this the traffic
+                    # is understated by the length of the chain, and the
+                    # pre-flight exists for the operator who has to bound a
+                    # monitored engagement before it starts.
+                    #
+                    # `--max-payloads` is deliberately *not* converted to
+                    # requests here. It is a payload allowance, and spending it
+                    # in requests would stop a run partway through a chain --
+                    # abandoning a payload between its login and its trigger,
+                    # which leaves target state the run cannot describe. Whole
+                    # chain runs, with the request count said out loud instead.
+                    per_run = generator.estimate_detection_probes(
+                        to_send, method_names, detection_config,
+                        max_payloads=args.max_payloads)
+                    print(f"[detect] cost: ~{per_run} probe(s) x {chain_delivery.steps} "
+                          f"chain step(s) = at least "
+                          f"{(per_run + 1) * chain_delivery.steps} requests "
+                          "(the payload-free control is a chain run of its own)")
                 results = generator.run_detection(
                     to_send, url=verify_url, methods=method_names, method=method,
                     data=verify_data, headers=verify_headers, delay=args.verify_delay,
@@ -11018,6 +11345,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     url_location=args.verify_url_location, body_location=args.verify_body_location,
                     mark=enumeration_mark,
                     config=detection_config,
+                    delivery=chain_delivery,
                 )
             if args.detect_json:
                 # Written before the text report and regardless of outcome, so a

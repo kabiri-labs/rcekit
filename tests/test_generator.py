@@ -1750,11 +1750,16 @@ class VerifyChainTestCase(unittest.TestCase):
         finally:
             server.shutdown(); server.server_close()
 
-    def test_methods_is_announced_as_not_applied_on_this_path(self):
-        # This path never consults `--methods`. Accepting the flag in silence
-        # would deliver the corpus oracle while the operator believed they had
-        # asked for a tiered one, and a clean result would then read as though
-        # the methods had been tried. Said before the traffic, not after it.
+    def test_the_legacy_path_points_at_the_engine_for_a_stronger_tier(self):
+        """The closing notice names what would reach `executed`, and can.
+
+        3.8.0 printed a warning here that `--methods` was accepted and ignored
+        on this path, which was true then. It is honoured now -- the flag turns
+        the chain into a delivery the engine drives -- so that warning described
+        a version of the tool that no longer exists and was removed with the
+        condition that could no longer be true. What stays is the ceiling: this
+        oracle reaches `needs-review` and the notice says where a real tier
+        comes from."""
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             chain_path = Path(tmp) / "chain.json"
@@ -1765,14 +1770,14 @@ class VerifyChainTestCase(unittest.TestCase):
             }), encoding="utf-8")
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "--acknowledge-consent",
-                 "--verify-chain", str(chain_path), "--methods", "reflected",
+                 "--verify-chain", str(chain_path),
                  "--categories", "basic_enum", "--environments", "unix",
                  "--contexts", "raw", "--max-payloads", "1"],
                 cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
-        self.assertIn("--methods is NOT applied on this path", result.stdout)
-        self.assertIn("reflected", result.stdout)
-        # And the run says what its ceiling is, whether or not anything matched.
         self.assertIn("reaches needs-review at best", result.stdout)
+        self.assertIn("Add --methods to this same command", result.stdout)
+        self.assertNotIn("--methods is NOT applied", result.stdout,
+                         "the flag is applied now, so the old warning must be gone")
 
     def test_the_chain_reads_its_callback_config_from_the_profile_only(self):
         """`--oob-host` is not this path's callback switch, and saying it was
@@ -1792,18 +1797,27 @@ class VerifyChainTestCase(unittest.TestCase):
         with it."""
         source = Path(rcekit.__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
-        chain_fn = next(
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "run_verification_chain")
-        literals = {node.value for node in ast.walk(chain_fn)
-                    if isinstance(node, ast.Constant) and isinstance(node.value, str)}
-        names = {node.id for node in ast.walk(chain_fn) if isinstance(node, ast.Name)}
-        attrs = {node.attr for node in ast.walk(chain_fn) if isinstance(node, ast.Attribute)}
-        self.assertIn("callback_host", literals)
-        self.assertIn("listen_port", literals)
-        self.assertNotIn("oob_host", literals | names | attrs,
-                         "the chain now reads --oob-host, so the notice in main() and the "
-                         "guide and reference paragraphs that say it does not must change too")
+        # Both halves of the chain path. The step runner was extracted from the
+        # entry point, so checking only the entry point would leave the place
+        # the requests are actually built unguarded -- the near neighbour of the
+        # function the guard was written for.
+        seen_callback_host = False
+        for name in ("run_verification_chain", "_run_chain_steps"):
+            chain_fn = next(
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+            literals = {node.value for node in ast.walk(chain_fn)
+                        if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+            names = {node.id for node in ast.walk(chain_fn) if isinstance(node, ast.Name)}
+            attrs = {node.attr for node in ast.walk(chain_fn)
+                     if isinstance(node, ast.Attribute)}
+            seen_callback_host = seen_callback_host or "callback_host" in literals
+            self.assertNotIn(
+                "oob_host", literals | names | attrs,
+                f"{name} now reads --oob-host, so the notice in main() and the guide and "
+                "reference paragraphs that say it does not must change too")
+        self.assertTrue(seen_callback_host,
+                        "the profile field has to be read somewhere on this path")
 
     def test_the_closing_notice_names_the_profile_fields_not_the_flag(self):
         # The other half: the mechanism above is only useful to an operator if
@@ -1926,6 +1940,275 @@ class VerifyChainTestCase(unittest.TestCase):
             self.assertIn("callback", results[0]["detail"])
         finally:
             server.shutdown(); server.server_close()
+
+
+CHAIN_SESSION_TOKEN = "abc123"
+
+
+@contextlib.contextmanager
+def chain_target(execute):
+    """A two-step target: `/session` hands out a token, `/run` needs it.
+
+    The shape a real authenticated sink has, and the one a single stateless
+    request cannot reach: without the token from step one, step two answers 403
+    and no payload is read at all. `execute` picks whether `/run` shells the
+    value or echoes it, which is the `/vuln` versus `/reflect` gate.
+
+    Yields `(base_url, counter)` where `counter` is a one-key dict of how many
+    requests the target received — the budget and the control both make claims
+    about that number."""
+    import http.server
+    import socketserver
+    import threading
+    import urllib.parse as _up
+
+    counter = {"requests": 0}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            counter["requests"] += 1
+            body = f"session TOKEN={CHAIN_SESSION_TOKEN} ready".encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            counter["requests"] += 1
+            length = int(self.headers.get("Content-Length") or 0)
+            form = _up.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            if form.get("session", [""])[0] != CHAIN_SESSION_TOKEN:
+                body = b"forbidden: no session"
+                self.send_response(403)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            command = form.get("cmd", [""])[0]
+            if execute:
+                pipe = sh_popen("echo " + command + " 2>&1")
+                out = pipe.read()
+                pipe.close()
+            else:
+                out = command
+            body = out.encode("utf-8", "replace")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", counter
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def chain_profile(base):
+    """The two-step profile for :func:`chain_target`, marker in step two."""
+    return {
+        "base": base,
+        "confirm_step": "run",
+        "steps": [
+            {"name": "tok", "method": "GET", "path": "/session",
+             # Built from chr(92) rather than written as an escape: a tool that
+             # interprets a backslash sequence while writing this file turns the
+             # pattern into something that matches nothing, and the extraction
+             # then fails silently into a 403.
+             "extract": {"tok": "TOKEN=(" + chr(92) + "w+)"}},
+            {"name": "run", "method": "POST", "path": "/run",
+             "form": {"session": "{tok}", "cmd": "FUZZ"}},
+        ],
+    }
+
+
+class ChainAsDetectionCarrierTestCase(unittest.TestCase):
+    """A chain is a transport the detection engine drives, not a second engine.
+
+    Before this, the chain carried the session machinery and none of the
+    oracles, while the engine carried every oracle and could not hold a session
+    — so a sink behind a login was reachable only by the weaker path, which
+    cannot reach `executed` at all. The engine now asks a delivery for
+    `(status, body, channels, elapsed)` and a chain is one, which is why no
+    method changed to gain this."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+
+    def _run(self, *args):
+        return subprocess.run([sys.executable, str(SCRIPT), *args],
+                              cwd=str(REPO_ROOT), capture_output=True, text=True,
+                              timeout=600)
+
+    def _profile_file(self, tmp, base):
+        path = Path(tmp) / "chain.json"
+        path.write_text(json.dumps(chain_profile(base)), encoding="utf-8")
+        return path
+
+    def test_the_engine_confirms_through_a_chain_and_only_when_it_executes(self):
+        # The gate this project requires of any new reach: the same probes
+        # through the same chain, against a target that runs the value and one
+        # that returns it. The session is what makes it a chain -- step two
+        # answers 403 without the token step one extracts, so a single request
+        # reaches no payload at all.
+        import tempfile
+        verdicts = {}
+        for label, execute in (("vuln", True), ("reflect", False)):
+            with chain_target(execute) as (base, _counter), \
+                    tempfile.TemporaryDirectory() as tmp:
+                result = self._run(
+                    "--acknowledge-consent", "--verify-chain",
+                    str(self._profile_file(tmp, base)),
+                    "--methods", "reflected", "--environments", "unix",
+                    "--contexts", "raw", "--probe-depth", "quick")
+            verdicts[label] = result.stdout
+            self.assertEqual(result.returncode, 0, result.stdout[-2000:])
+        self.assertIn("EXECUTED (", verdicts["vuln"])
+        self.assertIn("random operands, absent from control", verdicts["vuln"],
+                      "the evidence must be the engine's, not a signature match")
+        self.assertNotIn("EXECUTED (", verdicts["reflect"],
+                         "a target that returns the value must never be confirmed")
+
+    def test_the_control_is_a_whole_chain_run(self):
+        # Not a single request against the base, which would not be comparable
+        # to what it is meant to rule out. One probe over a two-step chain is
+        # two requests; the control is two more.
+        import tempfile
+        with chain_target(True) as (base, counter), \
+                tempfile.TemporaryDirectory() as tmp:
+            self._run("--acknowledge-consent", "--verify-chain",
+                      str(self._profile_file(tmp, base)),
+                      "--methods", "reflected", "--environments", "unix",
+                      "--contexts", "raw", "--probe-depth", "quick",
+                      "--max-payloads", "1")
+            received = counter["requests"]
+        # Two steps for the control, two for the probe. More would mean extra
+        # probes; fewer would mean the control skipped the chain.
+        self.assertGreaterEqual(received, 4,
+                                "the control and the probe must each run the whole chain")
+        self.assertEqual(received % 2, 0,
+                         "every chain run is two requests, so an odd count means a "
+                         "step was skipped or a request was sent outside the chain")
+
+    def test_a_chain_step_that_never_answers_is_an_error_not_a_negative(self):
+        # The legacy path put the exception's text in the response body and had
+        # no status, which for a value oracle reads as `negative` -- a target
+        # that could not be reached reported as one with nothing to find.
+        import socket
+        closed = socket.socket()
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+        closed.close()
+        delivery = rcekit.ChainDelivery(
+            self.gen, chain_profile(f"http://127.0.0.1:{port}"))
+        status, _body, channels, _elapsed = delivery.send("; id", 3.0)
+        self.assertIsNone(status, "a step that never completed has no status")
+        self.assertEqual(channels, [], "no channels, so every oracle reports error")
+
+    def test_the_cost_line_counts_chain_steps_not_probes(self):
+        """The pre-flight must not understate the traffic by the chain's length.
+
+        A chain run is one probe and several requests, and the plan line above
+        it counts payloads. An operator bounding a monitored engagement has
+        nothing else to go on before the traffic starts.
+
+        Read from the run's own output rather than rebuilt here: an earlier
+        version of this test composed the expected string from
+        `delivery.steps` and then asserted the string contained it, which
+        agrees with itself whatever `main` prints."""
+        import re as _re
+        import tempfile
+        with chain_target(True) as (base, _counter), \
+                tempfile.TemporaryDirectory() as tmp:
+            result = self._run(
+                "--acknowledge-consent", "--verify-chain",
+                str(self._profile_file(tmp, base)),
+                "--methods", "reflected", "--environments", "unix",
+                "--contexts", "raw", "--probe-depth", "quick", "--max-payloads", "1")
+        match = _re.search(
+            r"\[detect\] cost: ~(\d+) probe\(s\) x (\d+) chain step\(s\) "
+            r"= at least (\d+) requests", result.stdout)
+        self.assertIsNotNone(match, result.stdout[-1500:])
+        probes, steps, requests = (int(group) for group in match.groups())
+        self.assertEqual(steps, 2, "the profile has two steps")
+        # Probes plus the control, each costing the whole chain.
+        self.assertEqual(requests, (probes + 1) * steps)
+        self.assertIn("payload-free control is a chain run of its own", result.stdout)
+
+    def test_a_single_request_delivery_still_costs_one(self):
+        delivery = rcekit.SingleRequestDelivery(
+            self.gen, "http://t.example/?q=FUZZ", "GET", None, None,
+            "query_value", "raw")
+        self.assertEqual(delivery.steps, 1)
+
+    def test_the_series_methods_are_refused_by_name_on_a_chain(self):
+        # Refused, not dropped: a run that quietly tested less than it was asked
+        # to reads exactly like a clean target. Both read the shape of a
+        # response *series*, which a chain's setup steps and per-probe session
+        # change by construction.
+        import tempfile
+        for selection in ("time", "boolean", "reflected,time"):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = self._run(
+                    "--acknowledge-consent", "--verify-chain",
+                    str(self._profile_file(tmp, "http://127.0.0.1:9")),
+                    "--methods", selection)
+            self.assertEqual(result.returncode, 1, selection)
+            self.assertIn("cannot run through a chain", result.stdout, selection)
+
+    def test_a_chain_cannot_be_combined_with_another_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = str(self._profile_file(tmp, "http://127.0.0.1:9"))
+            capture = Path(tmp) / "r.txt"
+            capture.write_text("GET /?q=FUZZ HTTP/1.1\nHost: t.example\n\n", encoding="utf-8")
+            with_url = self._run("--acknowledge-consent", "--verify-chain", profile,
+                                 "--verify-url", "http://t.example/?q=FUZZ",
+                                 "--methods", "reflected")
+            with_capture = self._run("--acknowledge-consent", "--verify-chain", profile,
+                                     "-r", str(capture), "-p", "q",
+                                     "--methods", "reflected")
+        self.assertEqual(with_url.returncode, 1)
+        self.assertIn("only one can be used", with_url.stdout)
+        self.assertEqual(with_capture.returncode, 1)
+        self.assertIn("only one can be the target", with_capture.stdout)
+
+    def test_a_chain_with_no_marker_is_refused(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "chain.json"
+            path.write_text(json.dumps({
+                "base": "http://127.0.0.1:9",
+                "steps": [{"name": "d", "method": "GET", "path": "/r"}]}),
+                encoding="utf-8")
+            result = self._run("--acknowledge-consent", "--verify-chain", str(path),
+                               "--methods", "reflected")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No FUZZ marker found in any chain step", result.stdout)
+
+    def test_without_methods_the_chain_keeps_its_own_path(self):
+        # Additive, exactly as `--methods` was for --verify-url: omitting it
+        # leaves the legacy oracle and its own tiers in place.
+        import tempfile
+        with chain_target(True) as (base, _counter), \
+                tempfile.TemporaryDirectory() as tmp:
+            result = self._run("--acknowledge-consent", "--verify-chain",
+                               str(self._profile_file(tmp, base)),
+                               "--categories", "basic_enum", "--environments", "unix",
+                               "--contexts", "raw", "--max-payloads", "2")
+        self.assertIn("[verify-chain]", result.stdout,
+                      "the legacy path prints under its own prefix")
+        self.assertIn("reaches needs-review at best", result.stdout,
+                      "and still names its own ceiling")
 
 
 class DetectionMethodTestCase(unittest.TestCase):
@@ -2555,15 +2838,13 @@ class ShellshockProbeTestCase(unittest.TestCase):
         self.gen.config_evade = "high"
         with local_target(self._signature_filter_route) as base:
             before = self.gen.escalated_probes
-            self.gen._escalate(meth, refused, rec, base + "/cgi-bin/status",
-                               "GET", None, ["User-Agent: FUZZ"], "query_value",
-                               "raw", 10.0, 200)
+            delivery = rcekit.SingleRequestDelivery(
+                self.gen, base + "/cgi-bin/status", "GET", None,
+                ["User-Agent: FUZZ"], "query_value", "raw")
+            self.gen._escalate(meth, refused, rec, delivery, 10.0, 200)
             retried = self.gen.escalated_probes - before
             before = self.gen.escalated_probes
-            held = self.gen._escalate(meth, unevadable, rec,
-                                      base + "/cgi-bin/status", "GET", None,
-                                      ["User-Agent: FUZZ"], "query_value",
-                                      "raw", 10.0, 200)
+            held = self.gen._escalate(meth, unevadable, rec, delivery, 10.0, 200)
             not_retried = self.gen.escalated_probes - before
         self.assertGreater(retried, 0, "an evadable probe must still climb")
         self.assertEqual(not_retried, 0)
@@ -7915,9 +8196,11 @@ class RedirectIsNeverRetriedTestCase(unittest.TestCase):
         self.gen.contexts = {}
         for probe in probes[:2]:
             with self.subTest(payload=probe.payload[:40]):
+                delivery = rcekit.SingleRequestDelivery(
+                    self.gen, "http://127.0.0.1:1/x", "GET", None, None,
+                    "query_value", "raw")
                 self.assertIsNone(self.gen._escalate(
-                    method, probe, record, "http://127.0.0.1:1/x", "GET", None,
-                    None, "query_value", "raw", 1.0, 200))
+                    method, probe, record, delivery, 1.0, 200))
         self.assertEqual(self.gen.escalated_probes, 0)
 
     def test_the_followup_is_read_again_after_a_retry_that_lands(self):
@@ -10290,9 +10573,35 @@ class DuplicateMarkerTestCase(unittest.TestCase):
         "run_verification": 11,
         "_fire": 9,
         "_fire_channels": 9,
-        "_escalate": 14,
+        # `_escalate` is not here any more, and not because the rule was
+        # relaxed: it no longer takes `mark`, or any other delivery parameter.
+        # 3.9.0 replaced all nine with one `ProbeDelivery`, which is the defect
+        # this guard exists for removed at the source rather than pinned in
+        # place. `test_escalate_takes_a_delivery_not_a_parameter_list` below
+        # holds that shape, so re-admitting one of them fails there instead.
         "_detect_body_location": 3,
     }
+
+    def test_escalate_takes_a_delivery_not_a_parameter_list(self):
+        """The nine delivery parameters became one object, and stay one.
+
+        This guard's own history is the argument: `mark` was once inserted into
+        `run_detection` where it belonged by meaning, which moved `config` and
+        `rng` along by one, and a caller passing `config` positionally bound a
+        dict to `mark`. A bundle cannot do that. Re-admitting any of the nine to
+        `_escalate` would start the leak again, so the absence is asserted
+        rather than assumed."""
+        import inspect
+        params = list(inspect.signature(RCEKit._escalate).parameters)
+        self.assertIn("delivery", params)
+        self.assertEqual(params.index("delivery"), 4,
+                         "the delivery sits where the parameter list it replaced began")
+        for leaked in ("url", "method", "data", "headers", "url_location",
+                       "body_location", "mark", "header_location"):
+            self.assertNotIn(
+                leaked, params,
+                f"{leaked} is back in _escalate's signature, so the delivery bundle "
+                "has leaked and the positional-shift defect can recur")
 
     def test_threading_the_marker_moved_no_existing_positional_slot(self):
         """Nothing was ever inserted mid-signature, only appended.

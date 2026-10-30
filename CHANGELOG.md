@@ -340,6 +340,91 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.9.0] — 2026-10-30
+
+### Added
+
+- **A chain is now a delivery the detection engine drives, so a sink behind a
+  login is reachable by the oracles that can prove execution.** There were two
+  engines. `--verify-chain` carried the session machinery — login, CSRF
+  extraction, a payload in an upload's content, a trigger — and none of the
+  oracles. `--methods` carried every oracle, the payload-free control, the
+  budget, the safety rungs and the tier vocabulary, and could not hold a
+  session. So the sinks that most needed proof were reachable only by the path
+  that cannot reach `executed` at all.
+
+  `--verify-chain --methods reflected,eval` now runs the engine through the
+  chain's steps. Measured against a two-step target whose `/run` is guarded by a
+  token `/session` hands out — a single request reaches no payload there, it
+  answers 403 — the run reports `executed` with the ordinary evidence line: *a
+  value computed from random operands, absent from the payload-free control*.
+  The same probes against a target that returns the value instead of running it
+  report `negative` for all 19.
+
+  Nothing about the oracles changed to gain this, which is the point. A chain is
+  a different **transport**, not a different oracle, so the seam is one method:
+  every delivery hands back `(status, body, channels, elapsed)` and no detection
+  method knows how many requests produced it.
+
+- **`--verify-chain` without `--methods` is unchanged**, additively, exactly as
+  `--methods` was introduced for `--verify-url`. The legacy oracle and its
+  `needs-review` ceiling stay; the closing notice now names `--methods` as where
+  a stronger tier comes from, since it is no longer true that the engine cannot
+  run here.
+
+### Changed
+
+- **The nine delivery parameters threaded through `run_detection` and
+  `_escalate` are now one object.** That threading was not merely verbose: 3.1.1
+  found that inserting one of them where it belonged by meaning moved two
+  positional slots and raised `TypeError` for a positional caller. A bundle
+  cannot have that defect, and `SingleRequestDelivery` is the same requests in
+  the same order, so every existing caller is untouched.
+
+- **A chain step that never answers is an `error`, not a `negative`.** The
+  legacy path put the exception's text in the response body and had no status at
+  all, which for a value oracle reads as "reached the target, found nothing" —
+  a target that could not be reached reported as one with nothing to find. The
+  step runner now distinguishes a 4xx or 5xx, whose body is read like any
+  other, from a request that never completed, which yields no channels and so
+  reports `error` through every oracle.
+
+- **The pre-flight counts chain steps.** A chain run is one probe and several
+  requests, and the plan line counts payloads — so without this the traffic was
+  understated by the length of the chain, for the operator who has least room to
+  be surprised by it. `--max-payloads` is deliberately **not** converted to
+  requests: it stays a payload allowance so a run is never stopped between a
+  chain's login and its trigger, abandoning a payload and leaving target state
+  the run cannot describe.
+
+- **`--methods time` and `--methods boolean` are refused by name on a chain**,
+  the way every held-back method is refused rather than dropped. Both read the
+  shape of a response *series*: `time` fits a regression to response time, and a
+  chain's own setup steps move the server's timing in ways the drift term was
+  never fitted against; `boolean` compares response shape across a shuffled
+  series and needs its anchors to hold still, which a fresh session per probe
+  denies by construction. The delivery reports only the injected step's elapsed,
+  which is the honest number and still not one measured through a chain —
+  lifting either refusal changes what a detection method reports, and that is
+  not settleable on a fixture.
+
+- **A fresh session per probe**, which is the expensive choice. Sharing one
+  would cost a single login instead of one per probe and would let a probe's own
+  state reach the next, which is the thing the payload-free control exists to
+  rule out. The cost is stated rather than quietly avoided.
+
+- **`--verify-chain` with `--verify-url` or `-r` is refused**, and so is a chain
+  whose steps carry no `FUZZ`. Two ways to name one target is an ambiguity, and
+  a chain with no marker would have sent its steps and tested nothing.
+
+### Removed
+
+- **The 3.8.0 warning that `--methods` is not applied on the chain path.** It
+  was true when it was written and is not now, and the condition that printed it
+  sits inside a block reached only when `--methods` is absent — so it had become
+  unreachable as well as wrong. A test asserting it was the thing that caught
+  this.
+
 ## [3.8.0] — 2026-10-30
 
 ### Changed
@@ -3558,6 +3643,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.9.0]: https://github.com/kabiri-labs/rcekit/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/kabiri-labs/rcekit/compare/v3.7.1...v3.8.0
 [3.7.1]: https://github.com/kabiri-labs/rcekit/compare/v3.7.0...v3.7.1
 [3.7.0]: https://github.com/kabiri-labs/rcekit/compare/v3.6.1...v3.7.0
