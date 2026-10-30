@@ -1774,6 +1774,58 @@ class VerifyChainTestCase(unittest.TestCase):
         # And the run says what its ceiling is, whether or not anything matched.
         self.assertIn("reaches needs-review at best", result.stdout)
 
+    def test_the_chain_reads_its_callback_config_from_the_profile_only(self):
+        """`--oob-host` is not this path's callback switch, and saying it was
+        is the defect this pins.
+
+        The chain reads `callback_host` and `listen_port` from the profile and
+        nothing else. Advice naming `--oob-host` therefore cannot work: without
+        those two fields no listener starts, `{callback}` is never substituted,
+        the placeholder goes to the target as a literal and the verdict stays
+        `oob-pending` with nothing to resolve it.
+
+        Asserted against the source rather than the prose, because the prose is
+        what was wrong. If a later change *does* wire `--oob-host` in — a
+        reasonable thing for the chain/oracle merge to do — this fails, which is
+        the point: the notice in `main` and the paragraphs in `docs/guide.md`
+        and `docs/reference.md` all state the current mechanism and have to move
+        with it."""
+        source = Path(rcekit.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        chain_fn = next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "run_verification_chain")
+        literals = {node.value for node in ast.walk(chain_fn)
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        names = {node.id for node in ast.walk(chain_fn) if isinstance(node, ast.Name)}
+        attrs = {node.attr for node in ast.walk(chain_fn) if isinstance(node, ast.Attribute)}
+        self.assertIn("callback_host", literals)
+        self.assertIn("listen_port", literals)
+        self.assertNotIn("oob_host", literals | names | attrs,
+                         "the chain now reads --oob-host, so the notice in main() and the "
+                         "guide and reference paragraphs that say it does not must change too")
+
+    def test_the_closing_notice_names_the_profile_fields_not_the_flag(self):
+        # The other half: the mechanism above is only useful to an operator if
+        # the run names it. This asserts the notice points at the two fields
+        # that work, rather than at the flag that does not.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            chain_path = Path(tmp) / "chain.json"
+            chain_path.write_text(json.dumps({
+                "base": f"http://127.0.0.1:{self._free_port()}",
+                "steps": [{"name": "run", "method": "POST", "path": "/run",
+                           "form": {"cmd": "FUZZ"}}],
+            }), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-chain", str(chain_path), "--categories", "basic_enum",
+                 "--environments", "unix", "--contexts", "raw", "--max-payloads", "1"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=300)
+        self.assertIn("callback_host", result.stdout)
+        self.assertIn("listen_port", result.stdout)
+        self.assertIn("never reads", result.stdout)
+
     def test_the_in_band_oracle_cannot_tell_execution_from_a_static_page(self):
         """Why the in-band chain verdict is not `executed`, demonstrated.
 

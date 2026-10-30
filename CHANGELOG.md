@@ -369,7 +369,12 @@ formats, or the template schema.
   for a verdict that still could not be `executed`.
 
 - **The out-of-band chain verdict is unchanged, and that is not an oversight.**
-  A `{callback}` payload still reaches `executed`. Its token is twelve
+  A `{callback}` payload still reaches `executed` — configured by the chain
+  profile's own `callback_host` and `listen_port`, which is the only place this
+  path looks; `--oob-host` is read by the `--methods` engine and never by this
+  one. Of the shipped corpus two payloads carry that marker, both `postgres`
+  under `code_execution`, which is outside the default environment set. Its token
+  is twelve
   characters minted for that payload and registered with the run's listener, so
   a callback carrying it is a value only the target could have learned by
   running what it was given — the tier rule's second clause, which needs no
@@ -387,13 +392,19 @@ formats, or the template schema.
 
 A `--verify-chain` run that previously printed `EXECUTED` for an in-band match
 now prints a `NEEDS-REVIEW candidate(s)` section instead, and `executed` on that
-path is reachable only through a `{callback}` payload with a listener. Nothing
-about the chain's delivery changed — the same steps, substitutions and payloads
-go to the target — so a finding you reported from a previous run is not
-retracted by this; it is reclassified as something to confirm rather than
-something confirmed. To confirm it, either deliver it out of band on the chain,
-or reproduce the sink through `--verify-url` / `-r` with `--methods`, where the
-oracles that rest on a computed value and a payload-free control live.
+path is reachable only out of band. Nothing about the chain's delivery changed —
+the same steps, substitutions and payloads go to the target — so a finding you
+reported from a previous run is not retracted by this; it is reclassified as
+something to confirm rather than something confirmed.
+
+To confirm it, reproduce the sink through `--verify-url` / `-r` with `--methods`,
+where the oracles that rest on a computed value and a payload-free control live.
+The chain's own out-of-band channel is the other route, and it needs two things
+named precisely: `callback_host` and `listen_port` in the **chain profile**
+(`--oob-host` belongs to the `--methods` engine and is not read here), and a
+payload carrying `{callback}` — of which the shipped corpus has two, both
+`postgres` under `code_execution`, so `--environments postgres --categories
+code_execution` or your own `--template-file` is required to generate one.
 
 Exit status is unaffected: this path returned 0 regardless of outcome before and
 still does.

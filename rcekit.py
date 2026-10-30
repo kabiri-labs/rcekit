@@ -10404,8 +10404,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[verify-chain] this path's in-band oracle reaches needs-review at best, "
               "because a static signature is not a value the target computed and no control "
               "is taken. The oracles that reach executed in band run on --verify-url and -r "
-              "(--methods reflected, eval, ...), not on a chain. On a chain, a {callback} "
-              "payload with --oob-host reaches executed on the token alone.")
+              "(--methods reflected, eval, ...), not on a chain. Out of band this path does "
+              "reach executed, on the callback token alone — but it is configured in the "
+              "chain profile's own 'callback_host' and 'listen_port' fields, not by "
+              "--oob-host, which this path never reads.")
         return 0
 
     if args.verify_url or args.request_file:
