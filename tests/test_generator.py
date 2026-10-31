@@ -15760,7 +15760,13 @@ class ConsoleOutputEncodingTestCase(unittest.TestCase):
                  "--verify-chain", str(profile), "--categories", "basic_enum",
                  "--environments", "unix", "--contexts", "raw",
                  "--max-payloads", "2"],
-                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+                cwd=str(REPO_ROOT), capture_output=True, timeout=120,
+                # Decoded with the codec the child was TOLD to use, not the
+                # parent's. `text=True` would use the parent's locale, which on
+                # this machine happens to be cp1252 too -- so the mismatch was
+                # invisible here and broke CI, where the locale is UTF-8 and the
+                # report's em dash arrives as the single byte 0x97.
+                encoding="cp1252",
                 env=dict(os.environ, PYTHONIOENCODING="cp1252"))
         self.assertEqual(result.returncode, 0, result.stderr[-600:])
         self.assertNotIn("UnicodeEncodeError", result.stderr)
@@ -15809,7 +15815,12 @@ class ConsoleOutputEncodingTestCase(unittest.TestCase):
                  "sys.stderr.write('ERRORS=' + str(sys.stdout.errors))")
         result = subprocess.run(
             [sys.executable, "-c", probe],
-            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+            cwd=str(REPO_ROOT), capture_output=True, timeout=120,
+            # `--doctor` prints pure ASCII, measured, so both codecs read it
+            # alike. Paired anyway: forcing the child's codec and decoding with
+            # the parent's is the mistake, not the byte that happens to expose
+            # it, and the next line of output added here would expose it.
+            encoding="cp1252",
             env=dict(os.environ, PYTHONIOENCODING="cp1252"))
         self.assertIn("ERRORS=replace", result.stderr,
                       "a completed run left stdout strict, so the next "
@@ -15826,3 +15837,86 @@ class ConsoleOutputEncodingTestCase(unittest.TestCase):
             rcekit.soften_console_encoding()      # must not raise
         finally:
             sys.stdout, sys.stderr = stdout, stderr
+
+
+class ForcedCodecPairingTestCase(unittest.TestCase):
+    """A test that forces a child's output codec has to decode with it.
+
+    `subprocess.run(..., text=True)` decodes the captured bytes with the
+    **parent's** locale. Handing the child `PYTHONIOENCODING=cp1252` and
+    reading it back with `text=True` therefore works only where the parent's
+    locale happens to be cp1252 as well -- which on the Windows machine these
+    tests were written on it is, so the mismatch was invisible here and broke
+    CI, where the locale is UTF-8 and the report's em dash arrives as the
+    single byte 0x97 that UTF-8 cannot start a character with.
+
+    That is the mirror image of the bug the tests it was written for exist to
+    catch: one half of the asymmetry hides on Linux, the other on Windows, and
+    the local environment obligingly hid whichever half was being introduced.
+    So the pairing is checked here rather than remembered -- there are two call
+    sites today and the next one will be written by somebody who has not read
+    this docstring."""
+
+    TEST_FILES = sorted(Path(__file__).resolve().parent.glob("test_*.py"))
+
+    @staticmethod
+    def _forced_codec(call):
+        """The codec a call forces on its child through the environment, or
+        ``None``.
+
+        Read from anywhere inside the `env` argument, because the idiom is
+        `env=dict(os.environ, PYTHONIOENCODING="cp1252")` and the name sits in a
+        nested call rather than at the top level."""
+        for keyword in call.keywords:
+            if keyword.arg != "env":
+                continue
+            for node in ast.walk(keyword.value):
+                if (isinstance(node, ast.keyword)
+                        and node.arg == "PYTHONIOENCODING"
+                        and isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, str)):
+                    return node.value.value
+        return None
+
+    def _offenders(self):
+        """Every call that forces a codec on its child and does not decode with
+        the same one, as (file, line, forced, declared)."""
+        bad = []
+        for path in self.TEST_FILES:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                forced = self._forced_codec(node)
+                if forced is None:
+                    continue
+                declared = None
+                for keyword in node.keywords:
+                    if (keyword.arg == "encoding"
+                            and isinstance(keyword.value, ast.Constant)):
+                        declared = keyword.value.value
+                if declared != forced:
+                    bad.append((path.name, node.lineno, forced, declared))
+        return sorted(bad)
+
+    def test_a_call_that_forces_a_codec_decodes_with_it(self):
+        offenders = self._offenders()
+        self.assertEqual(
+            offenders, [],
+            "these calls hand a child PYTHONIOENCODING and then decode its "
+            f"output with something else: {offenders}. Pass the same codec as "
+            "`encoding=` instead of `text=True`, which uses the parent's "
+            "locale and so passes or fails depending on the machine.")
+
+    def test_the_check_has_something_to_look_at(self):
+        # Vacuous the moment the idiom is spelled differently, and a check that
+        # passes by finding nothing is the failure mode this class is about.
+        found = [(path.name, node.lineno)
+                 for path in self.TEST_FILES
+                 for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                 if isinstance(node, ast.Call)
+                 and self._forced_codec(node) is not None]
+        self.assertTrue(
+            found,
+            "no test forces a child's output codec any more -- if that is "
+            "deliberate, remove this class with the tests that did")
