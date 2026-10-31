@@ -15263,3 +15263,132 @@ class FileIncludeTestCase(unittest.TestCase):
         self.assertFalse(
             [r for r in vuln + reflect if r["verdict"] == rcekit.EXECUTION_TIER],
             "include must never reach the execution tier")
+
+
+class ObservedChannelKeepsTheTierTestCase(unittest.TestCase):
+    """The observed channel moves *where* evidence appeared, not *what* it proves.
+
+    `_observe_match` awarded `executed` to whatever reached it, which was true
+    while every method that could reach it proved execution. `_observable`
+    admits a result whose expected value is absent from the payload, and that
+    was a proxy for "only execution produces this".
+
+    `include` is the first method where the two come apart: a file's content
+    signature is in no payload and is not computed either. A sink that merely
+    queued a read, with an observed page that rendered the file, reported
+    second-order EXECUTION against a target that executed nothing. These pin
+    both directions, because a fix that stopped the false claim by dropping the
+    true one would pass a test written only for the first."""
+
+    @staticmethod
+    def _queueing_target():
+        """A sink that stores the path, and a page that renders the file."""
+        queued = []
+
+        def route(method, path, params, headers, body):
+            if path.startswith("/queue"):
+                queued.append(params.get("file") or "")
+                return 200, "queued"
+            if any("proc/version" in q for q in queued):
+                return 200, "Linux version 5.15.0-generic"
+            return 200, "nothing rendered yet"
+        return route
+
+    def test_a_second_order_file_read_is_a_file_read_and_never_executed(self):
+        gen = RCEKit()
+        record = make_record(environment="php", context="raw",
+                             mode="detection", category="detection")
+        with local_target(self._queueing_target()) as base:
+            results = gen.run_detection(
+                iter([record]), url=base + "/queue?file=FUZZ", methods=["include"],
+                config={"probe_depth": "quick", "observe_url": base + "/rendered",
+                        "observe_timeout": 2, "observe_poll": 0.5})
+        read = [r for r in results if r["verdict"] == "file-read"]
+        self.assertTrue(read, "the observed channel should still confirm the read")
+        self.assertFalse([r for r in results if r["verdict"] == rcekit.EXECUTION_TIER],
+                         "a file read on the observed channel is not execution")
+        self.assertEqual(read[0]["observe_status"], "file-read")
+        self.assertIn("NOT execution", read[0]["detail"])
+        self.assertNotIn("computed", read[0]["detail"])
+
+    def test_a_second_order_execution_still_reaches_executed(self):
+        """The near neighbour, and the half a one-sided fix would break."""
+        stored = []
+
+        def route(method, path, params, headers, body):
+            asked = params.get("q") or ""
+            if path.startswith("/store"):
+                stored.append(asked)
+                return 200, "stored"
+            out = ""
+            for item in stored:
+                pipe = sh_popen("echo " + item + " 2>&1")
+                out += pipe.read()
+                pipe.close()
+            return 200, out
+
+        gen = RCEKit()
+        record = make_record(environment="unix", context="raw",
+                             mode="detection", category="detection")
+        with local_target(route) as base:
+            results = gen.run_detection(
+                iter([record]), url=base + "/store?q=FUZZ", methods=["reflected"],
+                config={"probe_depth": "quick", "observe_url": base + "/render",
+                        "observe_timeout": 2, "observe_poll": 0.5})
+        executed = [r for r in results if r["verdict"] == rcekit.EXECUTION_TIER]
+        self.assertTrue(executed, "a computed value on the observed channel is execution")
+        self.assertEqual(executed[0]["observe_status"], "executed")
+        self.assertIn("second-order execution", executed[0]["detail"])
+
+    def test_the_awarded_tier_is_read_from_the_method_not_hardcoded(self):
+        # The mechanism, so the two tests above cannot both pass by coincidence.
+        gen = RCEKit()
+        for tier in (rcekit.EXECUTION_TIER, "file-read", "evaluation-sink"):
+            result = {"expected": "TOKEN", "payload": "x", "verdict": "negative",
+                      "tier": tier}
+            upgraded = gen._observe_match(
+                result, [("response body", "TOKEN here")], [("response body", "")],
+                "http://t.example/observed")
+            self.assertTrue(upgraded)
+            self.assertEqual(result["verdict"], tier)
+            self.assertEqual(result["observe_status"], tier)
+
+
+class IncludeWindowsDialectTestCase(unittest.TestCase):
+    """`powershell` is a shell dialect, not a filesystem.
+
+    The files a PowerShell sink can read are the Windows ones. The traversal
+    builder treated both members of `WINDOWS_PATH_SINK_ENVS` alike from the
+    start and the target lookup did not, so `--sink-env powershell` found no
+    target, built no probe, and reported that nothing was tested -- against
+    paths that were entirely right for it."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.method = rcekit.FileInclude(self.gen, {"probe_depth": "quick"})
+
+    def test_every_windows_dialect_reads_the_windows_catalogue(self):
+        for dialect in sorted(rcekit.WINDOWS_PATH_SINK_ENVS):
+            paths = [t["path"] for t in self.method._targets(dialect)]
+            self.assertTrue(paths, f"{dialect} has no read target")
+            self.assertTrue(all(p[1:3] == ":" + chr(92) for p in paths), paths)
+
+    def test_unix_is_unaffected(self):
+        self.assertEqual([t["path"] for t in self.method._targets("unix")],
+                         ["/proc/version"])
+
+    def test_a_powershell_sink_builds_probes_rather_than_testing_nothing(self):
+        record = make_record(environment="windows", context="raw",
+                             mode="detection", category="detection")
+        method = rcekit.FileInclude(self.gen, {"probe_depth": "quick",
+                                               "sink_env": "powershell"})
+        self.assertEqual(method._sink_env(record), "powershell")
+        self.assertTrue(method.applicable(record))
+        probes = method.build_probes(record, random.Random(3))
+        self.assertTrue(probes)
+        # The climb is still the Windows one, which the builder already did.
+        payloads = {p.carrier: p.payload for p in probes}
+        self.assertEqual(payloads["plain/depth0"],
+                         "C:" + chr(92) + "Windows" + chr(92) + "win.ini")
+        self.assertEqual(payloads["plain/depth3"],
+                         (".." + chr(92)) * 3 + "Windows" + chr(92) + "win.ini")

@@ -669,7 +669,16 @@ and renders it back would hand that token straight to the observed page and ever
 such probe would confirm without executing anything. The computed-value methods
 are safe for the opposite reason — reflection returns `$((a+b))`, never the sum —
 so the rule selects them without naming them, and a method added later inherits
-the right answer.
+the right answer about *whether* to look.
+
+It does not decide what a hit **means**, and `include` is where that came
+apart. A file's content signature is in no payload, so the rule admits it; it is
+also not computed, so a page that merely renders the file produces it without
+anything executing. The tier therefore travels with the method rather than being
+awarded here: a value found on the observed channel reports the method's own
+ceiling, so `reflected` and `eval` reach `executed` there and `include` reaches
+`file-read`. The observed channel changes *where* evidence appeared, never *what*
+it proves.
 
 The channel is read **twice**, because the two real shapes need different
 things:
@@ -688,8 +697,10 @@ nothing.
 Observing is **additive**: the in-band verdict is computed exactly as before and
 only a non-`executed` one can be upgraded, so a run without the flag is
 unchanged and a run with it can only gain findings. Each probe's result carries
-an `observe_status` in `--detect-json` — `executed`, `polled` (read, value not
-there), `in-control`, `not-observed` (not eligible) or `unreachable`. If the
+an `observe_status` in `--detect-json` — the **tier the observed channel
+awarded** (`executed` for a computed value, `file-read` for a file's content),
+or `polled` (read, value not there), `in-control`, `not-observed` (not eligible)
+or `unreachable`. If the
 endpoint never answered, the run says so outright: negatives decided without ever
 reading the observed channel are not second-order negatives.
 

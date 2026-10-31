@@ -4181,13 +4181,34 @@ class RCEKit:
             result["observe_status"] = "in-control"
             return False
         channel_note = "" if where == "response body" else f" in {where}"
-        result["verdict"] = "executed"
-        result["observe_status"] = "executed"
-        result["detail"] = (
-            f"target computed {result['expected']!r} on the OBSERVED channel"
-            f"{channel_note} ({observe_url}) -- second-order execution: the value is absent "
-            "from that endpoint's pre-injection control and cannot be reflected, since the "
-            "payload never carried it")
+        # The method's own ceiling, not `executed`. This awarded execution to
+        # whatever reached it, which was true while every method that could
+        # reach it proved execution -- `_observable` admits a result whose
+        # expected value is not in the payload, and that was a proxy for "only
+        # execution produces this". `include` is the first method where the two
+        # come apart: a file's content signature is in no payload and is not
+        # computed either, so a sink that merely queues a read and an observed
+        # page that renders the file reported second-order EXECUTION with
+        # nothing executed. Measured against a local target built to do exactly
+        # that. The observed channel moves *where* the evidence appeared, never
+        # *what* it proves, so the tier travels with the method and a method
+        # added later inherits the right answer.
+        tier = result.get("tier") or EXECUTION_TIER
+        result["verdict"] = tier
+        result["observe_status"] = tier
+        if tier == EXECUTION_TIER:
+            result["detail"] = (
+                f"target computed {result['expected']!r} on the OBSERVED channel"
+                f"{channel_note} ({observe_url}) -- second-order execution: the value is absent "
+                "from that endpoint's pre-injection control and cannot be reflected, since the "
+                "payload never carried it")
+        else:
+            result["detail"] = (
+                f"target returned {result['expected']!r} on the OBSERVED channel"
+                f"{channel_note} ({observe_url}) -- a second-order {tier}: the value is absent "
+                "from that endpoint's pre-injection control and the payload never carried it, "
+                "so the observed endpoint is where it surfaced. This keeps the method's own "
+                "tier and is NOT execution")
         return True
 
     def _observed_hit(self, expected: str,
@@ -5940,8 +5961,14 @@ class FileInclude(DetectionMethod):
         """The readable files declared for this dialect, within the run's rung."""
         declared: Dict[str, Any] = getattr(self.gen, "include_read_targets", None) or {}
         allowed = self.config.get("max_safety") or "safe"
+        # `powershell` is a shell dialect, not a filesystem: the files it can
+        # read are the Windows ones. The traversal builder already treats both
+        # members of WINDOWS_PATH_SINK_ENVS alike, and this lookup did not, so
+        # `--sink-env powershell` found no target, built no probe and reported
+        # that nothing was tested -- against paths that were entirely right.
+        catalogue = "windows" if sink_env in WINDOWS_PATH_SINK_ENVS else sink_env
         out = []
-        for entry in declared.get(sink_env) or []:
+        for entry in declared.get(catalogue) or []:
             if not (entry.get("path") and entry.get("signature")):
                 # A target with no path or no signature can never confirm, and
                 # an unconfirmable probe still counts toward the coverage the

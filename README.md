@@ -556,7 +556,10 @@ them will call `executed`:
 - **Second-order execution** (`--observe-url`) — when the payload lands on one
   request and runs on another: stored SSTI rendered on a profile page, a payload
   written to a log a template engine later renders, a queued job. The observed
-  endpoint is differenced against a snapshot taken *before* any probe was sent.
+  endpoint is differenced against a snapshot taken *before* any probe was sent,
+  and the finding keeps the method's own tier: the observed channel changes where
+  the evidence appeared, not what it proves, so a file read seen there is
+  `file-read` and not execution.
   Where nothing runs until something asks — a queue a worker drains, a report
   generated on demand, a "run now" button — `--observe-trigger` is the missing
   third act: inject, **trigger**, read. It fires before every observed read —
