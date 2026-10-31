@@ -5502,7 +5502,8 @@ class TierVocabularyTestCase(unittest.TestCase):
         """The other direction. A tier spelled one way on the class and another
         in the branch that emits it is two verdicts, and only one is documented."""
         documented = {rcekit.EXECUTION_TIER, "timing-sink", "file-write",
-                      "evaluation-sink", "deserialization-sink", "lookup-sink",
+                      "file-read", "evaluation-sink", "deserialization-sink",
+                      "lookup-sink",
                       "needs-review", "negative", "inconclusive", "blocked",
                       "error", "nothing-tested"}
         emitted = set()
@@ -5575,6 +5576,7 @@ class NonExecutionSectionTestCase(unittest.TestCase):
         "executed",
         "timing-sink",
         "file-write",
+        "file-read",
         "evaluation-sink",
         "deserialization-sink",
         "lookup-sink",
@@ -6313,6 +6315,7 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         "needs-review": ("needs-review",),
         "timing-sink": ("timing sink", "timing-sink"),
         "file-write": ("file write", "file-write"),
+        "file-read": ("file read", "file-read"),
         "evaluation-sink": ("evaluation sink", "evaluation-sink"),
         "lookup-sink": ("lookup sink", "lookup-sink"),
         "deserialization-sink": ("deserialization sink", "deserialization-sink"),
@@ -7792,6 +7795,7 @@ class DetectionQuestionTestCase(unittest.TestCase):
         ("reflected", "eval", "file", "write", "oob", "time", "boolean", "argv"),
         ("lookup",),
         ("deser",),
+        ("include",),
     )
 
     def test_the_methods_group_into_exactly_these_questions(self):
@@ -7841,7 +7845,8 @@ class DetectionQuestionTestCase(unittest.TestCase):
         self.assertEqual(
             rcekit.CHEAP_DETECTION_METHODS,
             {name for name, cls in rcekit.DETECTION_METHODS.items() if not cls.costly})
-        self.assertEqual(rcekit.CHEAP_DETECTION_METHODS, {"reflected", "eval", "argv"})
+        self.assertEqual(rcekit.CHEAP_DETECTION_METHODS,
+                         {"reflected", "eval", "argv", "include"})
 
     def test_a_costly_method_says_so_on_its_own_class(self):
         for name in ("file", "write", "time", "oob", "lookup", "deser", "boolean"):
@@ -8666,7 +8671,8 @@ class RefusalNeverUnmakesEvidenceTestCase(unittest.TestCase):
         self.assertGreater(self.gen.refused_probes, 0)
 
     def test_only_a_negative_is_replaced(self):
-        for status in ("executed", "timing-sink", "file-write", "evaluation-sink",
+        for status in ("executed", "timing-sink", "file-write", "file-read",
+                       "evaluation-sink",
                        "needs-review", "lookup-sink", "deserialization-sink",
                        "inconclusive", "error"):
             with self.subTest(status=status):
@@ -12029,6 +12035,13 @@ class SinkShapeLadderTestCase(unittest.TestCase):
         self.assertFalse([r for r in results if r["verdict"] == "executed"])
 
 
+# Characters a conforming JSON encoder is allowed to emit as an escape that
+# `_encoded_search` does not undo. `/` is the one that bit: it is a legal
+# JSON escape and an illegal Python one, so `unicode_escape` leaves `\/`
+# alone and the raw body never matches.
+HARD_TO_PEEL = frozenset('"' + chr(92) + '/')
+
+
 class ResponseChannelTestCase(unittest.TestCase):
     """The computed value is looked for in every channel of the response, not the
     body alone.
@@ -12253,11 +12266,23 @@ class ResponseChannelTestCase(unittest.TestCase):
                 continue
             self.assertTrue(values, f"{name} built no expected value to check")
             for value in values:
-                self.assertTrue(
-                    value.isalnum(),
-                    f"{name} builds expected={value!r}, which is not alphanumeric "
-                    "and so could be lost to a JSON escape that the encoded-value "
-                    "search does not peel -- see the leaf-only test above")
+                # `isalnum()` stood here and was a *proxy*: it answered the
+                # right way for every expected value that existed when it was
+                # written, and `include` broke it without breaking the property
+                # it stands for -- its signatures carry a space and a colon,
+                # which no JSON encoder escapes. So the property is tested
+                # directly now: no character an encoder may turn into an escape
+                # the raw-body search cannot peel. That still catches both cases
+                # the leaf-only test measured -- a `/` and an astral character.
+                risky = sorted({c for c in value
+                                if c in HARD_TO_PEEL or not c.isprintable()
+                                or not c.isascii()})
+                self.assertEqual(
+                    risky, [],
+                    f"{name} builds expected={value!r}, carrying {risky} -- a "
+                    "JSON encoder may escape those into a form the encoded-value "
+                    "search cannot peel, so the value would be reachable only "
+                    "through a parsed leaf; see the leaf-only test above")
                 checked += 1
         self.assertGreater(checked, 500, "the sweep should cover the whole registry")
 
@@ -15050,3 +15075,191 @@ class WholeSeriesBudgetTestCase(unittest.TestCase):
                          "a second budget rule is back; one of the two will drift")
         self.assertEqual(source.count("abandoned = ("), 1,
                          "a series is abandoned from more than one place")
+
+
+class FileIncludeTestCase(unittest.TestCase):
+    """Reading a file the request named, and why it stops below execution.
+
+    `file` writes a file and reads it back; `include` reads one it did not
+    write. The asymmetry between their tiers is what these pin: a read has no
+    value the target *computed*, so its evidence is a signature known in
+    advance, and that is the evidence 3.8.0 demoted the chain's in-band verdict
+    for. The ceiling is `file-read` and there is no path upward."""
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="php", context="raw",
+                               mode="detection", category="detection")
+
+    def _method(self, **config):
+        config.setdefault("probe_depth", "full")
+        return rcekit.FileInclude(self.gen, config)
+
+    def _probes(self, **config):
+        return self._method(**config).build_probes(self.rec, random.Random(3))
+
+    def _observe(self, body, control=""):
+        return Observation(status=200, body=body, control_body=control,
+                           channels=[("response body", body)],
+                           control_channels=[("response body", control)])
+
+    # -- what it claims -------------------------------------------------------
+
+    def test_the_tier_is_file_read_and_it_asks_its_own_question(self):
+        # `question` is not the default on purpose: a run stops asking a
+        # question once it is answered, so leaving it as `execution` would skip
+        # this method on any target where execution was already proven --
+        # discarding a finding with its own remediation.
+        self.assertEqual(rcekit.FileInclude.tier, "file-read")
+        self.assertEqual(rcekit.FileInclude.question, "file-read")
+
+    def test_file_read_can_never_become_executed(self):
+        self.assertIn("file-read", rcekit.VERDICT_PRIORITY)
+        self.assertNotEqual(rcekit.FileInclude.tier, rcekit.EXECUTION_TIER)
+        self.assertEqual(rcekit.FileInclude.also_reports, ())
+        rows = {verdict for verdict, _h, _c, _x in rcekit.NON_EXECUTION_SECTIONS}
+        self.assertIn("file-read", rows, "a tier with no section renders nowhere")
+
+    # -- probe construction ---------------------------------------------------
+
+    def test_the_signature_is_expected_and_the_path_is_forbidden(self):
+        # Measured against vulhub php/inclusion: a sink that cannot open the
+        # path echoes it back inside PHP's own warning, twice. An oracle asking
+        # "did my string come back" would confirm on every probe against a
+        # target that read nothing, so the path is the *forbidden* literal and
+        # only the content signature decides.
+        probe = self._probes()[0]
+        self.assertEqual(probe.expected, "Linux version")
+        self.assertIn("/proc/version", probe.forbidden)
+        self.assertNotIn(probe.expected, probe.payload)
+
+    def test_depth_is_swept_from_an_absolute_path_downward(self):
+        payloads = {p.carrier: p.payload for p in self._probes()}
+        self.assertEqual(payloads["plain/depth0"], "/proc/version")
+        self.assertEqual(payloads["plain/depth3"], "../../../proc/version")
+
+    def test_quick_depth_sends_fewer_climbs_than_full(self):
+        self.assertLess(len(self._probes(probe_depth="quick")), len(self._probes()))
+
+    def test_the_php_filter_wrapper_reads_through_base64(self):
+        payloads = {p.carrier: p.payload for p in self._probes()}
+        self.assertEqual(payloads["php_filter_base64/depth0"],
+                         "php://filter/convert.base64-encode/resource=/proc/version")
+
+    def test_a_sensitive_read_target_is_held_one_rung_up(self):
+        # Proving a read needs recognisable content, not the target's account
+        # names. The corpus gates credential-adjacent payloads the same way.
+        self.assertEqual({p.expected for p in self._probes()}, {"Linux version"})
+        self.assertIn("root:x:0:0:",
+                      {p.expected for p in self._probes(max_safety="intrusive")})
+
+    def test_an_unknown_wrapper_is_refused_rather_than_narrowing_the_run(self):
+        # A typo that selected nothing would make a run that sent no probe read
+        # exactly like one that tried them and came back clean.
+        with self.assertRaises(ValueError) as caught:
+            self._method(include_wrappers=("php_filtre",)).build_probes(
+                self.rec, random.Random(1))
+        self.assertIn("unknown include wrapper", str(caught.exception))
+
+    def test_a_code_position_context_is_not_an_inclusion_sink(self):
+        # A path arrives as a value. The contexts that carry the injected value
+        # as code are not where a file-opening sink reads from.
+        for context in sorted(rcekit.CODE_POSITION_CONTEXTS):
+            record = make_record(environment="php", context=context,
+                                 mode="detection", category="detection")
+            self.assertFalse(self._method().applicable(record), context)
+
+    def test_a_windows_climb_drops_the_drive_letter(self):
+        record = make_record(environment="windows", context="raw",
+                             mode="detection", category="detection")
+        payloads = {p.carrier: p.payload
+                    for p in self._method().build_probes(record, random.Random(3))}
+        self.assertEqual(payloads["plain/depth0"], "C:" + chr(92) + "Windows"
+                         + chr(92) + "win.ini")
+        # A climb is relative to the sink's directory, so keeping the drive
+        # letter would make it absolute again and the climb would test nothing.
+        self.assertEqual(payloads["plain/depth2"],
+                         (".." + chr(92)) * 2 + "Windows" + chr(92) + "win.ini")
+
+    # -- the verdict ladder ---------------------------------------------------
+
+    def test_content_absent_from_the_control_is_a_file_read(self):
+        verdict = self._method().confirm(
+            self._observe("Linux version 5.15.0-generic"), self._probes()[0])
+        self.assertEqual(verdict.status, "file-read")
+        self.assertIn("NOT execution", verdict.evidence)
+
+    def test_content_in_the_control_too_is_inconclusive(self):
+        # The near neighbour of the test above, and the one that matters: a page
+        # that mentions the signature for its own reasons read no file.
+        verdict = self._method().confirm(
+            self._observe("Linux version 5.15.0", control="Linux version 5.15.0"),
+            self._probes()[0])
+        self.assertEqual(verdict.status, "inconclusive")
+
+    def test_an_echoed_path_without_content_is_negative_not_a_read(self):
+        # Exactly what the real target returns when it cannot open the path.
+        warning = ("<b>Warning</b>: include(/proc/version): failed to open stream: "
+                   "No such file or directory")
+        self.assertEqual(
+            self._method().confirm(self._observe(warning), self._probes()[0]).status,
+            "negative")
+
+    def test_an_echoed_path_beside_real_content_confirms_and_says_so(self):
+        verdict = self._method().confirm(
+            self._observe("include(/proc/version) warned; Linux version 5.15.0"),
+            self._probes()[0])
+        self.assertEqual(verdict.status, "file-read")
+        self.assertIn("echoes the path", verdict.evidence)
+
+    def test_a_delivery_failure_is_an_error_not_a_negative(self):
+        verdict = self._method().confirm(
+            Observation(status=None, body="timed out", control_body=""),
+            self._probes()[0])
+        self.assertEqual(verdict.status, "error")
+
+    def test_base64_content_confirms_through_the_existing_peeling(self):
+        # The php://filter wrapper needs no oracle of its own: the evidence
+        # search already peels base64 runs of 16 characters or more.
+        probe = next(p for p in self._probes() if p.carrier.startswith("php_filter"))
+        blob = base64.b64encode(
+            b"Linux version 5.15.167.4-microsoft-standard-WSL2 x").decode()
+        self.assertEqual(
+            self._method().confirm(self._observe(blob), probe).status, "file-read")
+
+    # -- the gate the project mandates for a new method -----------------------
+
+    def test_include_confirms_on_a_reading_sink_only(self):
+        """`/vuln` opens the path and returns what it read; `/reflect` names the
+        path back and reads nothing. The method must confirm on the former and
+        never on the latter -- the direct false-positive gate, and the one the
+        real target makes necessary, because its failure mode *is* echoing the
+        path."""
+        content = "Linux version 5.15.167.4-microsoft-standard-WSL2 (gcc 11.2.0)"
+
+        def route(method, path, params, headers, body):
+            # `local_target` hands params as plain strings, not lists:
+            # indexing [0] here took the first *character* of the path.
+            asked = params.get("file") or ""
+            if path == "/vuln":
+                # Stands in for `include $_GET['file']` on a readable path.
+                if "proc/version" in asked:
+                    return 200, content
+                return 200, "Warning: include(" + asked + "): failed to open stream"
+            return 200, "you asked for " + asked
+
+        with local_target(route) as base:
+            vuln = self.gen.run_detection(
+                iter([self.rec]), url=base + "/vuln?file=FUZZ", methods=["include"],
+                config={"probe_depth": "quick"})
+            reflect = self.gen.run_detection(
+                iter([self.rec]), url=base + "/reflect?file=FUZZ", methods=["include"],
+                config={"probe_depth": "quick"})
+
+        self.assertTrue([r for r in vuln if r["verdict"] == "file-read"],
+                        "include must confirm against a sink that reads the path")
+        self.assertFalse([r for r in reflect if r["verdict"] == "file-read"],
+                         "a target that only names the file back must never confirm")
+        self.assertFalse(
+            [r for r in vuln + reflect if r["verdict"] == rcekit.EXECUTION_TIER],
+            "include must never reach the execution tier")

@@ -90,6 +90,7 @@ starting point — this page is for looking things up once you know what you wan
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
 | `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `evaluation-sink` only — proven, and not execution |
 | `argv` | **Argument injection** into a program spawned with no shell: the value is one of its arguments, so every separator is inert, and an option it names runs a command. Builds nothing until `--argv-binary` names the program, because the option that does this is specific to it | `safe` | `executed` |
+| `include` | **File inclusion**: the sink opens a path the request names and returns what it read. Sweeps traversal depth from an absolute path downward and reads through a PHP stream filter as well as plainly; `--include-wrappers` narrows which wrappers go out, and `--verify-active-risk` decides whether a credential-adjacent file is read at all | `safe` | `file-read` only — proven, and not execution: the evidence is a signature known in advance, not a value the target computed |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
 run's tier is refused **by name** rather than skipped, because a run that

