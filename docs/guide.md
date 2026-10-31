@@ -14,6 +14,8 @@ only ever run it against systems you are authorised to test.
 - [Point at a captured request](#point-at-a-captured-request)
 - [Landing the payload intact](#landing-the-payload-intact)
 - [Choosing methods](#choosing-methods)
+- [When no separator works because there is no shell](#when-no-separator-works-because-there-is-no-shell)
+- [When your value names a file](#when-your-value-names-a-file)
 - [When the sink filters separators](#when-the-sink-filters-separators)
 - [Injecting inside quotes](#injecting-inside-quotes)
 - [Whole-command sinks](#whole-command-sinks)
@@ -202,6 +204,7 @@ reported separately.
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 | The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
 | My value becomes an argument of a program run without a shell, and every separator is inert | `argv` | One probe per option shape you select with `--argv-binary`. The cheapest method here, and the only one that reaches a sink where `escapeshellarg` did its job |
+| My value names a file the application **opens** | `include` | Sweeps the traversal depth, so one probe per depth per wrapper. Reads cost nothing but a request and report `file-read`. Reaching `executed` needs `--include-write-url`, a URL the file it writes *through* the sink is served at (see [When your value names a file](#when-your-value-names-a-file)) |
 
 **Probe depth trades requests for coverage.** By default (`--probe-depth full`)
 each sink gets three extra probe shapes beyond the canonical ones, because the
@@ -309,6 +312,80 @@ that needs an out-of-band core and is not built. And every shipped option is a
 **single argv element**, because a sink that splits your value on spaces is a
 different sink; `-o ProxyCommand=x` would be inert where `-oProxyCommand=x`
 works.
+
+---
+
+## When your value names a file
+
+The sink before this one spawns a program. This one opens a file, and the
+difference decides what can be proven: nothing runs, so there is no computed
+value to look for, and `reflected` and `eval` come back `negative` on a target
+that is fully exploitable.
+
+```php
+include $_GET['file'];
+```
+
+`include` asks the one question that sink answers:
+
+```bash
+python rcekit.py --acknowledge-consent   --verify-url "https://target.example/lfi.php?file=FUZZ"   --methods include
+```
+
+```
+[detect] sent 18 probes (18 result(s)): file-read=14, negative=4
+[detect] FILE-READ (14):
+  [include/plain/depth3] ../../../proc/version
+      (target returned the content of /proc/version, absent from the control)
+```
+
+**`file-read` is where the reads stop, and it is a finding, not a near miss.**
+Arbitrary file read is CWE-22 / CWE-98 with its own remediation, and what it is
+worth depends on which paths you can reach — application config, database
+credentials, source, keys. Try them before you write a severity down. It is not
+called `executed` because the evidence is a signature RCEKit knew in advance
+rather than a value the target computed, and that distinction is the whole tier
+rule.
+
+**The depth is swept because it is a property of the sink, not of the target.**
+Which climb reaches `/proc` depends on the directory the sink runs from, so an
+absolute path and every depth up to eight go out. In the run above the four
+`negative` probes are depths 1 and 2 of each wrapper — correct rather than a
+miss, because that sink runs from `/var/www/html` and needs three. The reads go
+out plainly and through `php://filter/convert.base64-encode`, which proves more
+about the sink: a stream wrapper was honoured, and the filter *prints* a file a
+bare include would have executed.
+
+**Reaching execution needs somewhere to read a written file back.** The obvious
+route is a wrapper carrying code — `data://`, `php://input` — and both need
+`allow_url_include`, which PHP has defaulted off since 5.2; measured, the target
+says so itself. What works on a default build is to make the sink include a
+script that *writes*, and hand that script its arguments through the request:
+
+```bash
+python rcekit.py --acknowledge-consent   --verify-url "https://target.example/lfi.php?FUZZ" --verify-url-location raw   --methods include   --include-write-url "https://target.example/{name}"   --include-write-param file   --verify-active-risk stateful
+```
+
+Three things about that command are not optional. `--verify-url-location raw`
+puts the payload on the wire as the **whole query string**, because the script
+being included takes its arguments from there — percent-encoding it would turn
+the `&` separating those arguments into data. `--include-write-param` names the
+parameter the sink reads its path from, since RCEKit has to write that name into
+the payload rather than inject into its value. And `--verify-active-risk
+stateful` is needed because this shape leaves a file behind; the read rungs
+above run at `safe` and leave nothing.
+
+The verdict comes from the **second** request. The write answers 200 whether or
+not anything interpreted the file, so RCEKit fetches it back and reads which of
+three things happened: the computed product is `executed`, the source form
+coming back verbatim is `file-write` — written and served, nothing evaluated it
+— and neither is `negative`. Every finding prints its own cleanup line.
+
+**Both traversal shapes go out, and only one can work.** Whether the path must
+name `pearcmd.php` or `pearcmd` depends on whether the sink appends an extension
+of its own: a bare `include` opens exactly what it is given, while a framework
+loader that builds its own filename appends `.php`. You do not have to know
+which; RCEKit sends both and at most one confirms.
 
 ---
 

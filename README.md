@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.12.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.12.1** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -196,6 +196,12 @@ drops every TLS assurance, including OpenSSL's security level and minimum
 protocol version, because dated software needs that to complete a handshake at
 all.
 
+**The first four scenarios ask what you can observe**, because that decides
+which oracle can prove anything and how strong an answer you can get. The fifth
+asks a different question — what the sink *is* — and it is there because two
+sinks answer nothing on the first axis: both return output, and neither runs a
+command. Then the widest run and the narrowest.
+
 ### 1. Output comes back in the response — the first pass
 
 Cheap, safe, no state change, and between them `reflected` and `eval` cover
@@ -218,7 +224,7 @@ python rcekit.py --acknowledge-consent \
 With no `--environments` this sweeps every sink dialect RCEKit knows — POSIX,
 `cmd.exe`, PowerShell and the language runtimes that reach a shell — because
 which one sits behind the parameter is the thing you do not know yet. The run
-prints its request count before anything fires, and scenario 6 cuts it.
+prints its request count before anything fires, and scenario 7 cuts it.
 
 ### 2. Nothing comes back, but the target has egress
 
@@ -315,7 +321,60 @@ it is the channel the proof comes back on. The first of those two is the
 CVE-2017-12615 shape and one of the benchmark's cases.
 [Upload and write-primitive targets](docs/guide.md#upload-and-write-primitive-targets).
 
-### 5. Everything the tool has — the widest run
+### 5. Nothing you inject works, and the app looks correct
+
+The four above ask what you can observe. This one asks what the sink **is**,
+because two sinks return output and still answer nothing to `reflected` and
+`eval`: one spawns a program with no shell, and one opens a file. Both reach
+`executed`, and on both a results-based shell method reports a clean `negative`
+against a target that is fully exploitable — so this is the scenario for a
+target you are confident about and cannot move.
+
+**Your value becomes one argument of a program.** `escapeshellarg` quoted it
+exactly as documented, every separator arrives as a literal, and no shell ever
+sees them. What quoting cannot stop is that argument being read as an *option*,
+and an option can name a command the program then runs.
+
+```bash
+# query string — a search endpoint that shells out to git
+python rcekit.py --acknowledge-consent   --verify-url "https://target.example/repo/tree/master/search?query=FUZZ"   --methods argv --argv-binary git --insecure
+```
+
+```bash
+# captured request — sweep the catalogue when you cannot name the binary
+python rcekit.py --acknowledge-consent   -r search.req -p q   --methods argv --argv-binary auto --insecure
+```
+
+`--argv-binary` is required, because the option that does this is specific to
+the program: there is no generic flag that makes an arbitrary binary run a
+command. `auto` tries the whole catalogue and costs one probe per shape.
+
+**Your value names a file the application opens.** Nothing runs, so there is no
+computed value to look for — which is why this needs its own method rather than
+a probe shape inside `reflected`.
+
+```bash
+# query string — the reads, and they need nothing from you
+python rcekit.py --acknowledge-consent   --verify-url "https://target.example/view.php?file=FUZZ"   --methods include --insecure
+```
+
+```bash
+# captured request — reaching execution, which needs a URL to read the file back
+python rcekit.py --acknowledge-consent   -r view.req --verify-url-location raw   --methods include   --include-write-url "https://target.example/{name}"   --include-write-param file   --verify-active-risk stateful --insecure
+```
+
+The first command reports `file-read` — arbitrary file read, CWE-22 / CWE-98, a
+vulnerability on its own terms and not a weaker RCE. What it is worth depends on
+which paths you can reach, so try them before writing a severity down.
+
+The second writes a computed one-liner *through* the sink and fetches the file
+back, which is the one route that survives `allow_url_include` being off — off
+by default since PHP 5.2, so a wrapper carrying code (`data://`, `php://input`)
+is not it. `--verify-url-location raw` is not optional there: the payload is the
+whole query string, because the script being included takes its arguments from
+it. [When your value names a file](docs/guide.md#when-your-value-names-a-file).
+
+### 6. Everything the tool has — the widest run
 
 **Injection-point enumeration** (`--auto-params`) is reachable only from a
 captured request, so the widest single-request run starts from `-r` — worth
@@ -345,12 +404,12 @@ python rcekit.py --acknowledge-consent \
   --verify-active-risk stateful --insecure --detect-json findings.json
 ```
 
-That is 8 of the 11 methods; `file` and `write` need a path only you can supply
-and are scenarios 3 and 4 above, and `argv` needs you to name the binary whose
-options it should inject. `include` is in that 8 and reads without being told
-anything; reaching `executed` through it needs `--include-write-url`, which is
-the URL the file it writes through the sink is served at — as target-specific as
-a web root. `--auto-params all` takes every query value,
+That is 8 of the 11 methods, and the three it leaves out each need something
+only you can supply: a write path for `file`, the URL your own upload lands at
+for `write`, and the binary whose options to inject for `argv` — scenarios 3, 4
+and 5. `include` is in the 8 and reads without being told anything; reaching
+`executed` through it needs `--include-write-url` as well, which is scenario 5
+too. `--auto-params all` takes every query value,
 JSON leaf — booleans and `null` included — XML element, attribute and CDATA
 section, form field, multipart part and upload filename, cookie and header, with
 each occurrence of a repeated query or form key counted separately, and the
@@ -368,7 +427,7 @@ tier for a disposable target, not for production.
 
 No external infrastructure and no config file — the OOB listener runs in-process.
 
-### 6. The target is known — narrow it and go fast
+### 7. The target is known — narrow it and go fast
 
 Everything above widens the sweep because the sink is unknown. Once you know it,
 pinning the dialect, the context and the shape turns a thousand requests into a
@@ -402,19 +461,15 @@ application is not itself a shell. Pinning the pair wrong is the one way to
 narrow into nothing, and the run says `NOTHING WAS TESTED` rather than
 `negative` when it happens.
 
-An example can only name one value per flag; these are the others.
-`--environments`: `unix`, `windows`, `java`, `php`, `python`, `nodejs`, `ruby`,
-`perl`, `go`, `dotnet`, `docker` for the shell-shaped methods, and `graphql` or
-`mongodb` for `eval` and `boolean`.
-`--sink-env`: `auto`, `unix`, `windows`, `powershell`.
-`--sink-shape`: `auto`, `sep`, `chain`, `newline`, `raw`, `sq`, `dq`,
-`subshell`, `env`. `--contexts`: `raw`, `json`, `xml`, `xml_cdata`, `yaml`,
-`attribute`, `http_header` and the rest of the
-[context list](docs/reference.md#contexts). `--separators`: any subset of
-`'; '`, `'| '`, `'|| '`, `'&& '` and a newline written `\n`.
-`--probe-depth`: `quick`, `full`. `--evade`: `none`, `low`, `high`. And
-`--max-points N` bounds the candidate count under `--auto-params`, where
-`--max-payloads` bounds the probes per point.
+An example can only name one value per flag, and the rest are in the
+reference rather than here: the
+[environments](docs/reference.md#environments) — sixteen, and **not the same
+set in both modes** — the [sink shapes](docs/reference.md#sink-shape), the
+[contexts](docs/reference.md#contexts) and the
+[encodings](docs/reference.md#encodings). Each of those lists is checked
+against the corpus by a test, which is the reason to read it there rather
+than in a second copy here. `--max-points N` bounds the candidate count
+under `--auto-params`, where `--max-payloads` bounds the probes per point.
 
 **`--max-payloads` means two different things**, and a budget set for politeness
 quietly becomes a coverage gap: on a single point it is one allowance shared by
@@ -790,7 +845,7 @@ target shapes.
 | No output *and* no egress | [No-egress targets](docs/guide.md#no-egress-targets) |
 | The request stores a file instead of running anything | [Upload and write-primitive targets](docs/guide.md#upload-and-write-primitive-targets) |
 | The app builds a path or shells out with the upload's filename | [Enumerating injection points](docs/reference.md#enumerating-injection-points) |
-| The app opens a file my value names | [Detection methods](docs/reference.md#detection-methods) |
+| The app opens a file my value names | [When your value names a file](docs/guide.md#when-your-value-names-a-file) |
 | The payload runs later, on a different request | [When execution happens on another request](docs/guide.md#when-execution-happens-on-another-request) |
 | The injection point is SQL and the sink is the database host | [Query-language bridges](docs/reference.md#query-language-bridges) |
 | The endpoint takes a serialized object | [Deserialization sinks](docs/reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce) |

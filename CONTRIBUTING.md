@@ -35,6 +35,23 @@ cd rcekit        # Python 3.8+, standard library only — no dependencies
 python -m unittest discover -s tests
 ```
 
+**If you change the payload corpus, regenerate the copy inside the module.**
+`templates/payloads.json` is the editable corpus and `rcekit.py` carries a
+built-in copy of it, which is what makes the single file run on its own with
+nothing beside it. They are generated from one source, not maintained in
+parallel:
+
+```bash
+python tools/embed_corpus.py            # refresh the built-in copy
+python tools/embed_corpus.py --check    # verify it is current, changing nothing
+```
+
+The suite fails if the two drift, in both directions, and `--doctor` checks the
+corpus an installed copy actually loads. Nothing here is a judgement call: a
+corpus edit without the regenerate step is a red suite with a message about
+drift, which is easy to fix and confusing to meet for the first time with no
+instruction.
+
 The tool itself needs nothing but Python. **The suite additionally needs a POSIX
 `sh` on `PATH`**, because the fake vulnerable sinks it stands up are POSIX
 command-injection points (`echo <input> 2>&1`, `ping -c 1 <input>`) and every
@@ -114,7 +131,11 @@ To add one:
    address RCEKit did not choose. Detection the tool could have done and did
    not is a false negative wearing a safety label, and it costs more than the
    noise it saves.
-4. Register the class in `DETECTION_METHODS`.
+4. Register the class in `DETECTION_METHODS`. If the method reads probe
+   shapes, wrappers or targets from the corpus rather than building them in
+   Python — most do, so they extend without touching the source — add the
+   section to `templates/payloads.json` and run `python tools/embed_corpus.py`
+   in the same commit.
 5. Add a `/vuln` (executes) vs `/reflect` (echoes) test to
    `DetectionMethodTestCase`: the method must `confirm` on `/vuln` and stay
    unconfirmed on `/reflect`. No third-party deps; keep the suite green on 3.8+.

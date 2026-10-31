@@ -1516,13 +1516,28 @@ an *absent* default file falls through to the built-in copy.
 
 ## Environments
 
-`unix`, `windows`, `nodejs`, `python`, `php`, `java`, `dotnet`, `ruby`, `perl`,
-`go`, `docker`, `kubernetes`, `graphql`, `mongodb`.
+`--environments` names the runtime the corpus payloads are written for. Sixteen
+are declared, and **the set is not the same in both modes**, which is worth
+knowing before pinning one: a name with nothing behind it for the mode you are
+running narrows the run to nothing, and RCEKit says `NOTHING WAS TESTED` rather
+than `negative` when it happens.
+
+| | Environments |
+|---|---|
+| Both modes (12) | `unix`, `windows`, `docker`, `kubernetes`, `java`, `php`, `python`, `nodejs`, `ruby`, `perl`, `go`, `dotnet` |
+| Detection probes only (2) | `powershell`, `sql` |
+| Exploitation payloads only (2) | `graphql`, `mongodb` |
 
 The shell methods (`reflected`, `file`, `time`) apply to the shell environments
 and to the language runtimes, since each hands its string to `/bin/sh`. The
 data-layer environments (`sql`, `graphql`, `mongodb`) are excluded from those
-methods — `eval` is what applies there.
+methods — `eval` is what applies there, and `boolean` for a sink that evaluates
+and renders nothing of it.
+
+`--sink-env` is a different axis and takes only `auto`, `unix`, `windows`,
+`powershell`: the *shell* behind the runtime. A .NET application is not itself a
+shell, which is why `--environments dotnet --sink-env powershell` is an ordinary
+pairing rather than a contradiction.
 
 ## Categories
 

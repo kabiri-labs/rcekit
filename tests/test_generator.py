@@ -15659,3 +15659,170 @@ class IncludeExecutionRungTestCase(unittest.TestCase):
                                 channels=[("response body", "wrote")],
                                 control_channels=[("response body", "")]), probe)
             self.assertEqual(verdict.status, expected, f"mode={mode}")
+
+
+class ConsoleOutputEncodingTestCase(unittest.TestCase):
+    """What RCEKit prints has to survive the console it is printed to.
+
+    Python encodes stdout with the locale's codec. On Windows that is normally
+    cp1252, which has no byte for most of the punctuation a document would use,
+    and a `print` of such a character raises `UnicodeEncodeError` -- an
+    exception that unwinds out of `main` and replaces the rest of the report
+    with a traceback carrying the module's absolute path. Found at 3.12.0,
+    where three strings carried U+2192: the two non-execution section closings
+    and `time`'s own evidence summary. CI runs on Linux under UTF-8 and had
+    never seen it, so these tests pin the codec rather than trusting the
+    machine they run on."""
+
+    # Written out rather than derived, because the point is that each one is a
+    # deliberate exception somebody justified. A byte-order mark is input the
+    # tool has to RECOGNISE, in `strip_bom`; it is never emitted.
+    ALLOWED = {"﻿": "_BOM, matched in request bodies and never printed"}
+
+    def _docstring_ids(self, tree):
+        ids = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                continue
+            first = node.body[0] if node.body else None
+            if (isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)):
+                ids.add(id(first.value))
+        return ids
+
+    def _offenders(self):
+        """Every string literal outside a docstring carrying a character cp1252
+        cannot encode, as (line, codepoint).
+
+        Docstrings are excluded because nothing reads `__doc__`: the module has
+        no `--help` path through it and no listing prints one, which was checked
+        rather than assumed. A comment is not a string literal, so prose in one
+        is out of scope for the same reason."""
+        source = SCRIPT.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        docstrings = self._docstring_ids(tree)
+        bad = []
+        for node in ast.walk(tree):
+            if (not isinstance(node, ast.Constant)
+                    or not isinstance(node.value, str)
+                    or id(node) in docstrings):
+                continue
+            for char in node.value:
+                if char in self.ALLOWED:
+                    continue
+                try:
+                    char.encode("cp1252")
+                except UnicodeEncodeError:
+                    bad.append((node.lineno, "U+%04X" % ord(char)))
+        return sorted(set(bad))
+
+    def test_nothing_rcekit_can_print_needs_more_than_cp1252(self):
+        offenders = self._offenders()
+        self.assertEqual(
+            offenders, [],
+            "rcekit.py carries string literals a cp1252 console cannot encode, "
+            f"at {offenders}. Printing one kills the run mid-report with a "
+            "traceback. Use the ASCII spelling -- `->` for an arrow -- or, if "
+            "the character is input the tool has to recognise rather than text "
+            "it emits, add it to ALLOWED with the reason.")
+
+    def test_every_allowed_exception_is_still_in_the_file(self):
+        """An exception list nobody prunes stops being a list of decisions and
+        becomes a hole, so each entry has to still be earning its place.
+
+        Read from the parsed literals rather than from the source text, because
+        the source spells this one as the escape `\ufeff` and a search of the
+        characters would never find it -- which is how this test failed first."""
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        literals = "".join(node.value for node in ast.walk(tree)
+                           if isinstance(node, ast.Constant)
+                           and isinstance(node.value, str))
+        for char, why in self.ALLOWED.items():
+            self.assertIn(char, literals,
+                          f"ALLOWED still excuses U+{ord(char):04X} ({why}), "
+                          "which is no longer in rcekit.py -- drop the entry")
+
+    def test_the_report_finishes_on_a_cp1252_console(self):
+        """The end-to-end shape of the original failure, with the codec forced
+        so this holds on CI too.
+
+        The legacy chain path prints a `needs-review` section, closes it, and
+        then names its own ceiling. Before the fix the process died at the
+        closing line: the findings had been printed, the two lines after them
+        had not, and the exit status was 1 from an unhandled exception."""
+        with chain_target(True) as (base, _counter),                 tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "chain.json"
+            profile.write_text(json.dumps(chain_profile(base)), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-chain", str(profile), "--categories", "basic_enum",
+                 "--environments", "unix", "--contexts", "raw",
+                 "--max-payloads", "2"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+                env=dict(os.environ, PYTHONIOENCODING="cp1252"))
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertNotIn("UnicodeEncodeError", result.stderr)
+        self.assertIn("NEEDS-REVIEW", result.stdout, "the findings still print")
+        self.assertIn("reaches needs-review at best", result.stdout,
+                      "and the report runs to its end rather than stopping at "
+                      "the first character cp1252 cannot carry")
+
+    def test_an_unencodable_character_degrades_instead_of_raising(self):
+        """The second half of the fix, and the reason it is there: the guard
+        above holds only while someone remembers it.
+
+        `soften_console_encoding` sets `errors="replace"` on the real streams,
+        so a character that slips past the guard prints as `?` and the report
+        finishes. A report one character wrong is worth having; a traceback in
+        place of a report is not."""
+        import io
+        buffer = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="")
+        self.assertEqual(buffer.errors, "strict")
+        with self.assertRaises(UnicodeEncodeError):
+            buffer.write(chr(0x2192))
+            buffer.flush()
+        stdout, stderr = sys.stdout, sys.stderr
+        fresh = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", newline="")
+        try:
+            sys.stdout = sys.stderr = fresh
+            rcekit.soften_console_encoding()
+            self.assertEqual(fresh.errors, "replace")
+            fresh.write("a" + chr(0x2192) + "b")
+            fresh.flush()
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+        self.assertEqual(fresh.buffer.getvalue(), b"a?b")
+
+    def test_a_real_run_hardens_its_own_streams(self):
+        """`main` has to install it, which calling the helper directly does not
+        show -- and the first version of these tests did not check: removing the
+        call from `main` left every one of them passing, because the three
+        strings are ASCII now and nothing unencodable is printed either way.
+
+        So this asks the process itself, after a full run, what its stdout does
+        with a character the codec has no byte for. Written as one line of
+        semicolon-separated statements rather than a multi-line program, so the
+        probe carries no escape sequence of its own."""
+        probe = ("import rcekit, sys; rcekit.main(['--doctor']); "
+                 "sys.stderr.write('ERRORS=' + str(sys.stdout.errors))")
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=120,
+            env=dict(os.environ, PYTHONIOENCODING="cp1252"))
+        self.assertIn("ERRORS=replace", result.stderr,
+                      "a completed run left stdout strict, so the next "
+                      f"unencodable character kills it: {result.stderr[-300:]}")
+
+    def test_a_replaced_stream_is_left_alone(self):
+        # A host application or a test harness that put its own object on
+        # sys.stdout owns it. Reaching into something with no `reconfigure` --
+        # or raising because it has none -- would be the library overstepping.
+        import io
+        stdout, stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout = sys.stderr = io.StringIO()
+            rcekit.soften_console_encoding()      # must not raise
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr

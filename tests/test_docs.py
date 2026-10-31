@@ -1881,3 +1881,270 @@ class OobHostPrerequisiteTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuideMethodChoiceTableTestCase(unittest.TestCase):
+    """`docs/guide.md`'s "Choosing methods" table, pinned to the registry.
+
+    This table is where an operator picks a method, and it was the one such
+    table in the repository that no test read. It drifted exactly as the
+    README's comparison table had: `include` reached `executed` in 3.12.0, got
+    a row in the README's two tables and in `docs/reference.md` -- each of
+    those pinned by a test -- and was missing here, so the guide offered ten of
+    eleven methods to anyone choosing from it.
+
+    The comparison table's own check carries that history in its docstring:
+    `lookup` and `boolean` named seven of nine methods for two releases
+    because nothing read it. Writing this one is the same lesson applied one
+    table over, rather than a row added and the hole left open."""
+
+    GUIDE = DOCS_DIR / "guide.md"
+
+    def _use_cells(self):
+        """The `Use` column of every row of the method-choice table.
+
+        Found by its own heading and bounded by the paragraph after it, so a
+        later table in the same document cannot stand in for it -- the mistake
+        the capability-table check had to be corrected for."""
+        text = self.GUIDE.read_text(encoding="utf-8")
+        start = text.index("| You suspect | Use | Cost |")
+        end = text.index("**Probe depth trades requests for coverage.**", start)
+        return [line.split("|")[2].strip()
+                for line in text[start:end].splitlines()
+                if line.startswith("|") and "---" not in line][1:]
+
+    def _named_methods(self):
+        """Every method named in that column.
+
+        A cell may name more than one -- the first-pass row is
+        `reflected,eval` -- so each backticked run is split on commas. Compared
+        whole afterwards, which is what keeps a typo or a rename from passing as
+        a method."""
+        named = set()
+        for cell in self._use_cells():
+            for run in re.findall(r"`([^`]+)`", cell):
+                named.update(part.strip() for part in run.split(",") if part.strip())
+        return named
+
+    def test_the_table_is_not_empty(self):
+        # The two checks below both pass vacuously on a table this cannot find,
+        # and a heading somebody rewords would do that silently.
+        self.assertTrue(self._use_cells(),
+                        "the method-choice table in docs/guide.md was not found "
+                        "-- its heading row or the paragraph after it moved")
+
+    def test_every_registered_method_can_be_chosen_from_the_guide(self):
+        missing = sorted(set(rcekit.DETECTION_METHODS) - self._named_methods())
+        self.assertEqual(
+            missing, [],
+            f"registered methods with no row in the guide's method-choice "
+            f"table: {missing}. An operator choosing a method from the field "
+            "guide is offered every method or silently offered fewer.")
+
+    def test_the_table_offers_no_method_the_cli_rejects(self):
+        # The other direction, so the check cannot rot one-way: a method
+        # removed from the registry would otherwise leave its row behind,
+        # recommending a `--methods` value the CLI refuses.
+        phantom = sorted(name for name in self._named_methods()
+                         if name not in rcekit.DETECTION_METHODS)
+        self.assertEqual(
+            phantom, [],
+            f"the guide's method-choice table offers values that are not "
+            f"registered methods: {phantom}")
+
+
+class ContentsListTestCase(unittest.TestCase):
+    """A page with a **Contents** list has to list its own sections.
+
+    Found drifted in `docs/guide.md`, which carried 19 entries over 21
+    sections: the `argv` section had been missing since 3.7.0 and the inclusion
+    one was added without an entry. A contents list that quietly omits a
+    section is worse than none, because the reader takes it for the page's
+    shape and never scrolls past what it promises -- and both omissions were
+    the two newest sinks RCEKit can reach.
+
+    Compared by **anchor**, not by label, which the first version of this got
+    wrong and `docs/reference.md` caught: that page shortens four of its
+    entries on purpose -- `Deserialization sinks` for a section actually
+    titled "Deserialization sinks, and the verdict that is not RCE" -- and a
+    label comparison called every one of them a dead entry. The anchor is the
+    thing that has to be true.
+
+    Both directions, like the method tables. A `##` section with no entry is
+    invisible; an entry whose anchor matches no heading is a link that goes
+    nowhere. A `###` entry is allowed but never required, because a page
+    chooses for itself how deep its own contents go."""
+
+    def _pages(self):
+        """Every markdown page carrying a contents list, as
+        (path, entry anchors, all heading anchors, top-level heading anchors).
+
+        The list is read as the bullets immediately after the `**Contents**`
+        line, so a later bullet list on the page cannot stand in for it."""
+        pages = []
+        for path in markdown_files():
+            text = strip_code_fences(path.read_text(encoding="utf-8"))
+            if "**Contents**" not in text:
+                continue
+            entries = []
+            for line in text.split("**Contents**", 1)[1].splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                match = re.match(r"- \[(?P<label>.*)\]\(#(?P<anchor>[^)]*)\)$", stripped)
+                if match is None:
+                    break
+                entries.append(match.group("anchor"))
+            headings, top = [], []
+            for line in text.splitlines():
+                match = HEADING_RE.match(line)
+                if match is None:
+                    continue
+                anchor = slugify(match.group(2))
+                headings.append(anchor)
+                if len(match.group(1)) == 2:
+                    top.append(anchor)
+            pages.append((path, entries, headings, top))
+        return pages
+
+    def test_at_least_one_page_has_a_contents_list(self):
+        # Otherwise the checks below pass by finding nothing, which is how a
+        # renamed marker would go unnoticed.
+        self.assertTrue(self._pages(),
+                        "no page has a '**Contents**' list -- if they were "
+                        "removed, remove this test with them")
+
+    def test_every_section_is_listed(self):
+        for path, entries, _headings, top in self._pages():
+            with self.subTest(page=path.name):
+                missing = [anchor for anchor in top if anchor not in entries]
+                self.assertEqual(
+                    missing, [],
+                    f"{path.name} has sections its contents list does not "
+                    f"offer: {missing}")
+
+    def test_no_entry_points_at_a_section_that_is_not_there(self):
+        for path, entries, headings, _top in self._pages():
+            with self.subTest(page=path.name):
+                dead = [anchor for anchor in entries if anchor not in headings]
+                self.assertEqual(
+                    dead, [],
+                    f"{path.name}'s contents list links anchors with no "
+                    f"heading behind them: {dead}")
+
+    def test_the_listed_sections_are_in_document_order(self):
+        """Scoped to the top-level sections, because the sub-sections a page
+        promotes into its contents are a reading order rather than a position.
+
+        `docs/reference.md` lists four `###` deep-dives among its sections --
+        the sink shell, deserialization sinks, the bridges, the observed
+        channel -- grouped after the flag tables although they live inside
+        them. Asserting positional order over every entry demanded that page be
+        reshuffled to satisfy a test, which is the test being wrong about what
+        it is for."""
+        for path, entries, _headings, top in self._pages():
+            with self.subTest(page=path.name):
+                self.assertEqual(
+                    [a for a in entries if a in top], top,
+                    f"{path.name}'s contents list does not run through the "
+                    "sections in the order they appear")
+
+
+class EnvironmentListTestCase(unittest.TestCase):
+    """`docs/reference.md`'s environment table, pinned to what the generator
+    actually emits.
+
+    Both lists of environments in the repository had drifted and neither was
+    read by a test. The README named eleven shell-shaped environments and
+    omitted `powershell`, `sql` and `kubernetes`; this page named fourteen and
+    omitted `powershell` while mentioning `sql` only in the prose underneath.
+    An operator pinning `--environments` from either one was choosing from a
+    list that was never checked against the corpus.
+
+    Read by **generating records** rather than by reading corpus keys, because
+    the two disagree: `postgres` is a key inside a payload category and emits
+    no record, so it is not an environment and naming it would be a new wrong
+    claim in place of an incomplete one. Verified by looking for it in the
+    generated output and finding none."""
+
+    REFERENCE = DOCS_DIR / "reference.md"
+
+    @classmethod
+    def setUpClass(cls):
+        generator = rcekit.RCEKit()
+        cls.by_mode = {
+            mode: {record.environment for record
+                   in generator.generate_payload_records(mode=mode)}
+            for mode in ("detection", "exploit")}
+
+    def _table_rows(self):
+        """The environment table as {row label: set of names}."""
+        text = self.REFERENCE.read_text(encoding="utf-8")
+        start = text.index("| | Environments |")
+        end = text.index("The shell methods", start)
+        rows = {}
+        for line in text[start:end].splitlines():
+            if not line.startswith("|") or "---" in line:
+                continue
+            # A row starts and ends with a pipe, so the split yields an empty
+            # cell at each end: the label is cells[1] and the names cells[2].
+            cells = row_cells(line)
+            if len(cells) < 3 or not cells[1]:
+                continue
+            rows[cells[1]] = set(re.findall(r"`([^`]+)`", cells[2]))
+        return rows
+
+    def test_the_table_is_there(self):
+        rows = self._table_rows()
+        self.assertEqual(
+            sorted(rows), ["Both modes (12)", "Detection probes only (2)",
+                           "Exploitation payloads only (2)"],
+            "the environment table in docs/reference.md was not found, or its "
+            f"row labels changed: {sorted(rows)}")
+
+    def test_each_row_holds_exactly_the_environments_it_claims(self):
+        rows = self._table_rows()
+        detection, exploit = self.by_mode["detection"], self.by_mode["exploit"]
+        expected = {
+            "Both modes (12)": detection & exploit,
+            "Detection probes only (2)": detection - exploit,
+            "Exploitation payloads only (2)": exploit - detection,
+        }
+        for label, names in expected.items():
+            with self.subTest(row=label):
+                self.assertEqual(
+                    rows.get(label, set()), names,
+                    f"the '{label}' row disagrees with the corpus. Missing: "
+                    f"{sorted(names - rows.get(label, set()))}; named but not "
+                    f"emitted: {sorted(rows.get(label, set()) - names)}")
+
+    def test_each_row_label_counts_its_own_entries(self):
+        # The count is in the label, so it is a claim like any other and goes
+        # stale the same way. Read out of the label rather than trusted.
+        for label, names in self._table_rows().items():
+            with self.subTest(row=label):
+                match = re.search(r"\((\d+)\)", label)
+                self.assertIsNotNone(match, f"'{label}' states no count")
+                self.assertEqual(
+                    int(match.group(1)), len(names),
+                    f"'{label}' says {match.group(1)} and lists {len(names)}")
+
+    # Spelled out rather than digits, which is the house style for a figure in
+    # prose, so the test has to speak the same language the page does.
+    WORD_FOR = {12: "Twelve", 14: "Fourteen", 15: "Fifteen", 16: "Sixteen",
+                17: "Seventeen", 18: "Eighteen"}
+
+    def test_the_prose_total_matches_the_table(self):
+        """The figure in the sentence above the table, which is the one a
+        reader takes on trust without counting the cells."""
+        total = len(self.by_mode["detection"] | self.by_mode["exploit"])
+        word = self.WORD_FOR.get(total)
+        self.assertIsNotNone(
+            word, f"{total} environments and no word for it -- extend WORD_FOR")
+        # Whitespace collapsed, so the sentence is found whether or not it
+        # happens to wrap across a line.
+        flat = " ".join(self.REFERENCE.read_text(encoding="utf-8").split())
+        self.assertIn(
+            f"{word} are declared", flat,
+            f"the paragraph above the table does not say {word.lower()} "
+            f"environments are declared; the corpus emits {total}")

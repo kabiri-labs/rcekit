@@ -390,6 +390,84 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.12.1] — 2026-10-31
+
+### Fixed
+
+- **RCEKit died mid-report on a Windows console, and leaked its own path doing
+  it.** Python encodes stdout with the locale's codec, cp1252 on a stock
+  Windows install, and raises `UnicodeEncodeError` on anything that codec has
+  no byte for. Three strings carried `U+2192`: the non-execution section
+  closing in the `[detect]` report, the same line in `[verify-chain]`, and
+  `time`'s own evidence summary -- which is not only printed but becomes the
+  `timing-sink` verdict's detail, so it reaches `--detect-json` and the written
+  reports too.
+
+  The shape of the failure was the worst available. The findings above the
+  closing line had already been printed, so the run looked like it crashed
+  while its verdicts scrolled past, the exit status was 1 from an unhandled
+  exception, and the traceback carried the module's absolute path -- which the
+  strict posture for this project's own product code forbids.
+
+  Any run reporting `timing-sink`, `file-read`, `file-write`,
+  `evaluation-sink`, `deserialization-sink`, `lookup-sink` or `needs-review`
+  reached it, as did any redirected pipe under a non-UTF-8 locale. CI runs on
+  Linux under UTF-8, so it had never seen it; the unit suite surfaced it only
+  through a subprocess test, and named an assertion about a missing message
+  rather than the encoder.
+
+  Those three are ASCII now, and a test walks `rcekit.py`'s string literals and
+  refuses any character cp1252 cannot encode, with one justified exception for
+  the byte-order mark `strip_bom` has to *recognise*. `main` also sets
+  `errors="replace"` on its own streams, because a guard that holds only while
+  someone remembers it is not a guard: a character that slips past prints as
+  `?` and the report finishes. A report one character wrong is worth having; a
+  traceback in place of a report is not. The streams are not switched to UTF-8,
+  which would trade a visible `?` for mojibake throughout on the console the
+  operator is actually reading.
+
+### Documentation
+
+- **Quick start had no scenario for either sink that is not a shell.** `argv`
+  (3.7.0) and `include` (3.12.0) both reach `executed`, and both appeared only
+  inside one sentence of the widest-run scenario. The reason is structural and
+  now said out loud: scenarios 1-4 ask *what can you observe*, which is what
+  decides the oracle, and neither of those methods answers anything on that
+  axis -- both sinks return output and neither runs a command. So there is a
+  fifth scenario asking what the sink **is**, with a worked command for each,
+  and the section says which question each scenario answers.
+
+- **The field guide offered ten of eleven methods, and its contents list
+  nineteen of twenty-one sections.** `include` had no row in the method-choice
+  table and no section; the `argv` section had been missing from the contents
+  list since 3.7.0. `docs/guide.md` now has both, and the drift was possible
+  because that table and that list were the ones in this repository no test
+  read -- the same hole the comparison table had when it named seven of nine
+  methods for two releases. Three new test classes close it: the guide's
+  method-choice table is pinned to `DETECTION_METHODS` in both directions, and
+  every page carrying a contents list has it checked against its own sections,
+  by anchor rather than by label, since `docs/reference.md` shortens four
+  entries on purpose.
+
+- **Both lists of environments were wrong, in opposite directions, and neither
+  was checked.** The README named eleven and left out `powershell`, `sql` and
+  `kubernetes`; `docs/reference.md` named fourteen, left out `powershell`, and
+  mentioned `sql` only in the prose underneath. The real answer is sixteen and
+  **not the same set in both modes** -- `powershell` and `sql` have detection
+  probes and no exploitation payloads, `graphql` and `mongodb` the reverse --
+  which is worth knowing before pinning one, because a name with nothing behind
+  it for the mode you are running narrows the run to nothing. The reference
+  carries that as a table with a test behind it, read by generating records
+  rather than by reading corpus keys: `postgres` is a key inside a payload
+  category and emits nothing, so naming it would have replaced an incomplete
+  claim with a wrong one. The README's twelve lines enumerating seven flags'
+  value sets are a pointer to those tested lists instead.
+
+- **`CONTRIBUTING.md` never mentioned `tools/embed_corpus.py`.** Someone
+  following it alone would edit `templates/payloads.json`, not regenerate the
+  copy inside the module, and meet a red suite complaining about drift with the
+  fix documented only in the README.
+
 ## [3.12.0] — 2026-10-31
 
 ### Added
@@ -3986,6 +4064,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.12.1]: https://github.com/kabiri-labs/rcekit/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/kabiri-labs/rcekit/compare/v3.11.0...v3.12.0
 [3.11.0]: https://github.com/kabiri-labs/rcekit/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/kabiri-labs/rcekit/compare/v3.9.0...v3.10.0
