@@ -462,6 +462,37 @@ formats, or the template schema.
   first. An unknown name is refused rather than narrowing the run to nothing
   and calling the result clean.
 
+### Changed
+
+- **The observed channel now awards the method's own tier instead of
+  `executed`.** `_observe_match` gave execution to whatever reached it, which
+  was true while every method that could reach it proved execution.
+  `_observable` admits a result whose expected value is absent from the payload,
+  and that was a proxy for "only execution produces this" -- correct for the
+  computed-value methods, and correct for `file` and `oob`, whose tokens sit in
+  the payload and are excluded by it.
+
+  `include` is the first method where the proxy and the property come apart. A
+  file's content signature is in no payload, so the rule admits it, and it is
+  not computed either, so a page that merely renders the file produces it with
+  nothing executed. Measured against a sink that only queued a read and an
+  observed endpoint that rendered the file: second-order **execution** was
+  reported against a target that executed nothing.
+
+  The tier travels with the method now. `reflected` and `eval` still reach
+  `executed` on the observed channel -- pinned by a test, because a fix that
+  stopped the false claim by dropping the true one would pass a test written
+  only for the first -- and `include` reaches `file-read` there. The observed
+  channel changes *where* evidence appeared, never *what* it proves.
+  `observe_status` in `--detect-json` carries the awarded tier for the same
+  reason.
+
+- **Every Windows dialect reads the Windows read targets.** `powershell` is a
+  shell dialect, not a filesystem. The traversal builder treated both members
+  of `WINDOWS_PATH_SINK_ENVS` alike from the start and the target lookup did
+  not, so `--sink-env powershell` found no target, built no probe and reported
+  that nothing was tested -- against paths that were entirely right for it.
+
 ### Not built, deliberately
 
 - **Execution from an inclusion sink.** The route is a wrapper carrying code —
