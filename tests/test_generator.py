@@ -5957,7 +5957,8 @@ class MethodSafetyRungTestCase(unittest.TestCase):
                     for name, method in rcekit.DETECTION_METHODS.items()
                     if method.also_reports}
         self.assertEqual(declared, {"write": {"file-write"},
-                                    "deser": {"needs-review"}})
+                                    "deser": {"needs-review"},
+                                    "include": {"file-read", "file-write"}})
 
     def test_needs_review_is_left_with_one_reporter(self):
         """The point of the 3.0.0 retier, as a property rather than a rename.
@@ -15105,20 +15106,27 @@ class FileIncludeTestCase(unittest.TestCase):
 
     # -- what it claims -------------------------------------------------------
 
-    def test_the_tier_is_file_read_and_it_asks_its_own_question(self):
-        # `question` is not the default on purpose: a run stops asking a
-        # question once it is answered, so leaving it as `execution` would skip
-        # this method on any target where execution was already proven --
-        # discarding a finding with its own remediation.
-        self.assertEqual(rcekit.FileInclude.tier, "file-read")
+    def test_the_ceiling_is_execution_and_the_question_is_still_its_own(self):
+        # The two are different axes and this is the method where that matters.
+        # `question` stayed `file-read` when the ceiling rose to `executed`: a
+        # run stops asking a question once it is answered, so `execution` here
+        # would skip this method on any target where execution was already
+        # proven -- discarding a file read with its own remediation.
+        self.assertEqual(rcekit.FileInclude.tier, rcekit.EXECUTION_TIER)
         self.assertEqual(rcekit.FileInclude.question, "file-read")
+        self.assertEqual(set(rcekit.FileInclude.also_reports),
+                         {"file-read", "file-write"})
 
-    def test_file_read_can_never_become_executed(self):
-        self.assertIn("file-read", rcekit.VERDICT_PRIORITY)
-        self.assertNotEqual(rcekit.FileInclude.tier, rcekit.EXECUTION_TIER)
-        self.assertEqual(rcekit.FileInclude.also_reports, ())
+    def test_the_read_rungs_stay_below_the_ceiling(self):
+        # The ceiling rising does not promote the read rungs. Their evidence is
+        # still a signature known in advance, which is why `file-read` exists.
         rows = {verdict for verdict, _h, _c, _x in rcekit.NON_EXECUTION_SECTIONS}
-        self.assertIn("file-read", rows, "a tier with no section renders nowhere")
+        for tier in ("file-read", "file-write"):
+            self.assertIn(tier, rcekit.VERDICT_PRIORITY)
+            self.assertIn(tier, rows, "a tier with no section renders nowhere")
+        verdict = self._method().confirm(
+            self._observe("Linux version 5.15.0-generic"), self._probes()[0])
+        self.assertEqual(verdict.status, "file-read")
 
     # -- probe construction ---------------------------------------------------
 
@@ -15392,3 +15400,202 @@ class IncludeWindowsDialectTestCase(unittest.TestCase):
                          "C:" + chr(92) + "Windows" + chr(92) + "win.ini")
         self.assertEqual(payloads["plain/depth3"],
                          (".." + chr(92)) * 3 + "Windows" + chr(92) + "win.ini")
+
+
+class IncludeExecutionRungTestCase(unittest.TestCase):
+    """Reaching execution from an inclusion sink, and the three outcomes.
+
+    The obvious route does not work on a default build: a wrapper carrying code
+    needs `allow_url_include`, which PHP has defaulted off since 5.2 and which
+    the measured target refused in its own words. What works is to make the sink
+    include a script that *writes*, and hand that script arguments through the
+    request — so this is a two-request proof like `file` and `write`, and the
+    verdict comes from fetching the written file rather than from the write's
+    own 200."""
+
+    WRITE_URL = "http://t.example/{name}"
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="php", context="raw",
+                               mode="detection", category="detection")
+
+    def _method(self, **config):
+        config.setdefault("probe_depth", "quick")
+        config.setdefault("max_safety", "stateful")
+        return rcekit.FileInclude(self.gen, config)
+
+    def _exec_probes(self, **config):
+        config.setdefault("include_write_url", self.WRITE_URL)
+        return [p for p in self._method(**config).build_probes(self.rec, random.Random(3))
+                if p.followup]
+
+    def _observe(self, followup, control="", body="written"):
+        return Observation(status=200, body=body, control_body=control,
+                           followup_body=followup,
+                           channels=[("response body", body)],
+                           control_channels=[("response body", control)])
+
+    # -- the gate --------------------------------------------------------------
+
+    def test_nothing_is_built_until_a_write_back_url_is_named(self):
+        # Gated on configuration rather than a rung, the way `file` and `write`
+        # are: with nowhere to read the file back from there is no proof to be
+        # had, and naming a tier to raise would answer a question nobody asked.
+        self.assertEqual(self._exec_probes(include_write_url=None), [])
+        self.assertTrue(self._exec_probes())
+
+    def test_the_write_is_held_back_below_the_stateful_rung(self):
+        # The method is `safe` and the shape is not, which is how `lookup`
+        # splits its own rungs.
+        self.assertEqual(rcekit.FileInclude.safety, "safe")
+        held = self._exec_probes(max_safety="safe")
+        self.assertEqual(held, [], "a write must not go out at the safe rung")
+        self.assertTrue(all(p.safety == "stateful" for p in self._exec_probes()))
+
+    def test_the_read_rungs_are_unaffected_by_the_write_url(self):
+        reads = [p for p in self._method(include_write_url=self.WRITE_URL)
+                 .build_probes(self.rec, random.Random(3)) if not p.followup]
+        self.assertTrue(reads)
+        # Every read probe still expects a declared file's signature. At the
+        # stateful rung that is both targets, not just the default one.
+        signatures = {t["signature"] for t in self.gen.include_read_targets["unix"]}
+        self.assertTrue(all(p.expected in signatures for p in reads))
+        self.assertIn("Linux version", {p.expected for p in reads})
+
+    # -- what it sends ---------------------------------------------------------
+
+    def test_the_probe_carries_a_computed_product_and_the_source_as_forbidden(self):
+        probe = self._exec_probes()[0]
+        self.assertTrue(probe.expected.isdigit())
+        self.assertNotIn(probe.expected, probe.payload,
+                         "the product must not be in the payload, only the expression")
+        self.assertIn(probe.forbidden, probe.payload)
+        self.assertTrue(probe.boundary, "a bare number needs digit fencing")
+
+    def test_the_whole_query_string_is_the_payload_and_names_its_parameter(self):
+        # register_argc_argv builds argv from the query string, so the script's
+        # arguments sit outside the parameter carrying the traversal -- which is
+        # why the payload writes that parameter's name rather than injecting
+        # into its value.
+        probe = self._exec_probes()[0]
+        self.assertIn("config-create", probe.payload)
+        self.assertIn("lang=", probe.payload)
+        self.assertIn("pearcmd", probe.payload)
+        renamed = self._exec_probes(include_write_param="language")[0]
+        self.assertIn("language=", renamed.payload)
+        self.assertNotIn("lang=../", renamed.payload)
+
+    def test_the_followup_names_the_file_and_a_cleanup(self):
+        probe = self._exec_probes()[0]
+        self.assertTrue(probe.followup["url"].startswith("http://t.example/"))
+        self.assertTrue(probe.followup["url"].endswith(".php"))
+        self.assertIn(probe.followup["path"], probe.payload + ".php")
+        self.assertIn("cleanup", probe.followup)
+
+    def test_no_absolute_depth_is_built_for_the_write(self):
+        # The climb is the point: it is how the sink reaches PEAR's directory.
+        self.assertTrue(all("depth0" not in p.carrier for p in self._exec_probes()))
+
+    # -- the ladder ------------------------------------------------------------
+
+    def test_the_product_in_the_fetched_file_is_execution(self):
+        probe = self._exec_probes()[0]
+        verdict = self._method().confirm(self._observe(f"x {probe.expected} y"), probe)
+        self.assertEqual(verdict.status, rcekit.EXECUTION_TIER)
+        self.assertIn("EXECUTED", verdict.evidence)
+
+    def test_the_source_served_verbatim_is_a_file_write_not_execution(self):
+        # The near neighbour, and the distinction `write` has drawn since
+        # 2.31.0: the file is on the target and nothing interpreted it.
+        probe = self._exec_probes()[0]
+        verdict = self._method().confirm(self._observe(f"cfg {probe.forbidden} end"), probe)
+        self.assertEqual(verdict.status, "file-write")
+        self.assertIn("not RCE", verdict.evidence)
+
+    def test_a_product_in_the_control_too_is_inconclusive(self):
+        probe = self._exec_probes()[0]
+        verdict = self._method().confirm(
+            self._observe(probe.expected, control=probe.expected), probe)
+        self.assertEqual(verdict.status, "inconclusive")
+
+    def test_neither_product_nor_source_is_negative(self):
+        probe = self._exec_probes()[0]
+        self.assertEqual(
+            self._method().confirm(self._observe("#PEAR_Config 0.9"), probe).status,
+            "negative")
+
+    def test_an_unfetchable_file_is_an_error_not_a_negative(self):
+        # The write answered and the read-back did not, so the run learned
+        # nothing about whether anything was interpreted.
+        probe = self._exec_probes()[0]
+        verdict = self._method().confirm(self._observe(None), probe)
+        self.assertEqual(verdict.status, "error")
+
+    def test_a_delivery_failure_is_still_an_error(self):
+        probe = self._exec_probes()[0]
+        verdict = self._method().confirm(
+            Observation(status=None, body="refused", control_body=""), probe)
+        self.assertEqual(verdict.status, "error")
+
+    # -- the gate the project mandates, for this rung --------------------------
+
+    def test_the_rung_confirms_only_where_the_written_file_is_interpreted(self):
+        """Three targets, three verdicts. One writes and interprets; one writes
+        and serves the file verbatim; one writes nothing. A rung that confirmed
+        on the second would be calling an uninterpreted file execution, which is
+        the whole distinction this ladder exists for."""
+        import re as _re
+        written = {}
+
+        def make_route(mode):
+            def route(method, path, params, headers, body):
+                query = headers.get("X-Rcekit-Query", "")
+                match = _re.search(r"/(<\?=(\d+)\*(\d+)\?>)\+(rk[a-z]+)\.php", query)
+                if match:
+                    name = match.group(4) + ".php"
+                    if mode == "interpret":
+                        written[name] = str(int(match.group(2)) * int(match.group(3)))
+                    elif mode == "verbatim":
+                        written[name] = match.group(1)
+                    return 200, "wrote"
+                leaf = path.lstrip("/")
+                return 200, written.get(leaf, "not found")
+            return route
+
+        for mode, expected in (("interpret", rcekit.EXECUTION_TIER),
+                               ("verbatim", "file-write"),
+                               ("nothing", "negative")):
+            written.clear()
+            with local_target(make_route(mode)) as base:
+                probe = [p for p in rcekit.FileInclude(
+                    self.gen,
+                    {"probe_depth": "quick", "max_safety": "stateful",
+                     "include_write_url": base + "/{name}"}
+                ).build_probes(self.rec, random.Random(5)) if p.followup][0]
+                method = rcekit.FileInclude(
+                    self.gen, {"probe_depth": "quick", "max_safety": "stateful",
+                               "include_write_url": base + "/{name}"})
+                # The fixture reads the query off a header, so the payload is
+                # handed over directly rather than through the URL encoder --
+                # the encoding path has its own tests.
+                import urllib.request
+                req = urllib.request.Request(
+                    probe.followup["url"] if mode == "nothing" else base + "/write",
+                    headers={"X-Rcekit-Query": probe.payload})
+                try:
+                    urllib.request.urlopen(req, timeout=5).read()
+                except Exception:
+                    pass
+                fetched = None
+                try:
+                    fetched = urllib.request.urlopen(
+                        probe.followup["url"], timeout=5).read().decode()
+                except Exception:
+                    pass
+                verdict = method.confirm(
+                    Observation(status=200, body="wrote", control_body="",
+                                followup_body=fetched,
+                                channels=[("response body", "wrote")],
+                                control_channels=[("response body", "")]), probe)
+            self.assertEqual(verdict.status, expected, f"mode={mode}")

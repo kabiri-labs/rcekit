@@ -48,7 +48,7 @@ starting point — this page is for looking things up once you know what you wan
 
 | Option | Description | Default |
 |---|---|---|
-| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser`, `boolean` | None |
+| `--methods` | Comma-separated: `reflected`, `eval`, `file`, `write`, `oob`, `lookup`, `time`, `deser`, `boolean`, `argv`, `include` | None |
 | `--file-write-path` | (`file`) server-side directory the target can write to, e.g. `/tmp` | None |
 | `--file-read-url` | (`file`) URL template that reads it back: `{name}`, `{path}`, `{path_enc}` | None |
 | `--webroot` | (`file`) web-root alias for `--file-write-path` | None |
@@ -56,6 +56,10 @@ starting point — this page is for looking things up once you know what you wan
 | `--write-url-template` | (`write`) URL the file your request stores is served at; required for `write` | None |
 | `--write-lang` | (`write`) File types to write: `auto`, or any of `jsp`, `jspx`, `php`, `aspx`, `erb` | `auto` |
 | `--deser-formats` | (`deser`) Serialization ecosystems to probe: `auto`, or corpus names | `auto` |
+| `--argv-binary` | (`argv`) Program the sink spawns, whose options the probes inject; required for `argv` | None |
+| `--include-wrappers` | (`include`) Wrappers the read rungs go out as: `auto`, or corpus names | `auto` |
+| `--include-write-url` | (`include`) URL a file written *through* the sink is served at, `{name}` for its filename. Without it `include` proves reads only; with it the `stateful` write-through shape runs and can reach `executed` | None |
+| `--include-write-param` | (`include`) Parameter the sink reads its path from, written into the payload because that payload is the whole query string | `lang` |
 | `--bridges` | Query-language bridges the command probes ride: `none` (default), `auto`, or corpus names | `none` |
 | `--observe-url` | Second-order: endpoint polled for the computed value after the probes | None |
 | `--observe-trigger` | A request that *causes* the deferred execution, fired before **every** observed read — once per probe, once per poll, and once for the control. Per probe because a store that overwrites keeps one value. Needs `--observe-url`; its own response is never read for evidence | None |
@@ -90,7 +94,7 @@ starting point — this page is for looking things up once you know what you wan
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
 | `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `evaluation-sink` only — proven, and not execution |
 | `argv` | **Argument injection** into a program spawned with no shell: the value is one of its arguments, so every separator is inert, and an option it names runs a command. Builds nothing until `--argv-binary` names the program, because the option that does this is specific to it | `safe` | `executed` |
-| `include` | **File inclusion**: the sink opens a path the request names and returns what it read. Sweeps traversal depth from an absolute path downward and reads through a PHP stream filter as well as plainly; `--include-wrappers` narrows which wrappers go out, and `--verify-active-risk` decides whether a credential-adjacent file is read at all | `safe` | `file-read` only — proven, and not execution: the evidence is a signature known in advance, not a value the target computed |
+| `include` | **File inclusion**: the sink opens a path the request names and returns what it read, and given `--include-write-url` it also writes a computed one-liner *through* that sink and fetches the file back. That write goes at `stateful`, declared on the shape rather than on the method. Sweeps traversal depth from an absolute path downward and reads through a PHP stream filter as well as plainly; `--include-wrappers` narrows which wrappers go out, and `--verify-active-risk` decides whether a credential-adjacent file is read at all | `safe` | `file-read` for a read — proven, and not execution, because its evidence is a signature known in advance rather than a value the target computed; **`executed`** for a file written through the sink and interpreted, and `file-write` where it is served verbatim. `--include-write-param` names the parameter the sink reads its path from, default `lang` |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
 run's tier is refused **by name** rather than skipped, because a run that
@@ -674,11 +678,13 @@ the right answer about *whether* to look.
 It does not decide what a hit **means**, and `include` is where that came
 apart. A file's content signature is in no payload, so the rule admits it; it is
 also not computed, so a page that merely renders the file produces it without
-anything executing. The tier therefore travels with the method rather than being
-awarded here: a value found on the observed channel reports the method's own
-ceiling, so `reflected` and `eval` reach `executed` there and `include` reaches
-`file-read`. The observed channel changes *where* evidence appeared, never *what*
-it proves.
+anything executing. The tier therefore travels with the probe rather than being
+awarded here: a value found on the observed channel reports the tier the shape
+that sent it can reach, falling back to the method's ceiling where the shape
+does not say. So `reflected` and `eval` reach `executed` there, and `include`
+reaches `file-read` on a read rung although the method's own ceiling is
+`executed` — a method is not one tier once its rungs prove different things. The
+observed channel changes *where* evidence appeared, never *what* it proves.
 
 The channel is read **twice**, because the two real shapes need different
 things:

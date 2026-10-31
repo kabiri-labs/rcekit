@@ -2,7 +2,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.11.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.12.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -15,7 +15,8 @@ computed result **present in the response** and absent from a payload-free
 control; an **out-of-band callback** carrying a token only the target ever held;
 or a value the target stored and RCEKit **fetched back** in a second request —
 the token `file` has it write to a path it serves, the product `write`'s
-one-liner computes when the target interprets the file it stored. Weaker signals
+one-liner computes when the target interprets the file it stored, and the product
+`include` writes *through the inclusion sink itself* and then fetches back. Weaker signals
 keep their own tiers and are never promoted into it. And a run that could not
 test something never reports it as clean.
 
@@ -44,6 +45,7 @@ against a payload-free control:
 | mongo-express 0.53.0 on MongoDB 3.4 | — | Predicate sink, nothing rendered (Mongo `$where`) | `boolean` | `evaluation-sink` | yes | — |
 | GitList 0.6.0 | CVE-2018-1000533 | Argument injection (no-shell `argv` sink) | `argv` | **`executed`** | yes | — |
 | PHP 7.1.3 inclusion sink | — | File inclusion (arbitrary read) | `include` | `file-read` | yes | — |
+| ThinkPHP 6.0.12 inclusion sink | — | File inclusion reaching execution | `include` | **`executed`** | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -53,15 +55,16 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 14 rows do; `python tests/bench/runner.py --all` was last green at
+control. All 15 rows do; `python tests/bench/runner.py --all` was last green at
 **3.0.1** (2026-10-01), 10/10 cases in 55m48s. That is a point-in-time claim:
 the benchmark runs on a cadence, not on every change.
 
-The suite holds 15 cases now, and the 5 added last were each run on their own
+The suite holds 16 cases now, and the 6 added last were each run on their own
 rather than as part of an `--all` sweep: `mongo-express-where-boolean` passed in
 29.9s, `webmin-cve-2019-15107-enumerated` in 4m32s,
 `webmin-cve-2019-15107-time` in 21m21s, `gitlist-cve-2018-1000533-argv` in
-18.3s and `php-inclusion-file-read` in 2.5s. So the figure above still describes the last full sweep, which is the
+18.3s, `php-inclusion-file-read` in 2.6s and
+`thinkphp-lang-include-execute` in 2.6s. So the figure above still describes the last full sweep, which is the
 claim it was making.
 
 The controls are not in this table and two of them are the point. On a Webmin
@@ -71,7 +74,7 @@ real software rather than against a fixture. The OpenTSDB one is the row
 reading *as a control* above; the Webmin one now has a case of its own, where
 `time` is the subject and the control injects into a parameter on the same
 request that no shell reads — so the slope has to be attributable to the sink
-rather than to the host. The full 15, controls included, are in
+rather than to the host. The full 16, controls included, are in
 [`tests/bench/README.md`](tests/bench/README.md#status).
 
 **Advisory** is empty where the verdict does not depend on the patch. Both
@@ -342,7 +345,10 @@ python rcekit.py --acknowledge-consent \
 
 That is 8 of the 11 methods; `file` and `write` need a path only you can supply
 and are scenarios 3 and 4 above, and `argv` needs you to name the binary whose
-options it should inject. `--auto-params all` takes every query value,
+options it should inject. `include` is in that 8 and reads without being told
+anything; reaching `executed` through it needs `--include-write-url`, which is
+the URL the file it writes through the sink is served at — as target-specific as
+a web root. `--auto-params all` takes every query value,
 JSON leaf — booleans and `null` included — XML element, attribute and CDATA
 section, form field, multipart part and upload filename, cookie and header, with
 each occurrence of a repeated query or form key counted separately, and the
@@ -541,7 +547,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 | **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
-| **File inclusion** — a path the request names (CWE-22 / CWE-98) | `include` | The sink opens the path and returns what it read. Sweeps the traversal depth from an absolute path downward, because which one works is a property of the sink's own directory, and reads through a PHP stream filter as well as plainly. Proven on content absent from the payload-free control, and the path itself is the *forbidden* literal: a sink that cannot open it echoes it back inside its own error. Reported `file-read` and **never** `executed` — the evidence is a signature known in advance, not a value the target computed. |
+| **File inclusion** — a path the request names (CWE-22 / CWE-98) | `include` | The sink opens the path and returns what it read. Sweeps the traversal depth from an absolute path downward, because which one works is a property of the sink's own directory, and reads through a PHP stream filter as well as plainly. Proven on content absent from the payload-free control, and the path itself is the *forbidden* literal: a sink that cannot open it echoes it back inside its own error. The read rungs report `file-read` and never `executed` — their evidence is a signature known in advance, not a value the target computed. Given `--include-write-url` it also writes a computed one-liner *through* the sink and fetches the file back, which reaches `executed`, or `file-write` where the file is served verbatim. A wrapper carrying code (`data://`, `php://input`) is not that route: both need `allow_url_include`, off by default since PHP 5.2. |
 
 Four things widen where those methods can reach, without changing what any of
 them will call `executed`:
@@ -647,7 +653,7 @@ one:
 | Query-language bridge to the OS | ✅ | — | — | per template |
 | Deserialization sink — `deser` | ✅ *own tier, never called RCE* | — | — | per template |
 | Argument injection — no-shell `argv` sink — `argv` | ✅ *option shapes from the corpus, named in the finding* | — | — | — |
-| File inclusion — arbitrary read — `include` | ✅ *own tier, never called RCE* | — | — | per template |
+| File inclusion — read, and write-then-interpret — `include` | ✅ *reads keep their own tier; execution proven by fetching the file back* | — | — | per template |
 | **All of the above, one CLI, one run** | **✅** | — | — | — |
 
 <sub>Coverage per each project's own documented technique list. SSTImap is the
@@ -744,9 +750,10 @@ which is the same method fighting a filter, a quote or an encoding.
 | The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
 | The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
 | Your value becomes an argument of a program spawned with no shell | `argv` | the binary it is spawned as, for `--argv-binary` | **`executed`** |
-| Your value names a file the application opens | `include` | nothing | `file-read` |
+| Your value names a file the application opens | `include` | nothing for the read; the URL a file written through the sink is served at, for `--include-write-url` | `file-read`, or **`executed`** with the write-back URL |
 
-Only `reflected`, `eval`, `oob`, `file`, `write` and `argv` reach **`executed`**. `timing-sink`, `lookup-sink`,
+Only `reflected`, `eval`, `oob`, `file`, `write`, `argv` and `include` reach
+**`executed`**. `timing-sink`, `lookup-sink`,
 `file-read` and `deserialization-sink` are proven findings about something else --
 `file-read` and `file-write` are vulnerabilities on their own terms, `lookup-sink`
 and `deserialization-sink` are confirmed sinks with known remediation, and
@@ -840,7 +847,9 @@ instance, raise the tier and get everything the tool has.
   ordering as every corpus payload. The pre-flight names the tier each held-back
   item actually needs. `file` and `write` are gated by their own configuration
   instead: neither does anything until you name a directory to write into and a
-  URL to read it back from.
+  URL to read it back from. `include`'s write-through-the-sink shape is gated the
+  same way and declares `stateful` besides, so its read rungs run at `safe` and
+  nothing is written until `--include-write-url` says where to read it back.
 - **Audit &amp; logging** — every exploitation/verification run is recorded in
   `exploit_audit.log`; `--watermark` embeds a traceable token; execution logs go to
   `rcekit.log`.

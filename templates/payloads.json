@@ -771,6 +771,21 @@
       "verified": "vulhub php/inclusion, 2026-10-31: resource=/proc/version returned a 196-character base64 run decoding to the file's content"
     }
   },
+  "include_exec_wrappers": {
+    "php_pearcmd_config_create": {
+      "sink_env": "any",
+      "safety": "stateful",
+      "template": "+config-create+/&__PARAM__=__TRAVERSAL__usr/local/lib/php/pearcmd&/__EXPR__+__NAME__.php",
+      "writes": true,
+      "requires": [
+        "PHP with register_argc_argv on, which turns the query string into argv for the included script",
+        "the PEAR package present at /usr/local/lib/php/pearcmd.php, which the official php docker images ship",
+        "the written file served back by the web server, which is what the proof is read from"
+      ],
+      "notes": "The route from an inclusion sink to execution on a build that has allow_url_include off, which is every default since PHP 5.2. It does not carry code through a wrapper; it makes the sink include PEAR's own command-line script and hands that script arguments through the query string, and `config-create` writes its output to a path the arguments name. The code goes in the output. Two things about the shape were measured rather than reasoned. First, the payload is the WHOLE query string and not one parameter's value: register_argc_argv builds argv from the query string, so `config-create` and its target filename have to sit outside the parameter that carries the traversal, which is why this wrapper substitutes the parameter name itself and why it needs --verify-url-location raw to reach the wire intact. Second, it is a two-request proof like `file` and `write`: the first request writes and answers 200 whether or not anything was interpreted, so the verdict comes from fetching the written file, and the computed product distinguishes a file that was interpreted from one served verbatim.",
+      "verified": "vulhub thinkphp/lang-rce (vulhub/thinkphp:6.0.12), 2026-10-31: the whole-query-string form wrote rkone.php and the fetch returned 204020 for 404*505 with the literal absent, so the written file was interpreted"
+    }
+  },
   "include_read_targets": {
     "unix": [
       {
