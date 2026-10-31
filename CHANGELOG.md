@@ -458,6 +458,42 @@ formats, or the template schema.
   and without somewhere to read it from this method does not reach `executed`
   on a target where it otherwise does.
 
+### Fixed
+
+- **Every traversal depth now writes its own file and computes its own
+  product.** They shared one filename and one product per wrapper, so they also
+  shared one read-back URL -- and a depth whose own include *failed* fetched
+  the file an earlier depth had written and reported it as its own execution.
+  Measured: depth 5, with `Failed opening` in its own response body, returned
+  `executed` carrying depth 3's product. The run's verdict about the target
+  stayed right, because the file only exists if some depth did execute; what
+  was wrong is the map of which shapes the sink accepts, which is what
+  `--confirm-depth every` promises and what each finding prints as its carrier.
+  Nor did it need that flag: the early stop fires only on `executed`, so a
+  depth reaching `file-write` left the carrier running and the next one read
+  the same verbatim file. The same class as the `expr` shape 3.0.1 retired from
+  `reflected` -- a shape naming something it had not proved.
+
+- **`include` missed execution on a sink that opens the path as given.** The
+  PEAR traversal named `usr/local/lib/php/pearcmd` with no extension, which is
+  right for a framework loader that appends `.php` itself -- ThinkPHP's
+  language loader includes `$file . '.php'` -- and wrong for a bare
+  `include $_GET['file'];`, where PHP appends nothing and the file is never
+  found. Measured on `vulhub/php:7.1.3-apache`, a build whose PEAR script is
+  present and whose `register_argc_argv` is on: the extensionless form answered
+  200 on the write, created no file, read back 404 and reported a clean
+  `negative` on a sink RCEKit reaches. The corpus now declares both shapes;
+  which one works is a property of the sink, so both are sent and at most one
+  confirms. New bench case `php-inclusion-include-execute`: `executed` in 2.0s
+  from a cold start, against the same build whose read case reports
+  `file-read`.
+
+  That case's own notes said execution was out of reach here and the only
+  remaining route was two-step log poisoning. It was right about
+  `allow_url_include` and wrong about the conclusion, and the correction is in
+  this change too: a script already on disk that *writes* gets code past that
+  setting in one step.
+
 ### Not built, deliberately
 
 - **Windows and PowerShell parity**, the other half of this phase, is blocked on

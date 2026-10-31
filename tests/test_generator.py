@@ -15497,6 +15497,66 @@ class IncludeExecutionRungTestCase(unittest.TestCase):
         # The climb is the point: it is how the sink reaches PEAR's directory.
         self.assertTrue(all("depth0" not in p.carrier for p in self._exec_probes()))
 
+    def test_every_depth_writes_its_own_file_and_computes_its_own_product(self):
+        """The depths share one read-back URL if they share a filename, and then
+        a depth whose own include failed reads the file an earlier depth left.
+
+        Measured before this was fixed: depth5, whose own response body said
+        `Failed opening`, returned `executed` carrying depth3's product. The
+        run's verdict about the target stayed right -- something did execute --
+        but the map of which shapes the sink accepts did not, and that map is
+        what `--confirm-depth every` promises and what each finding prints as
+        its carrier. It is the defect 3.0.1 retired `reflected`'s `expr` shape
+        for: a shape naming something it had not proved."""
+        probes = self._exec_probes(probe_depth="full")
+        self.assertGreater(len(probes), 1, "there is nothing to share with one probe")
+        for field, label in ((lambda p: p.followup["url"], "follow-up URL"),
+                             (lambda p: p.followup["path"], "written path"),
+                             (lambda p: p.expected, "computed product")):
+            seen = [field(p) for p in probes]
+            self.assertEqual(len(set(seen)), len(seen),
+                             f"two probes share a {label}, so one can confirm on "
+                             f"the other's file")
+
+    def test_a_depth_cannot_confirm_on_another_depth_s_written_file(self):
+        # The property the distinct names exist for, stated as behaviour rather
+        # than as a count: hand one probe the file a different probe wrote and
+        # it must not read that as its own execution.
+        first, later = self._exec_probes()[:2]
+        self.assertNotEqual(first.carrier, later.carrier)
+        verdict = self._method().confirm(
+            self._observe(f"<html>{first.expected}</html>",
+                          body="Warning: include(): Failed opening"), later)
+        self.assertNotEqual(verdict.status, rcekit.EXECUTION_TIER,
+                            "a probe confirmed on a file another probe wrote")
+        self.assertEqual(verdict.status, "negative")
+
+    def test_both_pearcmd_path_shapes_are_sent_because_the_sink_decides(self):
+        """Whether the traversal names `pearcmd.php` or `pearcmd` is a property
+        of the sink, not of the target, so both go out and at most one confirms.
+
+        A bare ``include $_GET['file'];`` opens exactly the path it is given and
+        PHP appends nothing, so the extension has to be in the payload. A
+        framework loader that builds its own filename appends `.php` itself --
+        ThinkPHP's language loader includes ``$file . '.php'`` -- so the path it
+        is handed must not carry one. Both were measured: php/inclusion reaches
+        `executed` on the suffixed shape and `negative` on the other, and
+        thinkphp/lang-rce does the reverse. With one shape only, RCEKit reported
+        a clean `negative` on a sink it reaches."""
+        payloads = {p.carrier.split("/")[0]: p.payload for p in self._exec_probes()}
+        self.assertIn("php_pearcmd_config_create", payloads)
+        self.assertIn("php_pearcmd_config_create_with_extension", payloads)
+        bare = payloads["php_pearcmd_config_create"]
+        suffixed = payloads["php_pearcmd_config_create_with_extension"]
+        self.assertIn("php/pearcmd&", bare,
+                      "the shape for a sink that appends its own extension")
+        self.assertIn("php/pearcmd.php&", suffixed,
+                      "the shape for a sink that opens the path as given")
+        # Neither is the other with a suffix bolted on: the traversal is the
+        # only difference, and the written file is `.php` in both.
+        self.assertEqual(bare.replace("php/pearcmd&", "php/pearcmd.php&").split("&/")[0],
+                         suffixed.split("&/")[0])
+
     # -- the ladder ------------------------------------------------------------
 
     def test_the_product_in_the_fetched_file_is_execution(self):
