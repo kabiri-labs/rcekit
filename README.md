@@ -467,11 +467,11 @@ sure RCEKit is:
 |---|---|
 | **`executed`** | The target executed the input. It returned a value it could not produce otherwise — computed from operands random to that probe — and that value is absent from a payload-free control. |
 | **`timing-sink`** | The target honoured a delay RCEKit injected: response time tracked a randomised `0/N/2N` series with the request index modelled out. Proven. What waited is not shown — a sandbox implementing `sleep` answers the same way — so it is not execution. |
-| **`file-write`** | The target stored a file at a path RCEKit chose, and served it back uninterpreted. Arbitrary file write, proven by reading it back. A real finding, and not RCE. |
-| **`file-read`** | The target opened a path RCEKit named and returned what it read, and that content is absent from a payload-free control. What proves it is a signature RCEKit knew in advance rather than a value the target computed, which is exactly why it stops here. Arbitrary file read. A real finding, and not RCE. |
-| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit. |
-| **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph. Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. |
-| **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. |
+| **`file-write`** | The target stored a file at a path RCEKit chose, and served it back uninterpreted. Arbitrary file write, proven by reading it back (CWE-434) — **a vulnerability in its own right**, not a weaker RCE. |
+| **`file-read`** | The target opened a path RCEKit named and returned what it read, and that content is absent from a payload-free control. What proves it is a signature RCEKit knew in advance rather than a value the target computed, which is exactly why it stops here. Arbitrary file read (CWE-22 / CWE-98) — **a vulnerability in its own right**, and what it is worth depends on which paths you can reach. |
+| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit — so this is **a lead, not a finding**: a MongoDB `$where` sandbox and a SQL engine comparing two numbers answer identically, and only one is a vulnerability. Identify the evaluator before reporting. |
+| **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph (CWE-502). Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. **A confirmed sink** — report it; the gadget analysis is the next piece of work, not a reason to withhold it. |
+| **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. **A confirmed sink** whose remediation is known regardless — the Log4Shell shape. |
 | **`needs-review`** | A real signal that is not proof on its own: the parser fingerprint `deser` reads without a listener, and the static-signature match `--verify-chain` reads in band, which has no payload-free control behind it. The one verdict here that is genuinely a candidate. |
 | **`inconclusive`** | Nothing here can be attributed to execution. Either the evidence appeared and the payload-free control carried it too, or the run never gathered it — a response channel too unsteady to carry an answer, or a measurement `--max-payloads` could not afford to finish. It outranks `negative`, because a run that did not look is not a run that found nothing. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
@@ -541,7 +541,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 | **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
-| **File inclusion** — a path the request names | `include` | The sink opens the path and returns what it read. Sweeps the traversal depth from an absolute path downward, because which one works is a property of the sink's own directory, and reads through a PHP stream filter as well as plainly. Proven on content absent from the payload-free control, and the path itself is the *forbidden* literal: a sink that cannot open it echoes it back inside its own error. Reported `file-read` and **never** `executed` — the evidence is a signature known in advance, not a value the target computed. |
+| **File inclusion** — a path the request names (CWE-22 / CWE-98) | `include` | The sink opens the path and returns what it read. Sweeps the traversal depth from an absolute path downward, because which one works is a property of the sink's own directory, and reads through a PHP stream filter as well as plainly. Proven on content absent from the payload-free control, and the path itself is the *forbidden* literal: a sink that cannot open it echoes it back inside its own error. Reported `file-read` and **never** `executed` — the evidence is a signature known in advance, not a value the target computed. |
 
 Four things widen where those methods can reach, without changing what any of
 them will call `executed`:
@@ -747,8 +747,12 @@ which is the same method fighting a filter, a quote or an encoding.
 | Your value names a file the application opens | `include` | nothing | `file-read` |
 
 Only `reflected`, `eval`, `oob`, `file`, `write` and `argv` reach **`executed`**. `timing-sink`, `lookup-sink`,
-`file-read`, `evaluation-sink` and `deserialization-sink` are proven findings about
-something else. `needs-review` is the exception: it is the parser fingerprint `deser`
+`file-read` and `deserialization-sink` are proven findings about something else --
+`file-read` and `file-write` are vulnerabilities on their own terms, `lookup-sink`
+and `deserialization-sink` are confirmed sinks with known remediation, and
+`timing-sink` is a measurement waiting to be attributed. `evaluation-sink` is the
+one that is a *lead* rather than a finding: identify the evaluator before it goes
+in a report. `needs-review` is the exception: it is the parser fingerprint `deser`
 reads when it has no gadget to fire — and, off this table, the static signature
 `--verify-chain` matches in band without a control. Both are real candidates and
 **not proof** — review them by hand rather than reporting them. [What a verdict
