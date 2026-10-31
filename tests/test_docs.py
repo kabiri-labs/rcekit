@@ -172,6 +172,9 @@ class ConfirmationContractTestCase(unittest.TestCase):
         "oob": "out-of-band callback",
         "file": "fetched back",
         "write": "fetched back",
+        # `include` writes through the inclusion sink and reads the file
+        # back, so its proof arrives on the same channel as those two.
+        "include": "fetched back",
     }
 
     @classmethod
@@ -528,8 +531,30 @@ class DemoTierTestCase(unittest.TestCase):
         at its ceiling. A row that genuinely belongs below one should widen
         this deliberately -- the failure says so -- rather than be waved
         through by a rule loose enough to miss the case above."""
+        # Widened once, deliberately and in the direction this docstring
+        # names. `include` has two rows: thinkphp reaches its ceiling, and the
+        # php/inclusion build cannot, because allow_url_include is off there --
+        # measured, in PHP's own words. So a row may state a tier the method
+        # *reports* rather than only its ceiling, and the guard is kept strict
+        # by the clause below instead: a method with a below-ceiling row must
+        # also have one at the ceiling, so the ledger cannot quietly show only
+        # the weaker demonstration of a method that can do more.
+        at_ceiling = {r["method"] for r in self.rows
+                      if r["tier"] == rcekit.DETECTION_METHODS[r["method"]].tier}
         for row in self.rows:
             label = row["advisory"] or row["target"]
+            method = rcekit.DETECTION_METHODS[row["method"]]
+            if row["tier"] != method.tier:
+                with self.subTest(row=label, method=row["method"], below="ceiling"):
+                    self.assertIn(
+                        row["tier"], set(method.also_reports),
+                        f"{label} states {row['tier']!r}, which `{row['method']}` "
+                        f"neither reports nor has as its ceiling")
+                    self.assertIn(
+                        row["method"], at_ceiling,
+                        f"{label} is the only {row['method']} row and it is below the "
+                        "method's ceiling, so the ledger understates what it reaches")
+                continue
             with self.subTest(row=label, method=row["method"]):
                 self.assertIn(row["method"], rcekit.DETECTION_METHODS)
                 ceiling = rcekit.DETECTION_METHODS[row["method"]].tier

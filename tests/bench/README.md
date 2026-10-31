@@ -207,17 +207,22 @@ fast case is most of the run.
     | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
 
-Three more were added after that sweep and each was run on its own, so they are
-listed apart from it rather than folded into a figure no run produced:
+Six more were added after that sweep and each was run on its own, so they are
+listed apart from it rather than folded into a figure no run produced. The
+count is read off `tests/bench/cases/` rather than incremented by hand, which
+is how this paragraph came to say three while the table under it held four and
+omitted `argv` altogether:
 
     | RCE class | Target | Method | Verdict | Control | Result | Time |
     |---|---|---|---|---|---|---|
     | Predicate sink, nothing rendered (Mongo `$where`) | mongo-express 0.53.0 on MongoDB 3.4 | `boolean` | `evaluation-sink` | `negative` | pass | 29.9s |
     | OS command injection, found by enumeration | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `negative` | pass | 4m32s |
     | Blind command injection, timing as the subject | Webmin 1.910 -- CVE-2019-15107 | `time` | `timing-sink` | `negative` | pass | 21m21s |
-    | File inclusion, arbitrary read | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass | 2.7s |
+    | Argument injection (no-shell `argv` sink) | GitList 0.6.0 -- CVE-2018-1000533 | `argv` | **`executed`** | `negative` | pass | 18.3s |
+    | File inclusion, arbitrary read | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass | 2.6s |
+    | File inclusion reaching execution | ThinkPHP 6.0.12 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.6s |
 
-15 cases now cover the ledger's 14 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
+16 cases now cover the ledger's 15 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
 directions and for different reasons: the OpenTSDB `time` row is still the
 *control* half of that case rather than one of its own, because a tier ceiling
 is a claim about a method that must not be promoted and the place that claim
@@ -573,7 +578,7 @@ would need an image vulhub does not ship.
 
 ### `include` has a case, and the target is the method's own ceiling
 
-`php-inclusion-file-read` passed in 2.7s from a cold `compose down -v`:
+`php-inclusion-file-read` passed in 2.6s from a cold `compose down -v`:
 `file-read` on the vulnerable half, `negative` on the control.
 
 The sink is `include $_GET['file'];` with nothing around it, which is why the
@@ -612,6 +617,51 @@ released software with an advisory and an unauthenticated inclusion sink, but
 `vulhub/phpmyadmin:4.8.1` and `mysql:5.5` both answer 403 from the registry's
 blob store on every attempt, 13 apiece, while `hello-world` and
 `vulhub/php:7.1.3-apache` pull normally. That is not a transfer retrying fixes.
+
+### The execution half of `include`, and the route that does not work
+
+`thinkphp-lang-include-execute` passed in 2.6s from a cold `compose down -v`:
+`executed` on the vulnerable half, `negative` on the control.
+
+The case exists because the obvious route is unavailable on a released build.
+Reaching execution from an inclusion sink means a wrapper carrying code --
+`data://`, `php://input` -- and both need `allow_url_include`, which PHP has
+defaulted off since 5.2 and which `php-inclusion-file-read`'s target refused in
+its own words. So this case takes the two-step route that works without it:
+make the sink include a script that *writes*, and hand that script its
+arguments through the request. PEAR's `pearcmd.php` ships in the official PHP
+images, `register_argc_argv` turns the query string into its argv, and
+`config-create` writes its output to a path those arguments name.
+
+Two things about the shape were measured rather than reasoned, and each is the
+difference between confirming and reporting a clean negative:
+
+- **The payload is the whole query string, not one parameter's value.** argv is
+  built from the query string, so `config-create` and the target filename have
+  to sit outside the parameter carrying the traversal. That is why the
+  invocation marks `?FUZZ` and passes `--verify-url-location raw`:
+  percent-encoding the payload would turn the `&` separating those arguments
+  into data, and the write would never happen.
+- **The proof is the second request.** The write answers 200 whether or not
+  anything interpreted the file, so the verdict comes from fetching it back.
+  Measured, the fetch returned 11688702 for 6022*1941 with the source form
+  `<?=6022*1941?>` absent -- which is the whole difference between a file that
+  was interpreted and one served verbatim, the distinction `write` has drawn
+  since 2.31.0 and which this method reports the same way.
+
+**The control is a tier ceiling, and it was chosen by measurement.** The
+obvious control was `--methods reflected` on the same URL, and it is the wrong
+one: measured, it sends 37 probes and 32 come back `error`, because a shell
+payload sent raw into a query string breaks the request before it arrives. A
+control whose probes mostly never reach the target says nothing about false
+confirmation, which is why the runner refuses `error` as an expectation at all.
+
+So the control removes the one thing the proof rests on and keeps everything
+else -- the same vulnerable build, the same risk tier, the same probes, with no
+`--include-write-url`. Measured, 16 probes reach the target and all 16 come back
+`negative`. That is the statement worth pinning: the execution verdict comes
+from reading the written file back, and with nowhere to read it from this method
+does not reach `executed` on a target where it otherwise does.
 
 ### Second-order has no case, and the reason is no longer the harness
 

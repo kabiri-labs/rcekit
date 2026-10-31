@@ -390,6 +390,85 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.12.0] — 2026-10-31
+
+### Added
+
+- **`include` reaches execution, and not by the route the roadmap expected.**
+  The obvious one is a wrapper carrying code -- `data://`, `php://input` -- and
+  both need `allow_url_include`, which PHP has defaulted off since 5.2. The
+  target said so in its own words when 3.11.0 measured it:
+  `data:// wrapper is disabled in the server configuration by
+  allow_url_include=0`.
+
+  What works on a default build is to make the sink include a script that
+  *writes*, and hand that script its arguments through the request. PEAR's
+  `pearcmd.php` is present in the official PHP images, `register_argc_argv`
+  turns the query string into its argv, and `config-create` writes its output
+  to a path those arguments name -- so the computed one-liner goes in the
+  output. `--include-write-url` names where that file is served, and without it
+  `include` proves reads only, because there is no proof to be had.
+
+  Two things about the shape were measured rather than reasoned. The payload is
+  the **whole query string**, not one parameter's value: the script's arguments
+  have to sit outside the parameter carrying the traversal, which is why the
+  wrapper writes that parameter's name itself (`--include-write-param`, default
+  `lang`) and why the payload needs `--verify-url-location raw` to reach the
+  wire with its `&` intact. And the proof is the **second** request: the write
+  answers 200 whether or not anything was interpreted.
+
+  So the ladder has three outcomes and they are three different findings. The
+  product in the fetched file is `executed`. The source form coming back
+  verbatim is `file-write` -- the file is on the target and nothing interpreted
+  it, the distinction `write` has drawn since 2.31.0. Neither is `negative`.
+  The read rungs are untouched and still report `file-read`.
+
+  `include`'s ceiling is now `executed` with `file-read` and `file-write` below
+  it, and its `question` deliberately stays `file-read`. A run stops asking a
+  question once it is answered, so `execution` there would skip this method on
+  any target where execution was already proven -- discarding a file read with
+  its own remediation. The tier says how strong an answer the method can reach
+  and the question says what it asks; they are different axes and this is the
+  method where that matters.
+
+  Bench case `thinkphp-lang-include-execute` on ThinkPHP 6.0.12: `executed`
+  against the real build in 2.6s from a cold start, the fetch returning
+  11688702 for 6022*1941 with the source form absent.
+
+### Changed
+
+- **A verdict's tier now comes from the probe shape, not only the method.**
+  `Probe` carries an optional `tier` for the shapes that reach less than their
+  method can, and the per-probe result assembly reads it before falling back
+  to the method's ceiling. This is what keeps 3.11.0's observed-channel fix
+  true now that `include`'s ceiling is `executed`: the second-order channel
+  awards the tier carried in the result, so carrying the method's ceiling
+  there would report a second-order *file read* as execution. The guard
+  written for that fix caught it, and `docs/reference.md` now states the rule
+  as per-shape rather than per-method.
+
+  **The control was chosen by measurement.** The obvious one -- `--methods
+  reflected` on the same URL -- is wrong: measured, it sends 37 probes and 32
+  come back `error`, because a shell payload sent raw into a query string breaks
+  the request before it arrives, and a control whose probes mostly never reach
+  the target says nothing about false confirmation. So the control is a tier
+  ceiling instead: the same build, the same rung, the same probes, with no
+  `--include-write-url`. Measured, 16 probes reach the target and all 16 are
+  `negative`. The execution verdict comes from reading the written file back,
+  and without somewhere to read it from this method does not reach `executed`
+  on a target where it otherwise does.
+
+### Not built, deliberately
+
+- **Windows and PowerShell parity**, the other half of this phase, is blocked on
+  a target rather than on design. Measured: none of vulhub's 332 environments
+  uses a Windows base image, and this machine's Docker daemon is
+  `linux/x86_64`, which cannot run Windows containers at all. PowerShell
+  exploitation payloads and `cmd.exe` break-out contexts could be written, and
+  nothing could prove them -- and `docs/generation.md` advertises that every
+  generated payload runs, so shipping an unmeasured category would weaken a
+  stated property rather than extend coverage. It waits for a target.
+
 ## [3.11.0] — 2026-10-31
 
 ### Added
@@ -3871,6 +3950,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.12.0]: https://github.com/kabiri-labs/rcekit/compare/v3.11.0...v3.12.0
 [3.11.0]: https://github.com/kabiri-labs/rcekit/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/kabiri-labs/rcekit/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/kabiri-labs/rcekit/compare/v3.8.0...v3.9.0
