@@ -207,7 +207,7 @@ fast case is most of the run.
     | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
 
-Six more were added after that sweep and each was run on its own, so they are
+Seven more were added after that sweep and each was run on its own, so they are
 listed apart from it rather than folded into a figure no run produced. The
 count is read off `tests/bench/cases/` rather than incremented by hand, which
 is how this paragraph came to say three while the table under it held four and
@@ -219,10 +219,11 @@ omitted `argv` altogether:
     | OS command injection, found by enumeration | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `negative` | pass | 4m32s |
     | Blind command injection, timing as the subject | Webmin 1.910 -- CVE-2019-15107 | `time` | `timing-sink` | `negative` | pass | 21m21s |
     | Argument injection (no-shell `argv` sink) | GitList 0.6.0 -- CVE-2018-1000533 | `argv` | **`executed`** | `negative` | pass | 18.3s |
-    | File inclusion, arbitrary read | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass | 2.6s |
-    | File inclusion reaching execution | ThinkPHP 6.0.12 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.6s |
+    | File inclusion, arbitrary read | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass | 2.2s |
+    | File inclusion reaching execution (bare `include` sink) | PHP 7.1.3 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.0s |
+    | File inclusion reaching execution (loader appends `.php`) | ThinkPHP 6.0.12 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.7s |
 
-16 cases now cover the ledger's 15 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
+17 cases now cover the ledger's 16 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
 directions and for different reasons: the OpenTSDB `time` row is still the
 *control* half of that case rather than one of its own, because a tier ceiling
 is a claim about a method that must not be promoted and the place that claim
@@ -578,7 +579,7 @@ would need an image vulhub does not ship.
 
 ### `include` has a case, and the target is the method's own ceiling
 
-`php-inclusion-file-read` passed in 2.6s from a cold `compose down -v`:
+`php-inclusion-file-read` passed in 2.2s from a cold `compose down -v`:
 `file-read` on the vulnerable half, `negative` on the control.
 
 The sink is `include $_GET['file'];` with nothing around it, which is why the
@@ -599,13 +600,19 @@ each wrapper, and that is correct rather than a miss: the sink runs from
 is swept for exactly that reason -- which one works is a property of the sink's
 own directory, and an absolute path and a relative climb both landed here.
 
-**What this case cannot show is execution, and the target said why in its own
-words.** The route from an inclusion sink to execution is a wrapper carrying
-code, and PHP answered `data:// wrapper is disabled in the server configuration
-by allow_url_include=0`; `php://input` failed the same way. That setting has
-defaulted off since PHP 5.2, so the route that works on a released build is
-two-step -- poison a log or a session file, then include it -- which is a chain,
-and belongs to a case of its own rather than to this one.
+**This case does not show execution, and for a while the reason given was
+wrong.** The target did refuse a wrapper carrying code in its own words --
+`data:// wrapper is disabled in the server configuration by
+allow_url_include=0`, and `php://input` the same way -- and that setting has
+defaulted off since PHP 5.2. What this paragraph then concluded was that the
+only remaining route is two-step: poison a log or a session file, then include
+it. That was wrong, and `php-inclusion-include-execute` reaches `executed`
+against this same build in one step. The wrapper is not the only way to get
+code past that setting; a script already on disk that *writes* is another, and
+PEAR's ships in the image. What this case shows is the read, which is a
+finding of its own with its own remediation, and the invocation differs: the
+read rungs inject into a parameter and the write-through shape is the whole
+query string, so the two cannot share one command line.
 
 The read target is `/proc/version`, not `/etc/passwd`. Proving a read needs
 content recognisable enough to difference against a control, not the target's
@@ -620,7 +627,7 @@ blob store on every attempt, 13 apiece, while `hello-world` and
 
 ### The execution half of `include`, and the route that does not work
 
-`thinkphp-lang-include-execute` passed in 2.6s from a cold `compose down -v`:
+`thinkphp-lang-include-execute` passed in 2.7s from a cold `compose down -v`:
 `executed` on the vulnerable half, `negative` on the control.
 
 The case exists because the obvious route is unavailable on a released build.
@@ -662,6 +669,41 @@ else -- the same vulnerable build, the same risk tier, the same probes, with no
 `negative`. That is the statement worth pinning: the execution verdict comes
 from reading the written file back, and with nowhere to read it from this method
 does not reach `executed` on a target where it otherwise does.
+
+**There is a second case for this rung, and the pair is the point.**
+`php-inclusion-include-execute` passed in 2.0s on the `php/inclusion` build --
+`executed` on the vulnerable half, `negative` on the control. It differs from
+lang-rce by one character in the traversal, and that character is a property of
+the **sink** rather than of the target: `include $_GET['file'];` opens exactly
+the path it is handed and PHP appends nothing, so the traversal has to name
+`pearcmd.php`, while ThinkPHP's language loader includes `$file . '.php'` and so
+must be handed a path with no extension. The corpus declares both shapes, both
+go out, and at most one confirms on a given sink -- measured, php/inclusion
+confirms on the suffixed shape and reports `negative` on the other, and lang-rce
+does the reverse.
+
+Only one shape shipped first, and with it RCEKit reported a clean `negative` on
+a sink it demonstrably reaches: 19 probes, all negative, against a build whose
+PEAR script is present, whose `register_argc_argv` is on, and which the suffixed
+shape then confirmed on three separate depths. A false negative found by review
+rather than by a case, which is the argument for the second case existing.
+
+The two php/inclusion cases also show why the two halves cannot share one
+command line. The read rungs inject into a parameter (`?file=FUZZ`), and the
+write-through shape **is** the whole query string, because the script it
+includes takes its arguments from there. So `--verify-url-location raw` is
+required for one and fatal to the other, and the ledger carries two rows for
+this build for the same reason.
+
+**This build is also where a shared filename showed up as a false
+confirmation.** The web root is three levels down, so every quick depth of three
+or more reaches `/` and all three confirm -- `executed=3`, with three distinct
+filenames and three distinct products. lang-rce confirms on the deepest depth
+only, and there the working depth is the **last** probe sent. That ordering is
+why the defect was invisible there: when the first depth writes, every later
+depth reads the same path back and can claim the file it finds. Each probe now
+carries its own filename and its own operands, so a depth whose include failed
+reads a path nothing wrote and reports `negative`.
 
 ### Second-order has no case, and the reason is no longer the harness
 

