@@ -863,11 +863,24 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 | Verdict | What it means | What to do |
 |---|---|---|
 | **`executed`** | Execution proven. The evidence line shows the exact value the target computed. | Put it in the report. |
-| **`timing-sink`** / **`file-write`** / **`file-read`** / **`evaluation-sink`** / **`deserialization-sink`** / **`lookup-sink`** | Proven, and about something other than execution: a delay honoured, a file written, a file read, an evaluator that consumed the input, an object graph reconstructed, a lookup URI resolved. | Report what the tier says. Do not call any of them RCE. |
+| **`file-read`** | Arbitrary file read, proven by content absent from the control. A vulnerability in its own right (CWE-22 / CWE-98), not a weaker RCE. | Report it as a file read, on its own merits. What it is worth depends on what you can reach: application config, database credentials, source, keys. Try those paths before writing the severity down. |
+| **`file-write`** | Arbitrary file write, proven by reading the file back uninterpreted (CWE-434). | Report it as a file write. Often the more serious of the two, because a write reaches configuration and startup paths. |
+| **`lookup-sink`** | The sink resolved a URI RCEKit chose, so it evaluates expressions it is given — the Log4Shell shape. | Report it. The remediation is known and does not wait on a gadget: patch or configure the library out. Severity does not depend on whether anyone popped a shell. |
+| **`deserialization-sink`** | The endpoint reconstructed an attacker-supplied object graph (CWE-502). | Report the sink. Whether it reaches RCE depends on the target's classpath, which is the next piece of work and not a reason to withhold the finding. |
+| **`timing-sink`** | Something on the target honoured a delay. Proven, and *what* waited is not shown. | Attribute it before reporting: pair with `oob` or `file`, which reach `executed` on the same blind sink. On its own it is strong evidence of a live sink and weak evidence of what the sink is. |
+| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it. **Which** evaluator is not shown. | This one is a **lead, not a finding**. A MongoDB `$where` sandbox and a SQL engine comparing two numbers produce the same differential, and only one of those is a vulnerability. Identify the evaluator by hand before it goes in a report. |
 | **`needs-review`** | A real candidate that is not proof on its own — `deser`'s parser fingerprint, and `--verify-chain`'s in-band signature match, which has no control behind it. | Manual follow-up. Never report as proven. |
 | **`negative`** | Reached the target, found no evidence. | Suspect [encoding](#landing-the-payload-intact) or [sink shape](#whole-command-sinks) before concluding it's safe. |
 | **`inconclusive`** | Evidence appeared, but also appears *without* the payload — so it isn't attributable to execution. | Not a finding. This is the false positive that never made it out. |
 | **`error`** | The request never reached the target — a delivery or TLS failure. | Fix connectivity, then re-run. For a self-signed cert, add `--insecure`. |
+
+Those six are **not one kind of finding**, which is why they no longer share a
+row. `file-read` and `file-write` are vulnerabilities on their own terms.
+`lookup-sink` and `deserialization-sink` are confirmed dangerous sinks whose
+remediation is known even where exploitation is not. `timing-sink` is a
+measurement waiting to be attributed. `evaluation-sink` is a lead. "Not RCE" is
+what they have in common, and it is not the same statement as "not a
+vulnerability".
 
 `error` is kept separate from `negative` on purpose: a connectivity problem must
 never read as "not vulnerable".
