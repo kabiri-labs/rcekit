@@ -891,7 +891,8 @@ class VerdictTableTestCase(unittest.TestCase):
     """
 
     NUMBER_WORDS = {"three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
-                    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+                    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+                    "thirteen": 13, "fourteen": 14}
     COUNT_RE = re.compile(r"\*\*([a-z]+) verdicts that are never collapsed")
     VERDICT_RE = re.compile(r"^\|\s*\*\*`([a-z-]+)`\*\*\s*\|")
 

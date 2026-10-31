@@ -390,6 +390,100 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.11.0] — 2026-10-31
+
+### Added
+
+- **A sink that opens a path the request names had no method, and the tier it
+  earns is not execution.** `--methods include` confirms that the target read a
+  file RCEKit chose, and reports it as a new verdict, `file-read` — the mirror
+  of `file-write`, which `write` has reported since 2.31.0 for a file served
+  but not interpreted.
+
+  The ceiling is structural rather than cautious, and it is the whole of what
+  this method had to get right. Every method here that proves execution rests
+  on a value the target **computed** from operands random to that probe,
+  because that is the one thing reflection cannot produce. A file read has no
+  such value: RCEKit does not know what is in the target's files, so its
+  evidence can only be content recognised in advance. A static signature
+  differenced against a payload-free control is exactly the evidence 3.8.0
+  demoted the chain's in-band verdict for, and the reasoning does not change
+  because the subject did. So `file-read` is where this stops, and there is no
+  path upward from it.
+
+  **The signature has to be the file's content, not the path.** Measured
+  against vulhub `php/inclusion`, whose sink is `include $_GET['file'];`: when
+  the path cannot be opened, PHP echoes it back inside its own warning, twice.
+  An oracle asking "did my string come back" confirms on every probe there,
+  against a target that read nothing. So the path travels as the probe's
+  *forbidden* literal — its presence says the sink reflected the request — and
+  only the content signature decides the verdict. A response carrying both is
+  still a read, and the finding says the target also echoes the path.
+
+  **Traversal depth is swept, not configured.** Which depth works is a property
+  of the sink's own directory, not of the target: the same build answered an
+  absolute `/proc/version` and a relative `../../../proc/version` alike, and
+  measured, depths 1 and 2 failed while 3 through 8 confirmed, because the sink
+  runs from `/var/www/html`. A sink that strips a leading separator answers only
+  the relative form, so both go out.
+
+  **The default read target is chosen for what it does not return.** Proving a
+  read needs content predictable enough to recognise and absent from the
+  control; it does not need the target's secrets on the operator's screen. So
+  `/proc/version` is the default, and `/etc/passwd` sits one safety rung up —
+  the way the corpus already gates credential-adjacent payloads — which means a
+  default run proves the read with a kernel build string and account names come
+  back only for an operator who asked for them.
+
+  The wrappers and the readable files live in the corpus
+  (`include_wrappers`, `include_read_targets`), which is the seam the bridges,
+  the eval carriers and `argv_primitives` already use: a wrapper or a
+  recognisable file can be added without touching Python. `php://filter`
+  needed no oracle of its own — the evidence search already peels base64 runs
+  of 16 characters or more, and a file's worth of base64 is far past that, so
+  the same signature is found inside the encoded blob.
+
+  `include` declares its own `question` rather than leaving the default. A run
+  stops asking a question once it is answered, so `execution` would have made
+  this method skipped on any target where execution was already proven —
+  discarding a finding with its own remediation, which is the mistake `lookup`
+  declares a question to avoid.
+
+  Bench case `php-inclusion-file-read`: `file-read` against the real build,
+  with a `class-attribution` control. The control is the target's own property
+  rather than a contrivance — including a file executes no command, so
+  `--methods reflected` at `--probe-depth full` sends 19 probes and reports
+  `negative` on all 19 against the same URL. That is what earns `include` its
+  own name.
+
+- **`--include-wrappers`** narrows which inclusion wrappers go out. It defaults
+  to everything, unlike `--argv-binary`, because a wrapper names a path rather
+  than a program-specific option, so there is nothing target-specific to know
+  first. An unknown name is refused rather than narrowing the run to nothing
+  and calling the result clean.
+
+### Not built, deliberately
+
+- **Execution from an inclusion sink.** The route is a wrapper carrying code —
+  `data://`, `php://input` — and both need `allow_url_include`, which PHP has
+  defaulted off since 5.2. The target said so in its own words:
+  `data:// wrapper is disabled in the server configuration by
+  allow_url_include=0`, and `php://input` failed the same way. The route that
+  works on a released build is two-step — poison a log or a session file, then
+  include it — which is a chain, and a chain became a delivery the engine
+  drives only in 3.9.0. Shipping an execution path with no case to exercise it
+  is a claim the bench cannot reproduce, which this project treats as worse
+  than a missing feature, so it waits for the case rather than for the code.
+
+- **A phpMyAdmin case.** `phpmyadmin/CVE-2018-12613` was the first choice —
+  released software, a documented advisory, and an inclusion sink reachable
+  without authentication. Its images cannot be fetched: `vulhub/phpmyadmin:4.8.1`
+  and `mysql:5.5` both answer 403 from the registry's blob store on every
+  attempt, 13 apiece, while `hello-world` and `vulhub/php:7.1.3-apache` pull
+  normally. That is not a transfer that retrying fixes, so the row names a
+  target that demonstrates the class instead, and its `Advisory` column says so
+  with a dash.
+
 ## [3.10.0] — 2026-10-30
 
 ### Added
@@ -3746,6 +3840,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.11.0]: https://github.com/kabiri-labs/rcekit/compare/v3.10.0...v3.11.0
 [3.10.0]: https://github.com/kabiri-labs/rcekit/compare/v3.9.0...v3.10.0
 [3.9.0]: https://github.com/kabiri-labs/rcekit/compare/v3.8.0...v3.9.0
 [3.8.0]: https://github.com/kabiri-labs/rcekit/compare/v3.7.1...v3.8.0

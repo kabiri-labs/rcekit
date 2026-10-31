@@ -215,8 +215,9 @@ listed apart from it rather than folded into a figure no run produced:
     | Predicate sink, nothing rendered (Mongo `$where`) | mongo-express 0.53.0 on MongoDB 3.4 | `boolean` | `evaluation-sink` | `negative` | pass | 29.9s |
     | OS command injection, found by enumeration | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `negative` | pass | 4m32s |
     | Blind command injection, timing as the subject | Webmin 1.910 -- CVE-2019-15107 | `time` | `timing-sink` | `negative` | pass | 21m21s |
+    | File inclusion, arbitrary read | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass | 2.7s |
 
-13 cases now cover the ledger's 12 rows. More cases than rows, in both
+15 cases now cover the ledger's 14 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
 directions and for different reasons: the OpenTSDB `time` row is still the
 *control* half of that case rather than one of its own, because a tier ceiling
 is a claim about a method that must not be promoted and the place that claim
@@ -569,6 +570,48 @@ is not used here because a case carries one control and class attribution is
 the stronger of the two: it shows the method reaching a sink no other method
 can, rather than showing a patch closing it. A second case could carry it, and
 would need an image vulhub does not ship.
+
+### `include` has a case, and the target is the method's own ceiling
+
+`php-inclusion-file-read` passed in 2.7s from a cold `compose down -v`:
+`file-read` on the vulnerable half, `negative` on the control.
+
+The sink is `include $_GET['file'];` with nothing around it, which is why the
+ledger row claims a method and not a CVE -- there is no patch whose absence the
+verdict depends on, so the ledger records no advisory against it, as it records
+none for the HugeGraph and fastjson rows.
+
+The control is class attribution and it costs nothing to arrange, because
+including a file runs no command: `--methods reflected` at `--probe-depth full`
+sends 19 probes and reports `negative` on all 19, on the same URL the vulnerable
+half confirms. A results-based shell method has nothing to compute here, and
+that is what earns `include` its own name rather than a probe shape inside
+`reflected`.
+
+14 of 18 probes reached `file-read`. The four that did not are depths 1 and 2 of
+each wrapper, and that is correct rather than a miss: the sink runs from
+`/var/www/html`, so a climb needs three `../` before it reaches `/proc`. Depth
+is swept for exactly that reason -- which one works is a property of the sink's
+own directory, and an absolute path and a relative climb both landed here.
+
+**What this case cannot show is execution, and the target said why in its own
+words.** The route from an inclusion sink to execution is a wrapper carrying
+code, and PHP answered `data:// wrapper is disabled in the server configuration
+by allow_url_include=0`; `php://input` failed the same way. That setting has
+defaulted off since PHP 5.2, so the route that works on a released build is
+two-step -- poison a log or a session file, then include it -- which is a chain,
+and belongs to a case of its own rather than to this one.
+
+The read target is `/proc/version`, not `/etc/passwd`. Proving a read needs
+content recognisable enough to difference against a control, not the target's
+account names; `/etc/passwd` is declared one safety rung up, so this invocation
+never pulls it. Both were measured against this build and only one is sent.
+
+A phpMyAdmin case was the first choice and is not available: `CVE-2018-12613` is
+released software with an advisory and an unauthenticated inclusion sink, but
+`vulhub/phpmyadmin:4.8.1` and `mysql:5.5` both answer 403 from the registry's
+blob store on every attempt, 13 apiece, while `hello-world` and
+`vulhub/php:7.1.3-apache` pull normally. That is not a transfer retrying fixes.
 
 ### Second-order has no case, and the reason is no longer the harness
 
