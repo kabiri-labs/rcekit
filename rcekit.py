@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.12.0"
+__version__ = "3.12.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -6722,7 +6722,7 @@ class ParametricTime(DetectionMethod):
         stderr_delay = sigma * (s_ii / det) ** 0.5
 
         sep = (self._separator or "bare").strip() or "newline"
-        observed = ", ".join(f"d={d:g}s→{e:.2f}s" for d, e in sorted(zip(delays, elapsed)))
+        observed = ", ".join(f"d={d:g}s->{e:.2f}s" for d, e in sorted(zip(delays, elapsed)))
         summary = (f"{observed} | slope {b_delay:.2f}s per injected second, "
                    f"drift {b_drift:+.2f}s per request, separator {sep!r}")
         # A real sleep moves the response one second per injected second.
@@ -10547,6 +10547,47 @@ def load_token_manifest(path: str) -> Dict[str, Dict[str, Any]]:
     return tokens
 
 
+def soften_console_encoding() -> None:
+    """Make an unencodable character degrade instead of killing the run.
+
+    Called from :func:`main`, never at import, for the same reason
+    :func:`configure_logging` is: a library import must not reach into the
+    caller's streams.
+
+    Python encodes ``stdout`` with the locale's codec, which on Windows is
+    normally cp1252, and raises ``UnicodeEncodeError`` on anything that codec
+    has no byte for. That is an exception from a ``print``, so it unwinds out of
+    ``main``, and the operator gets a traceback carrying the module's absolute
+    path in place of the rest of the report -- after the findings above it have
+    already been printed, which is the worst shape this failure could take: the
+    run looks like it crashed while the verdicts it had reached scroll past.
+    Measured on Windows at 3.12.0, where three strings carried ``U+2192``; CI
+    runs on Linux under UTF-8 and had never seen it.
+
+    Those three are ASCII now and a test keeps the next one out. This is the
+    second half, because a guard that only holds while someone remembers it is
+    not a guard: with ``errors="replace"`` the stray character prints as ``?``
+    and the report finishes. A report that is one character wrong is worth
+    having; a traceback instead of a report is not.
+
+    Deliberately not switching the stream to UTF-8. That would render every
+    non-ASCII byte as mojibake on the console the operator is actually reading,
+    trading a visible ``?`` for text that looks corrupt throughout."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # Not a TextIOWrapper: a test harness or host application has
+            # replaced the stream, and whatever it put there is its own to
+            # configure.
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            # A detached or already-closed stream. Nothing to harden, and
+            # refusing to start over it would be absurd.
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns the process exit status: ``0`` when the
     requested run completed (including a verification that confirmed nothing —
@@ -10559,6 +10600,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     a test drive the CLI in-process, and what keeps the console-script entry
     point (``rcekit = "rcekit:main"``) a plain zero-argument call."""
     configure_logging()
+    soften_console_encoding()
     parser = argparse.ArgumentParser(description="Generate RCE payloads for penetration testing")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-o", "--output", default="rce_payloads.txt",
@@ -11220,7 +11262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\n[verify-chain] {len(rows)} {heading} — NOT proof of execution:")
             for result in rows:
                 print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
-            print(f"  → {closing}")
+            print(f"  -> {closing}")
         if not executed:
             print("\n[verify-chain] No execution proven.")
         # Named whether or not anything matched: the in-band oracle on this path
@@ -12143,7 +12185,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # arrive without it.
                     if result.get("cleanup"):
                         print(f"      cleanup: {result['cleanup']}")
-                print(f"  → {closing}")
+                print(f"  -> {closing}")
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
                 # verdicts below were decided without ever reading the place the
