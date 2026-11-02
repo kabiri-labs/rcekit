@@ -1,3 +1,5 @@
+![RCEKit — RCE detection and confirmation toolkit for authorised testing](https://raw.githubusercontent.com/kabiri-labs/rcekit/main/logo/rcekit-banner.png)
+
 # RCEKit
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
