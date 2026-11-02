@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 460" width="460" height="460" role="img" aria-label="RCEKit">
+  <title>RCEKit avatar</title>
+  <rect width="460" height="460" fill="#0B0E11"/>
+  <g transform="translate(50.8 50.8) scale(5.6)">
+    <path d="M47.75 21.37A19 19 0 1 0 47.75 42.63" fill="none" stroke="#3DDC97" stroke-width="6.5" stroke-linecap="round"/>
+    <path d="M50.45 19.56A22.25 22.25 0 0 1 50.45 44.44L37 32Z" fill="#3DDC97"/>
+    <circle cx="32" cy="32" r="5" fill="#3DDC97"/>
+  </g>
+</svg>

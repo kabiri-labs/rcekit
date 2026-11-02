@@ -11,6 +11,8 @@ recursive-include tools *.py
 recursive-include docs *.md
 recursive-include tests *.py *.json *.txt *.md
 
-# Large, and useless in a distribution: the GIFs are README illustrations that
-# GitHub serves, and shipping them would multiply the sdist size for no reader.
+# Large, and useless in a distribution: the GIFs and the logo set are README
+# illustrations that GitHub serves, and shipping them would multiply the sdist
+# size for no reader.
 prune confirmation-gifs
+prune logo

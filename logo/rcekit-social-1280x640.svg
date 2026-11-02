@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="RCEKit — RCE detection and confirmation toolkit for authorised testing">
+  <title>RCEKit social preview, 1280 by 640</title>
+  <style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&amp;family=Inter:wght@400;500&amp;display=swap');</style>
+  <rect width="1280" height="640" fill="#0B0E11"/>
+
+  <g transform="translate(379.6 145.85) scale(2.1)">
+    <path d="M47.75 21.37A19 19 0 1 0 47.75 42.63" fill="none" stroke="#3DDC97" stroke-width="6.5" stroke-linecap="round"/>
+    <path d="M50.45 19.56A22.25 22.25 0 0 1 50.45 44.44L37 32Z" fill="#3DDC97"/>
+    <circle cx="32" cy="32" r="5" fill="#3DDC97"/>
+  </g>
+
+  <text x="523.55" y="251" font-family="'JetBrains Mono','SFMono-Regular',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="104" font-weight="800" letter-spacing="-3" fill="#F2F1ED">RCEKit</text>
+
+  <text x="640" y="337" text-anchor="middle" font-family="Inter,'Segoe UI',system-ui,sans-serif" font-size="27" font-weight="400" fill="#8A95A1">RCE detection &amp; confirmation toolkit for authorised testing</text>
+  <text x="640" y="375" text-anchor="middle" font-family="'JetBrains Mono','SFMono-Regular',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="17" font-weight="400" fill="#6F7A85">every finding comes back with the tier it earned</text>
+
+  <g font-family="'JetBrains Mono','SFMono-Regular',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="17" font-weight="700">
+    <rect x="446" y="425" width="110" height="42" rx="8" fill="#3DDC97"/>
+    <text x="501" y="452" text-anchor="middle" fill="#0B0E11">executed</text>
+
+    <rect x="570.5" y="425.5" width="139" height="41" rx="8" fill="none" stroke="#39434D"/>
+    <text x="640" y="452" text-anchor="middle" fill="#B9C3CC">lookup-sink</text>
+
+    <rect x="724.5" y="425.5" width="109" height="41" rx="8" fill="none" stroke="#262D33"/>
+    <text x="779" y="452" text-anchor="middle" fill="#6F7A85">negative</text>
+  </g>
+
+  <text x="640" y="582" text-anchor="middle" font-family="'JetBrains Mono','SFMono-Regular',Menlo,Consolas,'DejaVu Sans Mono',monospace" font-size="14" font-weight="400" letter-spacing="1.8" fill="#5A646E">MIT &#183; PYTHON 3.8+ &#183; ZERO THIRD-PARTY DEPENDENCIES</text>
+
+  <rect y="636" width="1280" height="4" fill="#3DDC97"/>
+</svg>
