@@ -413,6 +413,56 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.13.0] — 2026-11-07
+
+### Added
+
+- **A banner, and it is two lines.** `RCEKit <version>` and the tier rule, on
+  **stderr**, before anything else a run prints. On stderr because stdout is the
+  report and has been read out of pipes and redirects since before the banner
+  existed; a test asserts stdout is byte-identical with the banner and with
+  `--quiet`, which is the whole reason it could be added without changing a
+  published surface. Two lines because the screen belongs to the findings -- the
+  figlet an operator scrolls past twice in a demo costs more than it gives. The
+  second line is the README's own sentence rather than a paraphrase, and a test
+  holds the two together, because a banner that states the tier rule in
+  different words is a third copy of the rule to keep in sync.
+
+- **`-q` / `--quiet`** suppresses the banner. It does not quieten the report:
+  there is no flag for that, because a run with no report is a run with no
+  purpose.
+
+### Changed
+
+- **A redirected run printed nothing at all until it exited.** Python
+  block-buffers stdout when it is not a terminal and nothing in this module
+  flushed, so a run piped into `tee`, captured by `script`, or watched in CI was
+  silent for its whole duration. Measured against a target that accepts and
+  never answers: the first line arrived after **50.2s**, and arrives after
+  **0.2s** now. An operator watching a silent pipe cannot tell a working run
+  from a hung one, which is the same failure the missing progress indicator
+  causes and the cheaper half of it. stdout is line-buffered from `main` now --
+  one call, rather than a `flush=True` on each of a hundred-odd prints that
+  somebody has to remember at the next one.
+
+- **The run's own configuration no longer reads as findings.** `sink shell`,
+  `sink shapes` and the five shape descriptions under them were seven
+  `[detect]` lines printed at exactly the weight of an `EXECUTED` row -- in a
+  real run the finding was the seventh of them, indistinguishable from the line
+  explaining what `env` means. They sit under a `[detect] run configuration:`
+  heading now. Deliberately still on stdout and still `[detect]`: moving them
+  would break every consumer and every documented transcript for a cosmetic
+  gain, which is not the trade this was worth.
+
+- **RCEKit's log records go to stderr instead of stdout.** A log record is not
+  part of the report, and on stdout it was duplicating one: a generate run
+  printed `INFO - Successfully generated 3 payloads to ...` and then
+  `Generated 3 payloads to ... in detection mode` -- one fact, twice, in two
+  formats, with a timestamp in front of the copy nobody asked for.
+
+  No verdict, tier or output schema changed. `--detect-json` and the `-o`
+  exports are byte-identical.
+
 ## [3.12.2] — 2026-11-07
 
 ### Fixed
@@ -4143,6 +4193,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.13.0]: https://github.com/kabiri-labs/rcekit/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/kabiri-labs/rcekit/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/kabiri-labs/rcekit/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/kabiri-labs/rcekit/compare/v3.11.0...v3.12.0

@@ -4298,6 +4298,132 @@ class CLIExitCodeTestCase(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
 
 
+class BannerAndStreamsTestCase(unittest.TestCase):
+    """What the run says about itself, and on which stream it says it.
+
+    stdout is the report, and it has been read out of pipes and redirects
+    since before any of this existed. So everything added here goes to stderr,
+    and the test that matters is not that the banner appears -- it is that
+    stdout did not move: byte for byte, with the banner and without it.
+
+    Every run below uses a temporary cwd, because `configure_logging` opens
+    `rcekit.log` wherever the process starts and a test suite should not
+    litter the checkout. The corpus is found relative to the module rather
+    than to cwd, so this changes nothing about what the runs do."""
+
+    def _run(self, *args):
+        with tempfile.TemporaryDirectory() as tmp:
+            return subprocess.run(
+                [sys.executable, str(SCRIPT), *args],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+
+    def test_the_banner_goes_to_stderr(self):
+        result = self._run("--doctor")
+        self.assertIn("RCEKit " + rcekit.__version__, result.stderr)
+        self.assertIn("executed means the target executed the input",
+                      result.stderr)
+        self.assertNotIn("RCEKit " + rcekit.__version__, result.stdout)
+
+    def test_stdout_is_identical_with_and_without_the_banner(self):
+        """The whole guarantee, in one assertion.
+
+        Anything that was reading these runs keeps reading exactly what it
+        read before -- which is why the banner could be added at all without
+        it being a change to a published surface."""
+        loud = self._run("--doctor")
+        quiet = self._run("--quiet", "--doctor")
+        self.assertEqual(loud.stdout, quiet.stdout)
+        self.assertEqual(loud.returncode, quiet.returncode)
+        self.assertTrue(loud.stderr.strip(), "the banner should be on stderr")
+        self.assertEqual(quiet.stderr, "", "--quiet should leave stderr empty")
+
+    def test_the_banner_is_two_lines(self):
+        """Two, deliberately. The screen belongs to the findings, and a
+        figlet an operator scrolls past in a demo costs more than it gives."""
+        result = self._run("--doctor")
+        lines = [line for line in result.stderr.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2, lines)
+
+    def test_the_second_line_states_the_tier_rule_the_readme_states(self):
+        """One rule, one wording. A banner that paraphrases it is a third copy
+        to keep in sync, and this is the claim the project rests on."""
+        result = self._run("--doctor")
+        banner = " ".join(result.stderr.split())
+        readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        # The claim, not the markup. The README sets the two verdict names in
+        # backticks and the sentence in bold, which is presentation; a banner
+        # cannot carry either, and comparing them would be comparing Markdown.
+        readme = " ".join(readme_text.replace("`", "").replace("*", "").split())
+        for claim in ("executed means the target executed the input",
+                      "negative means the probes reached it"):
+            with self.subTest(claim=claim):
+                self.assertIn(claim, banner)
+                self.assertIn(claim, readme)
+
+    def test_version_and_help_print_no_banner(self):
+        for flag in ("--version", "--help"):
+            with self.subTest(flag=flag):
+                result = self._run(flag)
+                self.assertEqual(result.returncode, 0)
+                self.assertNotIn("RCEKit " + rcekit.__version__, result.stderr)
+
+    def test_a_log_record_does_not_land_on_stdout(self):
+        """A log record is not part of the report. On stdout it was printing
+        the same fact the report prints, with a timestamp in front of it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "d.txt"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--detection-only",
+                 "--environments", "unix", "--max-payloads", "2",
+                 "-o", str(out)],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr[-400:])
+        self.assertIn("Generated", result.stdout, "the report line stays")
+        self.assertNotIn("INFO", result.stdout)
+        self.assertIn("Successfully generated", result.stderr,
+                      "the log record moved rather than disappearing")
+
+    def test_the_configuration_block_is_announced_as_configuration(self):
+        """Port 1 so nothing is sent anywhere: the configuration echo is
+        printed before the first probe, which is the point of it."""
+        result = self._run(
+            "--acknowledge-consent", "--verify-url",
+            "http://127.0.0.1:1/x?cmd=FUZZ", "--methods", "reflected",
+            "--max-payloads", "1", "--environments", "unix",
+            "--contexts", "raw")
+        self.assertIn("[detect] run configuration:", result.stdout)
+        self.assertLess(
+            result.stdout.index("[detect] run configuration:"),
+            result.stdout.index("[detect] sink shell:"),
+            "the heading has to come before the settings it introduces")
+
+    def test_stdout_is_line_buffered_so_a_piped_run_is_visible(self):
+        """Block-buffered and never flushed, a redirected run printed nothing
+        at all until it exited: measured at 50.2s to the first line against a
+        target that accepts and does not answer, where the same run now prints
+        it in 0.2s. An operator watching that cannot tell it from a hang."""
+        probe = ("import sys, rcekit; rcekit.unbuffer_console(); "
+                 "print(sys.stdout.line_buffering)")
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=tmp, capture_output=True, text=True, timeout=120,
+                env=dict(os.environ, PYTHONPATH=str(REPO_ROOT)))
+        self.assertEqual(result.returncode, 0, result.stderr[-400:])
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "True")
+
+    def test_unbuffering_a_replaced_stream_does_not_raise(self):
+        """A host application may have put something without `reconfigure`
+        there, exactly as `soften_console_encoding` already allows for."""
+        import io as _io
+        stdout, stderr = sys.stdout, sys.stderr
+        try:
+            sys.stdout = sys.stderr = _io.StringIO()
+            rcekit.unbuffer_console()
+        finally:
+            sys.stdout, sys.stderr = stdout, stderr
+
+
 class DestructiveHoldBackTestCase(unittest.TestCase):
     """A payload that installs a backdoor or destroys data must be held back by
     default on EVERY live path. The single-request verifier did this and the

@@ -1348,6 +1348,7 @@ under `auto`; every other runtime keeps the POSIX shape, since a language does
 not say which OS it runs on.
 
 ```
+[detect] run configuration:
 [detect] sink shell: auto (per carrier)
 [detect] sink shapes: auto (full ladder)
 ```
@@ -1497,6 +1498,27 @@ and needs `--verify-active-risk intrusive` as well as `--oob-host`.
 |---|---|
 | `--doctor` | Report which corpus is in use and check its integrity (parses, payload counts); exits non-zero if unusable |
 | `--version` | Print the version and exit |
+| `-q`, `--quiet` | Suppress the banner. The report is unchanged — it is what the run is for |
+
+### Which stream carries what
+
+**stdout is the report, and nothing else is on it.** The two banner lines go to
+stderr, and so do RCEKit's own log records. That split is what lets a wrapper
+keep reading stdout exactly as it did before the banner existed:
+
+```bash
+python rcekit.py --acknowledge-consent --verify-url "$URL" --methods reflected \
+  > findings.txt 2> run.log
+```
+
+`--quiet` drops the banner for a run whose stderr you would rather keep empty.
+It does not quieten the report; there is no flag for that, because a run with no
+report is a run with no purpose.
+
+stdout is **line-buffered even when it is redirected**, so a long run shows its
+plan and its findings as they happen rather than all at once when the process
+exits. A redirected run used to print nothing at all until it finished, which is
+indistinguishable from a hang.
 
 ### Corpus resolution
 
