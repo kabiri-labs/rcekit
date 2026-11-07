@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def configure_logging() -> None:
-    """Attach RCEKit's file and stdout log handlers.
+    """Attach RCEKit's file and stderr log handlers.
 
     Called from :func:`main`, never at import. Importing a module must not
     create files in the caller's working directory -- and this one did: a bare
@@ -36,7 +36,13 @@ def configure_logging() -> None:
     # the log when a run has to be reconstructed afterwards.
     file_handler = logging.FileHandler("rcekit.log")
     file_handler.setLevel(logging.DEBUG)
-    console_handler = logging.StreamHandler(sys.stdout)
+    # stderr, not stdout. A log record is not part of the report, and on stdout
+    # it was interleaving with one: a generate run printed
+    # `INFO - Successfully generated 3 payloads to ...` and then
+    # `Generated 3 payloads to ... in detection mode` -- one fact, twice, in two
+    # formats, with a timestamp in front of the copy nobody asked for. Anything
+    # reading the report out of a pipe was reading those too.
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.INFO)
     logging.basicConfig(
         level=logging.DEBUG,
@@ -46,7 +52,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.12.2"
+__version__ = "3.13.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -10623,6 +10629,66 @@ def soften_console_encoding() -> None:
             pass
 
 
+def print_banner() -> None:
+    """Two lines on stderr, before anything else a run prints.
+
+    On stderr because it is new output and stdout is the report. A banner there
+    would land in the middle of every pipe and redirect that has been reading
+    these runs since before it existed, which is a change to a surface nobody
+    asked to have changed.
+
+    Two lines, and the vertical space is the reason. A terminal's screen
+    belongs to the findings; the figlet an operator scrolls past twice in a
+    demo costs more than it gives, and it is the detail that makes a security
+    tool read as a hobby project rather than an instrument. nmap, ffuf and
+    nuclei all print a compact header for the same reason.
+
+    The second line is the project's own claim, copied from the README rather
+    than reworded. A banner that states the tier rule in different words from
+    the documentation is a third copy of that rule to keep in sync, and the
+    rule is the thing this tool rests on.
+
+    ASCII only, like every other string this tool prints: a cp1252 console has
+    no byte for a box-drawing character, and the test that keeps those out
+    covers this automatically."""
+    print(f"RCEKit {__version__} -- RCE detection and confirmation for "
+          "authorised testing", file=sys.stderr)
+    print("executed means the target executed the input; negative means the "
+          "probes reached it", file=sys.stderr)
+
+
+def unbuffer_console() -> None:
+    """Make the report appear while the run is happening, not after it.
+
+    Python block-buffers stdout when it is not a terminal, and nothing in this
+    module flushes. Redirected to a file or through a pipe -- which is what CI,
+    `tee` and `script` do -- a run therefore printed *nothing at all* until the
+    process exited: measured at 13m12s against a local target with three
+    methods, where the plan and the configuration had been written minutes
+    before anything could be seen. An operator watching that has no way to tell
+    a working run from a hung one.
+
+    Line buffering rather than a `flush=True` on each call, because there are
+    over a hundred of them and a guard that has to be remembered at every one
+    is not a guard. The cost is a flush per line on a report whose longest
+    section is a few hundred rows, which is not measurable next to the HTTP
+    traffic that produced them.
+
+    Called from :func:`main` for the same reason :func:`configure_logging` is:
+    a library import must not reach into the caller's streams."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            # A test harness or host application has replaced the stream.
+            continue
+        try:
+            reconfigure(line_buffering=True)
+        except (ValueError, OSError):
+            # Detached or already closed. Nothing to do, and refusing to start
+            # over it would be absurd.
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns the process exit status: ``0`` when the
     requested run completed (including a verification that confirmed nothing —
@@ -10636,6 +10702,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     point (``rcekit = "rcekit:main"``) a plain zero-argument call."""
     configure_logging()
     soften_console_encoding()
+    unbuffer_console()
     parser = argparse.ArgumentParser(description="Generate RCE payloads for penetration testing")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("-o", "--output", default="rce_payloads.txt",
@@ -11020,8 +11087,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Sink returns no output: keep only out-of-band confirmable payloads (timing/OOB)")
     parser.add_argument("--sink-decodes", nargs="+", default=None,
                         help="Encodings the sink decodes before use (e.g. base64); those variants become valid and are generated")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Suppress the banner. The report itself is unchanged: "
+                             "it is what the run is for, and a flag that hid it "
+                             "would be a flag for running the tool pointlessly")
 
     args = parser.parse_args(argv)
+    if not args.quiet:
+        # After parsing, so --version and --help print their own output and
+        # exit without a banner in front of it.
+        print_banner()
 
     if args.listen:
         import time
@@ -11849,6 +11924,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 narrowed = (sink_shapes is not None or sink_raw or separators
                             or sink_env or bool(selected_contexts))
                 label = ", ".join(effective) if narrowed else "auto (full ladder)"
+                # A heading, because these read as findings without one.
+                # `sink shapes` and the five shape descriptions under it are
+                # the run's own configuration echoed back, and they were
+                # printed at exactly the weight of an EXECUTED row -- seven
+                # `[detect]` lines, one of which was the finding and six of
+                # which explained what `env` means.
+                print("[detect] run configuration:")
                 print(f"[detect] sink shell: {sink_env or 'auto (per carrier)'}")
                 print(f"[detect] sink shapes: {label or 'none'}")
                 for line in sink_shape_plan(effective):
