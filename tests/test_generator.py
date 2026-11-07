@@ -14134,7 +14134,9 @@ class ReportRowEscapingTestCase(unittest.TestCase):
         while all fifteen go through `display_result` -- `detail` is the one
         left out last time. Read with `ast` rather than by grepping, and with
         a floor on what was found, so this cannot pass because the report
-        moved somewhere the pattern no longer matches.
+        moved somewhere the pattern no longer matches. That floor earned its
+        keep immediately: on 3.8 the slice arrives wrapped and every access was
+        skipped, so without it this passed on 3.8 while checking nothing.
 
         Scoped to f-strings inside `main`, which is what a report row is, and
         deliberately not to `print` calls: the EXECUTED row builds its ` at
@@ -14153,9 +14155,21 @@ class ReportRowEscapingTestCase(unittest.TestCase):
         for text in (node for node in ast.walk(main)
                      if isinstance(node, ast.JoinedStr)):
             for inner in ast.walk(text):
-                if not (isinstance(inner, ast.Subscript)
-                        and isinstance(inner.slice, ast.Constant)
-                        and inner.slice.value in self.FIELDS
+                if not isinstance(inner, ast.Subscript):
+                    continue
+                # 3.8 wraps a simple subscript index in `ast.Index`; 3.9
+                # represents it by its value directly. Unwrapped by shape
+                # rather than by naming `ast.Index`, which is deprecated and
+                # due for removal while the matrix this has to pass runs 3.8
+                # through 3.13 -- and which cannot be used to build the 3.8
+                # shape on 3.9+ anyway, because its `__new__` returns the value
+                # it was handed. A `Slice` carries no `value` and falls
+                # through.
+                key = inner.slice
+                if not isinstance(key, ast.Constant):
+                    key = getattr(key, "value", key)
+                if not (isinstance(key, ast.Constant)
+                        and key.value in self.FIELDS
                         and isinstance(inner.ctx, ast.Load)):
                     continue
                 base = inner.value
@@ -14166,7 +14180,7 @@ class ReportRowEscapingTestCase(unittest.TestCase):
                       and base.func.id == "display_result"):
                     escaped_rows += 1
                 else:
-                    offenders.append((inner.lineno, inner.slice.value))
+                    offenders.append((inner.lineno, key.value))
         self.assertEqual(
             sorted(set(offenders)), [],
             "rcekit.py builds a report row from a result field without "
