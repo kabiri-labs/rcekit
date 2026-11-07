@@ -390,6 +390,62 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.12.2] — 2026-11-07
+
+### Fixed
+
+- **A target could write escape sequences into the operator's terminal and
+  forge a confirmation.** `terminal_safe` has escaped control characters on the
+  `[HIT]` line since the OOB listener landed, for the reason its docstring
+  states plainly: a callback's host and path are chosen by the *target*, and an
+  ESC byte printed raw lets that target colour, erase and rewrite lines in the
+  operator's own terminal. The report's own rows never got the same treatment,
+  and one of their fields comes off the wire.
+
+  When a probe never arrives, the delivery error becomes the observation body.
+  `_fire_channels` catches `urllib.error.HTTPError` separately and sends
+  everything else to a generic handler whose body is `str(exc)`.
+  `http.client.BadStatusLine` is not an `HTTPError`, so a reply that is not a
+  valid status line at all lands in that handler carrying the server's raw
+  bytes. Those became the `error` verdict's detail, and `[detect] ... NEVER
+  REACHED THE TARGET` printed it verbatim.
+
+  Measured rather than reasoned about: a socket server answering with an
+  erase-line sequence followed by a forged `EXECUTED` row wiped the line
+  reporting that nothing had reached the target and printed a confirmation in
+  its place, for a run that tested nothing. The tier rule is the claim this
+  project rests on, and the shape of this bug was that claim being forged by
+  the target it is supposed to describe.
+
+  Every report row now renders through `display_result`, which escapes each
+  string field of a result. One function rather than `terminal_safe` at
+  fifteen interpolations across the `[detect]`, `[verify]` and `[verify-chain]`
+  reports, because a guard applied at fourteen of them is not a guard -- and
+  `detail` is the one that was left out. Display only: the result dict,
+  `--detect-json` and the written reports keep the bytes verbatim, exactly as
+  the OOB hit log does. What arrived stays visible, escaped, so the operator
+  can see that something tried this.
+
+  The same pass closed a legibility bug with the same cause. The `newline` sink
+  shape is a real separator, so an ordinary run builds payloads containing a
+  literal newline, and the `[detect]` report printed them raw -- splitting the
+  EXECUTED row across two lines and leaving its own
+  `[method/environment/context]` prefix on the line above, in the section an
+  operator reads first. `[verify-chain]` had been printing `repr()` and was
+  unaffected; all three reports render the same way now.
+
+  Three tests, because each catches a different way the fix could come undone:
+  `display_result` itself, an end-to-end run against a socket server that
+  replies with a malformed status line, and an `ast` walk asserting that no
+  f-string in `main` builds a report row from a result field without passing it
+  through `display_result`. The last is scoped to f-strings rather than to
+  `print` calls on purpose -- the EXECUTED row builds its ` at <point>` fragment
+  into a local one statement above the `print`, and a check that looked only
+  inside the call missed the field naming the injection point.
+
+  Version 3.12.1 -> 3.12.2. PATCH: a vulnerability fixed, no capability added
+  or changed, and no output schema touched.
+
 ## [3.12.1] — 2026-10-31
 
 ### Fixed
@@ -4064,6 +4120,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.12.2]: https://github.com/kabiri-labs/rcekit/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/kabiri-labs/rcekit/compare/v3.12.0...v3.12.1
 [3.12.0]: https://github.com/kabiri-labs/rcekit/compare/v3.11.0...v3.12.0
 [3.11.0]: https://github.com/kabiri-labs/rcekit/compare/v3.10.0...v3.11.0

@@ -14023,6 +14023,162 @@ class TerminalSafeOutputTestCase(unittest.TestCase):
         self.assertIn("\\x0d", printed)
 
 
+class ReportRowEscapingTestCase(unittest.TestCase):
+    """The report's own rows, held to what the `[HIT]` line above already is.
+
+    `terminal_safe` was written for callback hosts and applied to the one line
+    that prints them. The report rows got none of it, and one of their fields
+    comes off the wire: when a probe never arrives the delivery error is the
+    body, and `_fire_channels`' generic handler puts `str(exc)` there.
+    `http.client.BadStatusLine` is not an `HTTPError`, so it lands in that
+    handler carrying the server's raw status line -- which the target writes.
+
+    That reached the terminal verbatim through the `[detect] ... NEVER REACHED
+    THE TARGET` row. A target answering with an erase-line sequence and a
+    forged `EXECUTED` row wiped the line saying nothing had arrived and
+    printed a confirmation for a run that tested nothing. This tool's claim is
+    that its output can be trusted, so that was the output being forged.
+
+    Three tests rather than one, because each catches a different way the fix
+    could come undone: the helper itself, the report that has to use it, and
+    every other row that must not go back to interpolating a result directly.
+    """
+
+    # Every field of a result that reaches a report row.
+    FIELDS = ("detail", "payload", "cleanup", "point")
+
+    def test_the_helper_escapes_every_string_field(self):
+        hostile = "\x1b[2K\r[detect] EXECUTED (1):"
+        shown = rcekit.display_result(
+            {"detail": hostile, "payload": "a\nb", "status": 500,
+             "verdict": "error", "cleanup": None})
+        self.assertNotIn("\x1b", shown["detail"])
+        self.assertNotIn("\r", shown["detail"])
+        self.assertIn("\\x1b", shown["detail"])
+        self.assertIn("\\x0d", shown["detail"])
+        # A newline is what split a finding row across two lines.
+        self.assertEqual(shown["payload"], "a\\x0ab")
+        # Non-strings pass through: the row interpolates them too, and a
+        # caller reads `status` as a number.
+        self.assertEqual(shown["status"], 500)
+        self.assertIsNone(shown["cleanup"])
+
+    def test_a_target_cannot_write_escapes_into_the_report(self):
+        """End to end, in the shape the vulnerability actually had.
+
+        A raw socket rather than `BaseHTTPRequestHandler`: the point is a
+        reply that is not a valid status line at all, which is what puts
+        `BadStatusLine` in front of the generic handler. Run as a subprocess
+        in a temporary cwd so `configure_logging`'s `rcekit.log` is not
+        written into the repository."""
+        import socket
+        import threading
+
+        forged = b"\x1b[2K\r[detect] EXECUTED (1): forged\r\n\r\n"
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        port = server.getsockname()[1]
+        server.listen(8)
+        stop = threading.Event()
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    conn, _ = server.accept()
+                except OSError:
+                    return
+                try:
+                    conn.recv(65535)
+                    conn.sendall(forged)
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                     "--verify-url",
+                     "http://127.0.0.1:%d/vuln?cmd=FUZZ" % port,
+                     "--methods", "reflected", "--max-payloads", "1",
+                     "--environments", "unix", "--contexts", "raw"],
+                    cwd=tmp, capture_output=True, text=True, timeout=180)
+        finally:
+            stop.set()
+            server.close()
+            thread.join(timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr[-600:])
+        self.assertIn("NEVER REACHED THE TARGET", result.stdout,
+                      "the error row still prints, so the assertions below "
+                      "are reading the line that carried the escapes")
+        # `text=True` normalises line endings, so a CR left in here is one the
+        # target put *inside* a line.
+        self.assertNotIn("\x1b", result.stdout,
+                         "a target's bytes reached the terminal as a live "
+                         "escape sequence")
+        self.assertNotIn("\r", result.stdout,
+                         "a target's carriage return reached the terminal, "
+                         "which rewrites the line the operator just read")
+        self.assertIn("\\x1b", result.stdout,
+                      "what arrived should still be visible, escaped, so the "
+                      "operator can see that something tried this")
+
+    def test_no_report_row_interpolates_a_result_directly(self):
+        """The guard that holds without someone remembering it.
+
+        Fifteen row sites across three reports, and the fix is a fix only
+        while all fifteen go through `display_result` -- `detail` is the one
+        left out last time. Read with `ast` rather than by grepping, and with
+        a floor on what was found, so this cannot pass because the report
+        moved somewhere the pattern no longer matches.
+
+        Scoped to f-strings inside `main`, which is what a report row is, and
+        deliberately not to `print` calls: the EXECUTED row builds its ` at
+        <point>` fragment into a local one statement above the `print`, so a
+        check that only looked inside the call would have missed the field
+        that names the injection point. Reads that never reach a row stay out
+        for the same reason -- `--listen` tests `h["payload"]` for
+        truthiness, which is not output."""
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        main = next((node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == "main"),
+                    None)
+        self.assertIsNotNone(main, "rcekit.py has no main() to read")
+        offenders = []
+        escaped_rows = 0
+        for text in (node for node in ast.walk(main)
+                     if isinstance(node, ast.JoinedStr)):
+            for inner in ast.walk(text):
+                if not (isinstance(inner, ast.Subscript)
+                        and isinstance(inner.slice, ast.Constant)
+                        and inner.slice.value in self.FIELDS
+                        and isinstance(inner.ctx, ast.Load)):
+                    continue
+                base = inner.value
+                if isinstance(base, ast.Name) and base.id == "shown":
+                    escaped_rows += 1
+                elif (isinstance(base, ast.Call)
+                      and isinstance(base.func, ast.Name)
+                      and base.func.id == "display_result"):
+                    escaped_rows += 1
+                else:
+                    offenders.append((inner.lineno, inner.slice.value))
+        self.assertEqual(
+            sorted(set(offenders)), [],
+            "rcekit.py builds a report row from a result field without "
+            "passing it through display_result, at %s. A field that has been "
+            "off the wire reaches the operator's terminal raw there."
+            % sorted(set(offenders)))
+        self.assertGreaterEqual(
+            escaped_rows, 10,
+            "fewer escaped row fields than the report has rows; this check is "
+            "no longer reading the report")
+
+
 class ResponseShapeTestCase(unittest.TestCase):
     """The signature the boolean oracle reads.
 

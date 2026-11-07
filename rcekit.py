@@ -46,7 +46,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.12.1"
+__version__ = "3.12.2"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -4555,6 +4555,41 @@ def terminal_safe(text: str) -> str:
         else:
             out.append("\\u%04x" % ord(char))
     return "".join(out)
+
+
+def display_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """A result's fields, escaped for display on the operator's terminal.
+
+    Two of these fields have been somewhere RCEKit does not control.
+
+    ``detail`` is the one that matters. When a probe never arrives, the
+    delivery error carries the server's own bytes: ``http.client.BadStatusLine``
+    is not an ``HTTPError``, so it falls to the generic handler whose body is
+    ``str(exc)`` -- the raw status line. Printed as it arrived, that let a
+    target write ``\\x1b[2K\\r`` and a forged ``EXECUTED`` row into the
+    operator's terminal, erasing the line that said nothing had reached the
+    target. For a tool whose whole claim is that its output can be trusted,
+    that is the output being forged, and it is the case
+    :func:`terminal_safe` was written for -- in the one path that never
+    called it.
+
+    ``payload`` is RCEKit's own, so nothing hostile reaches the terminal
+    through it, but the newline separator is a real separator. A row printed
+    raw split across two lines and left its own ``[method/env/context]``
+    prefix on the line above, in the one section an operator reads first.
+
+    One function rather than :func:`terminal_safe` at each interpolation,
+    because there are fifteen of them across the ``[detect]``, ``[verify]``
+    and ``[verify-chain]`` reports, and a guard applied at fourteen is not a
+    guard -- which is how ``detail`` came to be the one left out. Escaping
+    every string field rather than the two known ones for the same reason: a
+    field added later cannot arrive unescaped.
+
+    Display only. The result dict, ``--detect-json`` and the written reports
+    keep the bytes verbatim, exactly as the OOB hit log does -- what arrived
+    is evidence, and evidence is not edited to be readable."""
+    return {key: terminal_safe(value) if isinstance(value, str) else value
+            for key, value in result.items()}
 
 
 class OOBListener:
@@ -11247,7 +11282,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if executed:
             print(f"\n[verify-chain] EXECUTED ({len(executed)}):")
             for result in executed:
-                print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
+                shown = display_result(result)
+                print(f"  [{shown['category']}] {shown['payload']}   ({shown['detail']})")
         # Iterated from the one table rather than written out by verdict name.
         # A hand-written block for a particular verdict is an ordering claim
         # expressed as the position of a statement, and this report would then
@@ -11261,7 +11297,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
             print(f"\n[verify-chain] {len(rows)} {heading} — NOT proof of execution:")
             for result in rows:
-                print(f"  [{result['category']}] {result['payload']!r}   ({result['detail']})")
+                shown = display_result(result)
+                print(f"  [{shown['category']}] {shown['payload']}   ({shown['detail']})")
             print(f"  -> {closing}")
         if not executed:
             print("\n[verify-chain] No execution proven.")
@@ -11390,7 +11427,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             method = args.verify_method or method
             if injection_runs:
                 for point, url, _m, _d, _h, label in injection_runs:
-                    print(f"[verify]   {label}")
+                    print(f"[verify]   {terminal_safe(label)}")
             else:
                 print(f"[verify] loaded request from {args.request_file}: {method} {verify_url} "
                       f"(injecting at {injection})")
@@ -11969,7 +12006,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         result["point"] = label
                     verdict = overall_detection_verdict(point_results)
                     marker = "  <-- EXECUTED" if verdict == "executed" else ""
-                    print(f"[detect]   {label}: {verdict} "
+                    print(f"[detect]   {terminal_safe(label)}: {verdict} "
                           f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
             else:
@@ -12150,11 +12187,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             if executed:
                 print(f"\n[detect] EXECUTED ({len(executed)}):")
                 for result in executed:
-                    at = f" at {result['point']}" if result.get("point") else ""
-                    print(f"  [{result['method']}/{result['environment']}/{result['context']}]{at} "
-                          f"{result['payload']}   ({result['detail']})")
-                    if result.get("cleanup"):
-                        print(f"      cleanup: {result['cleanup']}")
+                    shown = display_result(result)
+                    at = f" at {shown['point']}" if shown.get("point") else ""
+                    print(f"  [{shown['method']}/{shown['environment']}/{shown['context']}]{at} "
+                          f"{shown['payload']}   ({shown['detail']})")
+                    if shown.get("cleanup"):
+                        print(f"      cleanup: {shown['cleanup']}")
             # Every proven-but-not-execution section, in one pass over one
             # table. `deserialization-sink` and `lookup-sink` were hand-written
             # blocks here, above a table holding the rest, and where they sat
@@ -12168,23 +12206,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                     continue
                 print(f"\n[detect] {len(rows)} {heading} — NOT proof of execution:")
                 for result in rows:
-                    at = f" at {result['point']}" if result.get("point") else ""
+                    shown = display_result(result)
+                    at = f" at {shown['point']}" if shown.get("point") else ""
                     if compact:
                         # A base64 object stream or a JNDI URI, and an
                         # `environment` that tells the reader nothing.
-                        print(f"  [{result['method']}/{result['context']}]{at} "
-                              f"{result['payload'][:100]}   ({result['detail']})")
+                        print(f"  [{shown['method']}/{shown['context']}]{at} "
+                              f"{shown['payload'][:100]}   ({shown['detail']})")
                     else:
-                        print(f"  [{result['method']}/{result['environment']}/"
-                              f"{result['context']}]{at} "
-                              f"{result['payload']}   ({result['detail']})")
+                        print(f"  [{shown['method']}/{shown['environment']}/"
+                              f"{shown['context']}]{at} "
+                              f"{shown['payload']}   ({shown['detail']})")
                     # Any of these can come from a state-changing method:
                     # `write` reaching `file-write` means the file IS on the
                     # target, just not interpreted. Printed for every section
                     # rather than per block, so a tier added later cannot
                     # arrive without it.
-                    if result.get("cleanup"):
-                        print(f"      cleanup: {result['cleanup']}")
+                    if shown.get("cleanup"):
+                        print(f"      cleanup: {shown['cleanup']}")
                 print(f"  -> {closing}")
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
@@ -12197,7 +12236,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 errored = [r for r in results if r["verdict"] == "error"]
                 if errored:
                     print(f"\n[detect] {len(errored)} of {len(results)} probe(s) NEVER REACHED THE TARGET "
-                          f"(a delivery error is not a negative): {errored[0]['detail']}")
+                          f"(a delivery error is not a negative): "
+                          f"{display_result(errored[0])['detail']}")
                     print("[detect] check connectivity/auth; for a self-signed HTTPS cert add --insecure.")
                 refused_rows = [r for r in results if r["verdict"] == "blocked"]
                 if generator.refused_probes:
@@ -12240,13 +12280,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         if executed:
             print(f"\n[verify] EXECUTED ({len(executed)}):")
             for result in executed:
-                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
+                shown = display_result(result)
+                print(f"  [{shown['category']}/{shown['context']}] {shown['payload']}   ({shown['detail']})")
         inconclusive = [r for r in results if r["verdict"] == "inconclusive"]
         if inconclusive:
             print(f"\n[verify] {len(inconclusive)} INCONCLUSIVE (signature seen without the payload — "
                   "the target reflects it regardless, so it is not proof of execution):")
             for result in inconclusive:
-                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
+                shown = display_result(result)
+                print(f"  [{shown['category']}/{shown['context']}] {shown['payload']}   ({shown['detail']})")
         oob_pending = [r for r in results if r["verdict"] == "oob-pending"]
         if oob_pending:
             print(f"\n[verify] {len(oob_pending)} OOB payloads sent — check your listener for the tokens.")
@@ -12255,7 +12297,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\n[verify] {len(timing_candidates)} TIMING CANDIDATES timed out (the hang may be the "
                   "expected delay — raise --verify-timeout above it to confirm):")
             for result in timing_candidates:
-                print(f"  [{result['category']}/{result['context']}] {result['payload']}   ({result['detail']})")
+                shown = display_result(result)
+                print(f"  [{shown['category']}/{shown['context']}] {shown['payload']}   ({shown['detail']})")
         if not executed and not oob_pending:
             print("\n[verify] No execution proven. The target may be patched, or the payloads "
                   "may not fit its sink/context (try --target-profile or a different --environments/--contexts).")
