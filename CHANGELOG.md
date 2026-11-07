@@ -10,6 +10,29 @@ formats, or the template schema.
 
 ### Documentation
 
+- **The README said a run that reached nothing exits non-zero, and it exits 0.**
+  The sentence bundled `error` together with `nothing-tested` and claimed the
+  status for both, and it left `blocked` out although the paragraph above it
+  names three cases and the heading counts three rows. Measured rather than
+  read: `nothing-tested` exits 1, `error` and `blocked` exit 0.
+
+  The code is right and the sentence was wrong, which is worth stating because
+  the opposite conclusion was the tempting one. `CLIExitCodeTestCase` holds the
+  contract -- every refusal to *run* exits non-zero, and a completed run exits 0
+  even when it confirmed nothing, because that is a result and not a failure --
+  and an all-`error` run completed: the probes were built and sent, and nothing
+  arrived. `nothing-tested` exits 1 for the other reason, that no probes were
+  built at all, which is a configuration refusal and belongs with an unusable
+  corpus or a missing `FUZZ`. Changing the exit codes to match the sentence
+  would have broken the CLI contract a test already pins.
+
+  What replaces the claim is what a CI author actually needs, which the sentence
+  had been standing in the way of: branch on the verdict rather than on `$?`,
+  because the status cannot tell an unreachable target from a clean negative.
+  `--detect-json` carries the collapsed `verdict` for exactly that.
+
+  No version bump -- this is documentation only.
+
 - **Two bench notes still named a blocker that had already been removed.** The
   second-order row said "the reason is the harness" and the Chartbrew paragraph
   said "there is no setup hook in the runner" — both true when written, both

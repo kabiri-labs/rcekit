@@ -569,8 +569,8 @@ because your flags excluded every one of them, or whose every payload was
 refused by a WAF, has learned **nothing** about the target — and printing
 `negative` there is a lie that reads exactly like safety.
 
-So `error` and `nothing-tested` are first-class verdicts, the run exits non-zero,
-and RCEKit says which of them happened and why:
+So `blocked`, `error` and `nothing-tested` are first-class verdicts, and
+RCEKit says which of them happened and why:
 
 ```
 [!] No probes were built, so NOTHING WAS TESTED — this is not a negative result.
@@ -581,6 +581,15 @@ It fires wherever a run can quietly become empty: a method that does not apply t
 the selected environments, a `--sink-shape` rung the chosen shell has no syntax
 for, a `--bridges` selection entirely held back by the safety ceiling, a request
 body that broke delivery before it arrived.
+
+**Branch on the verdict, not on the exit status.** The status says whether
+RCEKit could carry the run out, not what the run found. `nothing-tested`
+exits non-zero, because building no probes is a refusal to run and belongs
+with an unusable corpus or a missing `FUZZ`. `error` and `blocked` exit **0**:
+the run completed and the verdict is its result, so a wrapper that reads only
+`$?` cannot tell an unreachable target from a clean negative. Read the
+collapsed `verdict` that `--detect-json` carries, which exists for exactly
+this.
 
 A run that was only *partly* blinded gets the same treatment one level down. If
 you asked for a second-order oracle and the observed endpoint never answered, the
