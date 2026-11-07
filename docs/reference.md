@@ -1498,7 +1498,9 @@ and needs `--verify-active-risk intrusive` as well as `--oob-host`.
 |---|---|
 | `--doctor` | Report which corpus is in use and check its integrity (parses, payload counts); exits non-zero if unusable |
 | `--version` | Print the version and exit |
-| `-q`, `--quiet` | Suppress the banner. The report is unchanged — it is what the run is for |
+| `-q`, `--quiet` | Suppress the banner and the progress line. The report is unchanged — it is what the run is for |
+| `--color` | `auto` (a terminal, with `NO_COLOR` unset), `always`, `never`. Hue encodes the tier and nothing else |
+| `--progress` | `auto` (one self-erasing line on a terminal), `plain` (a line every 25 probes, for a log), `none` |
 
 ### Which stream carries what
 
@@ -1511,9 +1513,38 @@ python rcekit.py --acknowledge-consent --verify-url "$URL" --methods reflected \
   > findings.txt 2> run.log
 ```
 
-`--quiet` drops the banner for a run whose stderr you would rather keep empty.
-It does not quieten the report; there is no flag for that, because a run with no
-report is a run with no purpose.
+The progress line goes to stderr too, and only to a terminal: redirect stderr
+and you get the banner and nothing else, with no carriage returns in the file.
+`--progress plain` is the opposite trade — an ordinary line every 25 probes,
+which is what you want in a CI log that nobody watches live. `--progress none`
+turns it off.
+
+`--quiet` drops the banner and the progress line for a run whose stderr you
+would rather keep empty. It does not quieten the report; there is no flag for
+that, because a run with no report is a run with no purpose.
+
+### Colour
+
+Colour is on when stdout is a terminal, `NO_COLOR` is unset and `TERM` is not
+`dumb`; `--color never` and `--color always` override all of that, and
+`FORCE_COLOR` forces it on a pipe. A redirected report therefore carries no
+escape sequences without you asking for that, and `--detect-json` never does
+under any setting — it is a file and a published schema.
+
+**Hue encodes the tier and nothing else.** One axis, one meaning:
+
+| Rendered | Verdicts |
+|---|---|
+| bold red | `executed` — the one tier that is execution |
+| yellow | `timing-sink`, `file-write`, `file-read`, `evaluation-sink`, `deserialization-sink`, `lookup-sink`, `needs-review` — real, and not RCE |
+| bold yellow | `error`, `blocked`, `nothing-tested`, `inconclusive` — a run that did not test what you asked |
+| plain | `negative` |
+| bold, no colour | `[!]` operator notices |
+
+`negative` is deliberately uncoloured and **there is no green anywhere**. Green
+reads as "nothing here", and `negative` does not mean that: it means the probes
+reached the target. A test asserts the palette contains no green, because that
+is a property of the tier rule rather than of the styling.
 
 stdout is **line-buffered even when it is redirected**, so a long run shows its
 plan and its findings as they happen rather than all at once when the process

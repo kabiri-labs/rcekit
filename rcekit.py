@@ -3,11 +3,14 @@ import argparse
 import base64
 import json
 import logging
+import os
 import random
+import shutil
 import re
 import string
 import struct
 import sys
+import time
 import urllib.parse
 import zlib
 from dataclasses import asdict, dataclass, field as dataclass_field, replace as dataclass_replace
@@ -52,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.13.0"
+__version__ = "3.14.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -3250,6 +3253,21 @@ class RCEKit:
         carriers.extend(self._quoted_shell_carriers(carriers, carrier_seen, config))
         return carriers
 
+    def _note_progress(self, meth: Any = None, record: Any = None) -> None:
+        """Tell the run's progress line that one more request went out.
+
+        An attribute rather than a parameter on :meth:`run_detection`, whose
+        signature carries three comments about what inserting one costs. Absent
+        by default, so every caller that does not set it pays one `getattr`."""
+        hook = getattr(self, "progress", None)
+        if hook is None:
+            return
+        carrier = None
+        if record is not None:
+            carrier = "%s/%s" % (getattr(record, "environment", "?"),
+                                 getattr(record, "context", "?"))
+        hook.tick(getattr(meth, "name", None), carrier, self.delivered_probes)
+
     def estimate_detection_probes(self, records: List[PayloadRecord], methods: List[str],
                                   config: Optional[Dict[str, Any]] = None,
                                   max_payloads: Optional[int] = None) -> int:
@@ -3450,6 +3468,7 @@ class RCEKit:
             # `--max-payloads 5 --evade high` run against a filter that refuses
             # whitespace put 12 requests on the target and recorded 5.
             self.delivered_probes += 1
+            self._note_progress(meth, record)
             self.escalated_probes += 1
             if not payload_refused(status, control_status):
                 self.escalation_wins[rung] = self.escalation_wins.get(rung, 0) + 1
@@ -3744,6 +3763,7 @@ class RCEKit:
                             status, body, chans, elapsed = delivery.send(
                                 probe.payload, req_timeout)
                             self.delivered_probes += 1
+                            self._note_progress(meth, record)
                             # The same retry the per-probe path makes. `time`,
                             # `oob`, `lookup` and `deser` live in this branch,
                             # and leaving it out meant the documented ceiling
@@ -3919,6 +3939,7 @@ class RCEKit:
                     seen.add(probe.payload)
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
+                    self._note_progress(meth, record)
                     # A followup fetch (file-based self-OOB): retrieve the file the
                     # probe asked the target to write. Its body is the confirmation
                     # channel, so a blocked/failed fetch stays unconfirmed.
@@ -4598,6 +4619,244 @@ def display_result(result: Dict[str, Any]) -> Dict[str, Any]:
             for key, value in result.items()}
 
 
+# Hue encodes the TIER, and nothing else. Weight and dim carry how much a
+# non-finding line matters. Keeping those two axes apart is what stops colour
+# from becoming a second, vaguer verdict vocabulary beside the real one.
+#
+# Eight-colour SGR rather than 256: every terminal an engagement puts in front
+# of an operator has these eight, and a finding that renders as a literal
+# `[38;5;196m` on a stock console is worse than one with no colour at all.
+SGR_RESET = "\033[0m"
+SGR_BOLD = "\033[1m"
+
+# `negative` is absent, and that is the content rather than an oversight.
+# Green would read as "nothing here", and `negative` does not mean that -- it
+# means the probes reached the target, which is a statement about the run and
+# not a clean bill of health. There is no green anywhere in this table, and
+# `NoGreenInThePaletteTestCase` is the guard.
+#
+# `executed` is the one tier that is execution, so it takes the one colour
+# nothing else may use. The proven-but-not-execution tiers share yellow
+# because they share a meaning: real, and not RCE. The run-level failures take
+# bold yellow, because a run that tested nothing must not be able to look like
+# the `negative` it is not.
+TIER_SGR = {
+    "executed": "\033[1;31m",
+    "timing-sink": "\033[33m",
+    "file-write": "\033[33m",
+    "file-read": "\033[33m",
+    "evaluation-sink": "\033[33m",
+    "deserialization-sink": "\033[33m",
+    "lookup-sink": "\033[33m",
+    "needs-review": "\033[33m",
+    "error": "\033[1;33m",
+    "blocked": "\033[1;33m",
+    "nothing-tested": "\033[1;33m",
+    "inconclusive": "\033[1;33m",
+}
+
+_COLOUR = False
+
+
+def want_colour(stream: Any, choice: str = "auto") -> bool:
+    """Whether SGR codes should be written to ``stream``.
+
+    ``--color never`` and ``always`` are the operator's explicit answer and
+    beat everything else. Otherwise, in order: ``NO_COLOR`` (the documented
+    convention -- present and non-empty means no colour, whatever its value),
+    a terminal that declares itself dumb, ``FORCE_COLOR`` for a caller that
+    knows better than ``isatty``, and finally whether the stream is a terminal
+    at all.
+
+    A pipe therefore gets no colour without anyone passing a flag, which is
+    what keeps escape sequences out of a redirected report -- and out of the
+    tests that assert no ESC byte ever reaches a captured stdout."""
+    if choice == "never":
+        return False
+    if choice == "always":
+        return True
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    try:
+        return bool(stream.isatty())
+    except Exception:
+        # A replaced stream that does not implement it. No colour is the safe
+        # answer: a stray escape sequence in a report is worse than plain text.
+        return False
+
+
+def enable_colour(on: bool) -> None:
+    """Set once from :func:`main`, read by :func:`paint`.
+
+    A module-level flag rather than a parameter threaded through the report,
+    because the alternative is an argument on every one of the call sites and
+    a report that is half coloured the first time one is missed."""
+    global _COLOUR
+    _COLOUR = on
+
+
+def paint(text: str, tier: Optional[str]) -> str:
+    """Colour one of RCEKit's own labels by the tier it reports.
+
+    Only ever called on text RCEKit generated: a section heading, a verdict
+    name, a marker. Never on a payload, a detail, a point label or anything
+    else that has been near the target -- :func:`display_result` escapes those
+    precisely because the target chooses them, and wrapping attacker-chosen
+    bytes in an escape sequence would hand back the control codes that
+    escaping took away.
+
+    Returns ``text`` unchanged when colour is off or the tier has no entry, so
+    every call site reads the same whether colour is on or not."""
+    code = TIER_SGR.get(tier or "") if _COLOUR else None
+    return "%s%s%s" % (code, text, SGR_RESET) if code else text
+
+
+def bold(text: str) -> str:
+    """Weight, not hue. ``[!]`` is important and is not a tier, and giving it a
+    colour would put a fourth meaning on the axis that carries the tiers."""
+    return "%s%s%s" % (SGR_BOLD, text, SGR_RESET) if _COLOUR else text
+
+
+class Progress:
+    """One self-erasing line on stderr, for the minutes between the plan and
+    the report.
+
+    A detection run against a single parameter sends hundreds to thousands of
+    requests and, before this, printed nothing at all while it did: measured at
+    13m12s for three methods against a local target, silent from the
+    configuration block to the findings. An operator cannot tell that from a
+    hang, and this project's own documentation shows runs of 1154 and 2883
+    probes.
+
+    On stderr, like the banner, so a redirected report never carries a carriage
+    return -- and in ``auto`` mode only where stderr is a terminal, so a
+    captured stderr gets nothing rather than a file full of ``\r``. ``plain``
+    is for the case that wants a record instead, CI or a log file, and writes
+    an ordinary line every :attr:`PLAIN_EVERY` probes.
+
+    Rate-limited to :attr:`MIN_REDRAW_S`: a redraw per probe against a fast
+    local target is thousands of writes a second for a line nobody reads that
+    fast.
+
+    Clamped to the terminal's width, because a line that wraps cannot be erased
+    by one ``\r`` and leaves its tail on the screen."""
+
+    MIN_REDRAW_S = 0.2
+    PLAIN_EVERY = 25
+
+    def __init__(self, stream: Any, mode: str = "auto",
+                 total: Optional[int] = None):
+        self.stream = stream
+        self.mode = mode
+        self.total = total
+        self.started = time.monotonic()
+        self._last_draw = 0.0
+        self._last_plain = 0
+        self._width = 0
+
+    def _label(self, method: Optional[str], carrier: Optional[str],
+               sent: int) -> str:
+        elapsed = int(time.monotonic() - self.started)
+        clock = "%02d:%02d" % (elapsed // 60, elapsed % 60)
+        count = f"{sent}/~{self.total}" if self.total else str(sent)
+        parts = ["[detect]", clock]
+        if method:
+            parts.append(method)
+        if carrier:
+            parts.append(carrier)
+        parts.append(f"{count} probes")
+        return "  ".join(parts)
+
+    def tick(self, method: Optional[str], carrier: Optional[str],
+             sent: int) -> None:
+        if self.mode == "plain":
+            if sent - self._last_plain >= self.PLAIN_EVERY:
+                self._last_plain = sent
+                self.stream.write(self._label(method, carrier, sent) + "\n")
+                self.stream.flush()
+            return
+        now = time.monotonic()
+        if now - self._last_draw < self.MIN_REDRAW_S:
+            return
+        self._last_draw = now
+        # Measured per draw rather than once: a pane the operator resizes
+        # mid-run would otherwise keep being written past its edge.
+        try:
+            width = shutil.get_terminal_size().columns
+        except Exception:
+            width = 80
+        line = self._label(method, carrier, sent)[:max(20, width - 1)]
+        self._width = max(self._width, len(line))
+        self.stream.write("\r" + line + " " * (self._width - len(line)))
+        self.stream.flush()
+
+    def clear(self) -> None:
+        """Erase the line and leave the cursor at column 0.
+
+        Called before anything else prints, so the report never lands in the
+        middle of a progress line. ``plain`` wrote whole lines and has nothing
+        to erase."""
+        if self.mode == "plain" or not self._width:
+            return
+        try:
+            self.stream.write("\r" + " " * self._width + "\r")
+            self.stream.flush()
+        except Exception:
+            # A stream that went away mid-run. The report matters; the
+            # cosmetics of erasing a line do not.
+            pass
+        self._width = 0
+
+
+# The run leaves its progress line here so the OOB listener can erase it.
+#
+# Module-level, and the listener's thread is the reason. A callback can arrive
+# while the main thread is drawing, and `[HIT]` is evidence -- it must not be
+# printed into the middle of a line. The listener has no reference to the run
+# that started it, so the run registers here instead of being threaded through
+# two constructors to reach it.
+#
+# The bound is worth stating: progress is on stderr and `[HIT]` on stdout, so
+# on a terminal the two share a screen that no lock between them can
+# synchronise. Clearing first puts the cursor at column 0, which is what keeps
+# the `[HIT]` line itself intact; a redraw landing between the clear and the
+# print would be visible and cosmetic, never a corrupted hit.
+_ACTIVE_PROGRESS = None  # type: Optional[Progress]
+
+
+def start_progress(mode: str, total: Optional[int] = None,
+                   stream: Any = None) -> Optional["Progress"]:
+    """Build the progress line a run should draw, or ``None`` for silence.
+
+    ``none`` is silence by request. ``auto`` is silence too wherever stderr is
+    not a terminal, which is what keeps carriage returns out of a captured
+    stderr without the operator having to think about it."""
+    global _ACTIVE_PROGRESS
+    _ACTIVE_PROGRESS = None
+    if mode == "none":
+        return None
+    stream = stream if stream is not None else sys.stderr
+    if mode == "auto":
+        try:
+            if not stream.isatty():
+                return None
+        except Exception:
+            return None
+    _ACTIVE_PROGRESS = Progress(stream, mode=mode, total=total)
+    return _ACTIVE_PROGRESS
+
+
+def clear_progress() -> None:
+    """Erase the active progress line, if there is one."""
+    if _ACTIVE_PROGRESS is not None:
+        _ACTIVE_PROGRESS.clear()
+
+
+
 class OOBListener:
     """A lightweight out-of-band listener that records DNS/HTTP callbacks and
     correlates each one back to the payload whose unique token produced it.
@@ -4664,6 +4923,9 @@ class OOBListener:
         # keeps the raw bytes.
         where = terminal_safe(f"{host or path}")
         safe_token = terminal_safe(token) if token else token
+        # A hit is evidence and arrives on another thread, so the line the run
+        # may be drawing comes down before it is printed.
+        clear_progress()
         if entry:
             print(f"[HIT] {proto} token={safe_token} from {source} "
                   f"-> {terminal_safe(str(entry.get('payload')))} "
@@ -11087,12 +11349,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Sink returns no output: keep only out-of-band confirmable payloads (timing/OOB)")
     parser.add_argument("--sink-decodes", nargs="+", default=None,
                         help="Encodings the sink decodes before use (e.g. base64); those variants become valid and are generated")
+    parser.add_argument("--progress", choices=["auto", "plain", "none"],
+                        default="auto", metavar="WHEN",
+                        help="Show what the run is doing: auto (one self-erasing "
+                             "line on a terminal), plain (a line every 25 probes, "
+                             "for a log), none")
+    parser.add_argument("--color", choices=["auto", "always", "never"],
+                        default="auto", metavar="WHEN",
+                        help="Colour the findings: auto (a terminal, and NO_COLOR unset), "
+                             "always, never. Hue encodes the tier and nothing else")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="Suppress the banner. The report itself is unchanged: "
                              "it is what the run is for, and a flag that hid it "
                              "would be a flag for running the tool pointlessly")
 
     args = parser.parse_args(argv)
+    # Decided once, from stdout: the report is what carries the tiers, so a
+    # redirected report is uncoloured even when stderr is still a terminal.
+    enable_colour(want_colour(sys.stdout, args.color))
     if not args.quiet:
         # After parsing, so --version and --help print their own output and
         # exit without a banner in front of it.
@@ -11355,7 +11629,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[verify-chain] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
         if executed:
-            print(f"\n[verify-chain] EXECUTED ({len(executed)}):")
+            print("\n[verify-chain] " + paint(f"EXECUTED ({len(executed)}):",
+                                                   EXECUTION_TIER))
             for result in executed:
                 shown = display_result(result)
                 print(f"  [{shown['category']}] {shown['payload']}   ({shown['detail']})")
@@ -11370,7 +11645,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             rows = [r for r in results if r["verdict"] == verdict]
             if not rows:
                 continue
-            print(f"\n[verify-chain] {len(rows)} {heading} — NOT proof of execution:")
+            print("\n[verify-chain] " + paint(
+                f"{len(rows)} {heading} — NOT proof of execution:", verdict))
             for result in rows:
                 shown = display_result(result)
                 print(f"  [{shown['category']}] {shown['payload']}   ({shown['detail']})")
@@ -11967,6 +12243,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if separators:
                     print("[detect]   (separators pinned by --separators: "
                           f"{', '.join(repr(s) for s in separators)})")
+            # The minutes between the plan and the report, which printed
+            # nothing at all before this. The estimate is the cost line's own
+            # figure, so the denominator the operator watches is the one the
+            # pre-flight already promised.
+            probe_estimate = generator.estimate_detection_probes(
+                to_send, method_names, detection_config,
+                max_payloads=args.max_payloads)
+            if injection_runs:
+                probe_estimate *= len(injection_runs)
+            generator.progress = start_progress(
+                "none" if args.quiet else args.progress, total=probe_estimate)
             if injection_runs:
                 # Enumeration. Each candidate is its own request shape, so each
                 # gets its own payload-free control -- differencing a header
@@ -12087,7 +12374,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for result in point_results:
                         result["point"] = label
                     verdict = overall_detection_verdict(point_results)
-                    marker = "  <-- EXECUTED" if verdict == "executed" else ""
+                    marker = (paint("  <-- EXECUTED", EXECUTION_TIER)
+                              if verdict == "executed" else "")
                     print(f"[detect]   {terminal_safe(label)}: {verdict} "
                           f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
@@ -12121,6 +12409,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     config=detection_config,
                     delivery=chain_delivery,
                 )
+            # Before the first line of the report, so nothing lands in the
+            # middle of the line the run was drawing. An exception on the way
+            # here leaves it on screen, which the traceback then writes over --
+            # a cosmetic loss in a case that is already a crash.
+            clear_progress()
+            generator.progress = None
             if args.detect_json:
                 # Written before the text report and regardless of outcome, so a
                 # caller always gets a file to read -- including the
@@ -12145,7 +12439,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # about what the target received.
             print(f"[detect] sent {generator.delivered_probes} probes "
                   f"({len(results)} result(s)): " +
-                  (", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())) or "none"))
+                  (", ".join(paint(f"{v}={c}", v)
+                             for v, c in sorted(by_verdict.items())) or "none"))
             if generator.profile_dropped_probes:
                 # A ladder that shrinks quietly is the one way this filter could
                 # manufacture a false negative, so the removal is stated with its
@@ -12267,7 +12562,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return 1
             executed = [r for r in results if r["verdict"] == "executed"]
             if executed:
-                print(f"\n[detect] EXECUTED ({len(executed)}):")
+                print("\n[detect] " + paint(f"EXECUTED ({len(executed)}):",
+                                              EXECUTION_TIER))
                 for result in executed:
                     shown = display_result(result)
                     at = f" at {shown['point']}" if shown.get("point") else ""
@@ -12286,7 +12582,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 rows = [r for r in results if r["verdict"] == verdict_name]
                 if not rows:
                     continue
-                print(f"\n[detect] {len(rows)} {heading} — NOT proof of execution:")
+                print("\n[detect] " + paint(
+                    f"{len(rows)} {heading} — NOT proof of execution:", verdict_name))
                 for result in rows:
                     shown = display_result(result)
                     at = f" at {shown['point']}" if shown.get("point") else ""
@@ -12360,7 +12657,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[verify] sent {len(results)} unique payloads: " +
               ", ".join(f"{v}={c}" for v, c in sorted(by_verdict.items())))
         if executed:
-            print(f"\n[verify] EXECUTED ({len(executed)}):")
+            print("\n[verify] " + paint(f"EXECUTED ({len(executed)}):",
+                                             EXECUTION_TIER))
             for result in executed:
                 shown = display_result(result)
                 print(f"  [{shown['category']}/{shown['context']}] {shown['payload']}   ({shown['detail']})")
