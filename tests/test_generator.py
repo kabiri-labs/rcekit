@@ -12,10 +12,12 @@ import ast
 import base64
 import collections
 import inspect
+import io
 import json
 import os
 import random
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -4422,6 +4424,265 @@ class BannerAndStreamsTestCase(unittest.TestCase):
             rcekit.unbuffer_console()
         finally:
             sys.stdout, sys.stderr = stdout, stderr
+
+
+class ColourTestCase(unittest.TestCase):
+    """Hue encodes the tier, and the tier rule decides the palette.
+
+    The interesting assertion in here is the one about green. `negative` means
+    the probes reached the target; it does not mean the target is safe. Green
+    says the second thing, so there is no green in the palette and no entry for
+    `negative` at all -- a reader who sees no colour on a row has been told
+    exactly what the verdict says and nothing more."""
+
+    @staticmethod
+    def _env(**values):
+        """Set/clear the three variables colour detection reads, restorably."""
+        saved = {k: os.environ.get(k) for k in
+                 ("NO_COLOR", "TERM", "FORCE_COLOR")}
+        for key in saved:
+            os.environ.pop(key, None)
+        for key, value in values.items():
+            if value is not None:
+                os.environ[key] = value
+        return saved
+
+    @staticmethod
+    def _restore(saved):
+        for key, value in saved.items():
+            os.environ.pop(key, None)
+            if value is not None:
+                os.environ[key] = value
+
+    class _TTY:
+        def isatty(self):
+            return True
+
+    class _Pipe:
+        def isatty(self):
+            return False
+
+    def test_no_green_anywhere_in_the_palette(self):
+        """Green would read as 'nothing here'. `negative` does not mean that,
+        and `blocked`, `error` and `nothing-tested` mean almost the opposite."""
+        for tier, code in rcekit.TIER_SGR.items():
+            with self.subTest(tier=tier):
+                parameters = code.lstrip("\x1b[").rstrip("m").split(";")
+                self.assertNotIn("32", parameters,
+                                 f"{tier} is green, which reads as safe")
+                self.assertNotIn("92", parameters)
+
+    def test_negative_has_no_colour_of_its_own(self):
+        self.assertNotIn("negative", rcekit.TIER_SGR)
+
+    def test_every_tier_the_engine_reports_is_either_painted_or_plain(self):
+        """The palette may not invent a verdict the engine never emits: a
+        colour for a name nothing reports is a tier somebody will go looking
+        for."""
+        known = set(rcekit.VERDICT_PRIORITY) | {
+            "negative", "inconclusive", "blocked", "error", "nothing-tested"}
+        self.assertEqual(sorted(set(rcekit.TIER_SGR) - known), [])
+
+    def test_a_painted_span_always_resets(self):
+        """A truncated line must not leak its attributes into the next one."""
+        rcekit.enable_colour(True)
+        try:
+            for tier in rcekit.TIER_SGR:
+                with self.subTest(tier=tier):
+                    painted = rcekit.paint("x", tier)
+                    self.assertTrue(painted.endswith(rcekit.SGR_RESET))
+            self.assertTrue(rcekit.bold("x").endswith(rcekit.SGR_RESET))
+        finally:
+            rcekit.enable_colour(False)
+
+    def test_paint_is_a_no_op_when_colour_is_off(self):
+        rcekit.enable_colour(False)
+        self.assertEqual(rcekit.paint("EXECUTED (1):", rcekit.EXECUTION_TIER),
+                         "EXECUTED (1):")
+        self.assertEqual(rcekit.bold("[!] x"), "[!] x")
+
+    def test_the_decision_matrix(self):
+        cases = (
+            ("a terminal, clean environment", self._TTY(), "auto", {}, True),
+            ("a pipe", self._Pipe(), "auto", {}, False),
+            ("NO_COLOR set", self._TTY(), "auto", {"NO_COLOR": "1"}, False),
+            # The convention is presence, not truthiness -- but an empty value
+            # is absence for an environment variable, so this stays coloured.
+            ("NO_COLOR empty", self._TTY(), "auto", {"NO_COLOR": ""}, True),
+            ("TERM=dumb", self._TTY(), "auto", {"TERM": "dumb"}, False),
+            ("FORCE_COLOR on a pipe", self._Pipe(), "auto",
+             {"FORCE_COLOR": "1"}, True),
+            ("--color never", self._TTY(), "never", {}, False),
+            ("--color always on a pipe", self._Pipe(), "always", {}, True),
+            ("never beats NO_COLOR", self._TTY(), "never", {"NO_COLOR": "1"},
+             False),
+            ("always beats NO_COLOR", self._TTY(), "always", {"NO_COLOR": "1"},
+             True),
+        )
+        for label, stream, choice, env, expected in cases:
+            with self.subTest(case=label):
+                saved = self._env(**env)
+                try:
+                    self.assertEqual(rcekit.want_colour(stream, choice),
+                                     expected)
+                finally:
+                    self._restore(saved)
+
+    def test_a_stream_without_isatty_gets_no_colour(self):
+        saved = self._env()
+        try:
+            self.assertFalse(rcekit.want_colour(object(), "auto"))
+        finally:
+            self._restore(saved)
+
+    def test_a_redirected_report_carries_no_escape_sequence(self):
+        """The guarantee for everything that reads these runs out of a pipe,
+        and the reason the two escaping tests above still hold."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-url", "http://127.0.0.1:1/x?cmd=FUZZ",
+                 "--methods", "reflected", "--max-payloads", "1",
+                 "--environments", "unix", "--contexts", "raw"],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr[-400:])
+        self.assertIn("[detect] sent", result.stdout)
+        self.assertNotIn("\x1b", result.stdout)
+        self.assertNotIn("\x1b", result.stderr)
+
+    def test_color_always_paints_the_verdict_and_nothing_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--color", "always",
+                 "--acknowledge-consent",
+                 "--verify-url", "http://127.0.0.1:1/x?cmd=FUZZ",
+                 "--methods", "reflected", "--max-payloads", "1",
+                 "--environments", "unix", "--contexts", "raw"],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stderr[-400:])
+        # The run errored, so the counts line carries a painted `error=1`.
+        self.assertIn(rcekit.TIER_SGR["error"] + "error=1" + rcekit.SGR_RESET,
+                      result.stdout)
+        # The configuration echo is not a verdict and stays plain.
+        for line in result.stdout.splitlines():
+            if line.startswith("[detect] sink shell:"):
+                self.assertNotIn("\x1b", line)
+
+    def test_no_escape_sequence_reaches_detect_json(self):
+        """`--detect-json` is a published schema and a file. Colour is a
+        terminal concern and must not be able to reach it, even forced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "findings.json"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--color", "always",
+                 "--progress", "plain", "--acknowledge-consent",
+                 "--verify-url", "http://127.0.0.1:1/x?cmd=FUZZ",
+                 "--methods", "reflected", "--max-payloads", "1",
+                 "--environments", "unix", "--contexts", "raw",
+                 "--detect-json", str(path)],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stderr[-400:])
+            raw = path.read_bytes()
+        self.assertNotIn(b"\x1b", raw)
+        self.assertNotIn(b"[0m", raw)
+        json.loads(raw.decode("utf-8"))
+
+
+class ProgressTestCase(unittest.TestCase):
+    """The minutes between the plan and the report, which were silent.
+
+    Everything here is about where the line may and may not appear. It is
+    stderr-only and terminal-only by default, because a carriage return in a
+    captured log is not progress -- it is damage to a file somebody is going to
+    read later."""
+
+    class _TTY(io.StringIO):
+        def isatty(self):
+            return True
+
+    def tearDown(self):
+        rcekit.start_progress("none")
+
+    def test_auto_draws_on_a_terminal(self):
+        stream = self._TTY()
+        progress = rcekit.start_progress("auto", total=100, stream=stream)
+        self.assertIsNotNone(progress)
+        progress.tick("reflected", "unix/raw", 7)
+        written = stream.getvalue()
+        self.assertTrue(written.startswith("\r"))
+        self.assertIn("reflected", written)
+        self.assertIn("unix/raw", written)
+        self.assertIn("7/~100 probes", written)
+
+    def test_auto_is_silent_when_stderr_is_not_a_terminal(self):
+        self.assertIsNone(rcekit.start_progress("auto", stream=io.StringIO()))
+
+    def test_none_is_silent_even_on_a_terminal(self):
+        self.assertIsNone(rcekit.start_progress("none", stream=self._TTY()))
+
+    def test_plain_writes_whole_lines_and_works_on_a_pipe(self):
+        stream = io.StringIO()
+        progress = rcekit.start_progress("plain", total=None, stream=stream)
+        self.assertIsNotNone(progress)
+        for sent in range(1, rcekit.Progress.PLAIN_EVERY + 1):
+            progress.tick("eval", "php/raw", sent)
+        written = stream.getvalue()
+        self.assertNotIn("\r", written)
+        self.assertTrue(written.endswith("\n"))
+        self.assertEqual(len(written.strip().splitlines()), 1,
+                         "one line per PLAIN_EVERY probes, not one per probe")
+
+    def test_redraws_are_rate_limited(self):
+        stream = self._TTY()
+        progress = rcekit.start_progress("auto", stream=stream)
+        progress.tick("reflected", "unix/raw", 1)
+        after_first = len(stream.getvalue())
+        progress.tick("reflected", "unix/raw", 2)
+        self.assertEqual(len(stream.getvalue()), after_first,
+                         "a second draw inside the window should be dropped")
+        time.sleep(rcekit.Progress.MIN_REDRAW_S + 0.05)
+        progress.tick("reflected", "unix/raw", 3)
+        self.assertGreater(len(stream.getvalue()), after_first)
+
+    def test_clear_blanks_the_line_and_returns_to_column_zero(self):
+        stream = self._TTY()
+        progress = rcekit.start_progress("auto", stream=stream)
+        progress.tick("reflected", "unix/raw", 1)
+        progress.clear()
+        written = stream.getvalue()
+        self.assertTrue(written.endswith("\r"))
+        self.assertIn("    ", written, "the line is blanked, not just rewound")
+
+    def test_clear_progress_is_safe_with_no_run_in_flight(self):
+        """The OOB listener calls it from its own thread and has no way to
+        know whether a progress line exists."""
+        rcekit.start_progress("none")
+        rcekit.clear_progress()
+
+    def test_a_hit_line_clears_the_progress_line_first(self):
+        """`[HIT]` is evidence. It must not be printed into the middle of a
+        line the main thread was drawing."""
+        import contextlib
+
+        stream = self._TTY()
+        progress = rcekit.start_progress("auto", stream=stream)
+        progress.tick("oob", "unix/raw", 4)
+        self.assertTrue(stream.getvalue())
+        listener = rcekit.OOBListener()
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            listener.record("http", "10.0.0.5", "host.oob.test", "/cb")
+        self.assertIn("[HIT]", buffer.getvalue())
+        self.assertTrue(stream.getvalue().endswith("\r"),
+                        "the progress line should have been erased")
+
+    def test_the_line_is_clamped_so_it_can_be_erased(self):
+        """A line that wraps cannot be erased by one carriage return."""
+        stream = self._TTY()
+        progress = rcekit.start_progress("auto", total=10 ** 9, stream=stream)
+        progress.tick("a-very-long-method-name" * 8, "env/context" * 8, 1)
+        drawn = stream.getvalue().lstrip("\r").rstrip()
+        self.assertLessEqual(len(drawn), max(20, shutil.get_terminal_size().columns))
 
 
 class DestructiveHoldBackTestCase(unittest.TestCase):

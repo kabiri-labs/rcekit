@@ -413,6 +413,59 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.14.0] — 2026-11-07
+
+### Added
+
+- **A progress line, for the minutes a run used to spend in silence.** One
+  self-erasing line on stderr with the elapsed time, the method, the carrier and
+  the probe count against the pre-flight's own estimate:
+
+  ```
+  [detect]  04:12  reflected  unix/raw  412/~2883 probes
+  ```
+
+  A detection run against a single parameter sends hundreds to thousands of
+  requests and printed nothing while it did -- measured at 13m12s for three
+  methods against a local target, silent from the configuration block to the
+  findings. The documented runs in this repository are 1154 and 2883 probes.
+
+  `--progress auto` draws it only where stderr is a terminal, so a captured
+  stderr gets no carriage returns; `plain` writes an ordinary line every 25
+  probes for a CI log; `none` turns it off, as does `--quiet`. Redraws are
+  rate-limited and the line is clamped to the terminal's width, because a line
+  that wraps cannot be erased by one carriage return.
+
+  The OOB listener erases it before printing a `[HIT]`, from its own thread: a
+  hit is evidence and must not land in the middle of a line the main thread is
+  drawing.
+
+- **Colour, and the palette is a statement about the tier rule.** Hue encodes
+  the tier and nothing else; weight carries how much a non-finding line matters,
+  so `[!]` is bold and has no colour of its own. `executed` is bold red, the
+  proven-but-not-execution tiers share yellow, and the run-level failures
+  (`error`, `blocked`, `nothing-tested`, `inconclusive`) take bold yellow so a
+  run that tested nothing cannot look like the `negative` it is not.
+
+  **`negative` is uncoloured and there is no green in the palette at all.**
+  Green reads as "nothing here", and `negative` does not mean that -- it means
+  the probes reached the target. A test asserts the absence of green, because it
+  is a property of the tier rule and not of the styling.
+
+  On when stdout is a terminal with `NO_COLOR` unset and `TERM` not `dumb`;
+  `--color never` / `always` override, `FORCE_COLOR` forces. A redirected report
+  carries no escape sequences without anyone passing a flag, and colour can
+  never reach `--detect-json` or the `-o` exports under any setting -- a test
+  runs with `--color always` and asserts the JSON is free of them.
+
+  Colour is applied only to labels RCEKit generated: a section heading, a
+  verdict name, a marker. Never to a payload, a detail or a point label, all of
+  which 3.12.2 escapes precisely because the target chooses them -- wrapping
+  attacker-chosen bytes in an escape sequence would hand back the control codes
+  that escaping took away.
+
+  No verdict, tier or output schema changed.
+
 ## [3.13.0] — 2026-11-07
 
 ### Added
@@ -4193,6 +4246,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.14.0]: https://github.com/kabiri-labs/rcekit/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/kabiri-labs/rcekit/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/kabiri-labs/rcekit/compare/v3.12.1...v3.12.2
 [3.12.1]: https://github.com/kabiri-labs/rcekit/compare/v3.12.0...v3.12.1
