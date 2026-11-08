@@ -1379,7 +1379,8 @@ class SampleTranscriptTestCase(unittest.TestCase):
 
     FENCE = re.compile(r"```.*?```", re.DOTALL)
     # A report line, and only from inside a fenced block.
-    REPORT_LINE = re.compile(r"^\[(?:detect|verify|verify-chain)\]\s+(.*)$", re.M)
+    REPORT_LINE = re.compile(
+        r"^\[(?:config|detect|verify|verify-chain)\]\s+(.*)$", re.M)
     # `verdict=n` pairs from a run summary.
     COUNT = re.compile(r"(?<![\w-])([a-z][a-z-]{2,})=[0-9]+")
 

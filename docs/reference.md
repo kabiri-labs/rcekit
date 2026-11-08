@@ -1277,8 +1277,8 @@ profile with `sink_needs_separator` drops `raw` too. The plan is printed
 before anything is sent:
 
 ```
-[detect] sink shapes: auto (full ladder)
-[detect]   sep       '; ' -- mid-command concatenation
+[config] sink shapes: auto (full ladder)
+[config]   sep       '; ' -- mid-command concatenation
 [detect]   raw       input is the whole command (no separator)
 ...
 ```
@@ -1290,8 +1290,8 @@ rungs ride. The plan says so before the traffic rather than leaving it to be
 read off a zero-probe run:
 
 ```
-[detect] sink shapes: none
-[detect]   (no rung survives the narrowing, so none of the shell methods will build a probe -- this run will report NOTHING WAS TESTED)
+[config] sink shapes: none
+[config]   (no rung survives the narrowing, so none of the shell methods will build a probe -- this run will report NOTHING WAS TESTED)
 ```
 
 The run-wide half of that is claimed only where it holds. Four methods ride
@@ -1300,8 +1300,8 @@ that also selected `eval`, `boolean`, `deser`, `lookup` or `write` still has
 probes to send and gets the narrower sentence:
 
 ```
-[detect] sink shapes: none
-[detect]   (no rung survives the narrowing, so none of the shell methods will build a probe; the other selected methods do not ride the ladder and are unaffected)
+[config] sink shapes: none
+[config]   (no rung survives the narrowing, so none of the shell methods will build a probe; the other selected methods do not ride the ladder and are unaffected)
 ```
 
 `eval` does not ride the ladder: its probes are template/expression syntax, not
@@ -1348,9 +1348,8 @@ under `auto`; every other runtime keeps the POSIX shape, since a language does
 not say which OS it runs on.
 
 ```
-[detect] run configuration:
-[detect] sink shell: auto (per carrier)
-[detect] sink shapes: auto (full ladder)
+[config] sink shell: auto (per carrier)
+[config] sink shapes: auto (full ladder)
 ```
 
 ### Machine-readable results
@@ -1527,9 +1526,26 @@ that, because a run with no report is a run with no purpose.
 
 Colour is on when stdout is a terminal, `NO_COLOR` is unset and `TERM` is not
 `dumb`; `--color never` and `--color always` override all of that, and
-`FORCE_COLOR` forces it on a pipe. A redirected report therefore carries no
+`FORCE_COLOR` forces it on a pipe.
+
+**On Windows** a console also has to be told to interpret escape sequences, so
+RCEKit turns `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on for its own stdout before
+writing any. Where that fails — an old console host, a stdout that is not a
+console — colour stays off rather than printing `<-[1;33m` in front of every
+verdict. Windows Terminal and current `conhost` already have the bit set, so
+there is usually nothing to change. No dependency is involved: the call goes
+through `ctypes`, which is in the standard library. A redirected report therefore carries no
 escape sequences without you asking for that, and `--detect-json` never does
 under any setting — it is a file and a published schema.
+
+Every run ends with its own verdict on the last line, coloured by tier:
+
+```
+[detect] VERDICT: negative -- the probes reached the target and found nothing
+```
+
+The run's settings are tagged `[config]` rather than `[detect]`, so the echo of
+what you asked for does not scan as what was found. `[!]` notices are bold.
 
 **Hue encodes the tier and nothing else.** One axis, one meaning:
 
@@ -1538,13 +1554,16 @@ under any setting — it is a file and a published schema.
 | bold red | `executed` — the one tier that is execution |
 | yellow | `timing-sink`, `file-write`, `file-read`, `evaluation-sink`, `deserialization-sink`, `lookup-sink`, `needs-review` — real, and not RCE |
 | bold yellow | `error`, `blocked`, `nothing-tested`, `inconclusive` — a run that did not test what you asked |
-| plain | `negative` |
+| cyan | `negative` |
 | bold, no colour | `[!]` operator notices |
 
-`negative` is deliberately uncoloured and **there is no green anywhere**. Green
-reads as "nothing here", and `negative` does not mean that: it means the probes
-reached the target. A test asserts the palette contains no green, because that
-is a property of the tier rule rather than of the styling.
+**There is no green anywhere**, which is the rule that matters. Green reads as
+"nothing here", and `negative` does not mean that: it means the probes reached
+the target. A test asserts the palette contains no green, because that is a
+property of the tier rule rather than of the styling. `negative` takes a neutral
+cyan instead of nothing at all — leaving it plain made the commonest outcome
+render entirely grey, with its own summary indistinguishable from the
+configuration above it.
 
 stdout is **line-buffered even when it is redirected**, so a long run shows its
 plan and its findings as they happen rather than all at once when the process

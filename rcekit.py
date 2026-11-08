@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.14.0"
+__version__ = "3.15.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -558,7 +558,7 @@ def sink_shape_plan(shapes: Optional[Tuple[str, ...]]) -> List[str]:
         "subshell": "'$(...)' and backticks -- substitution inside a quoted string",
         "env": "'() { :;}; ...' -- value read from the environment, not a command",
     }
-    return [f"[detect]   {rung:<9} {described[rung]}"
+    return [f"[config]   {rung:<9} {described[rung]}"
             for rung in SINK_SHAPE_RUNGS if rung in selected]
 
 
@@ -2987,7 +2987,7 @@ class RCEKit:
             return
         applied = getattr(self, "_insecure_applied", None) or ["no certificate or hostname check"]
         self._insecure_said = True
-        print("[!] --insecure: TLS is unverified AND downgraded for this run ("
+        warn("[!] --insecure: TLS is unverified AND downgraded for this run ("
               + ", ".join(applied) + ") so that legacy targets complete a handshake. "
               "The connection carries no authenticity guarantee.")
 
@@ -4649,6 +4649,14 @@ TIER_SGR = {
     "deserialization-sink": "\033[33m",
     "lookup-sink": "\033[33m",
     "needs-review": "\033[33m",
+    # Cyan, and the reasoning is narrower than it first looks. The rule that
+    # matters is that nothing is green: green reads as "nothing here", and
+    # `negative` means the probes reached the target, which is a statement
+    # about the run. Having no colour at all was a different mistake -- it
+    # left the most-read line of the commonest outcome indistinguishable from
+    # the configuration echo above it, so a clean run rendered entirely grey
+    # and the operator had to hunt for its own result.
+    "negative": "\033[36m",
     "error": "\033[1;33m",
     "blocked": "\033[1;33m",
     "nothing-tested": "\033[1;33m",
@@ -4689,6 +4697,55 @@ def want_colour(stream: Any, choice: str = "auto") -> bool:
         return False
 
 
+def enable_ansi() -> bool:
+    """Make a Windows console interpret escape sequences, and say whether it
+    will.
+
+    Everywhere else this is ``True`` and does nothing: a POSIX terminal reads
+    ANSI without being asked. Windows does not. A console with
+    ``ENABLE_VIRTUAL_TERMINAL_PROCESSING`` unset prints the bytes instead of
+    acting on them, so the operator gets ``<-[1;33m`` in front of every
+    verdict -- which is worse than the plain output it replaced, and was the
+    state 3.14.0 would have shipped into on an older console host.
+
+    Done with ``ctypes``, which is in the standard library, because the usual
+    answer to this is ``colorama`` and a dependency is the one thing this
+    project does not spend. The call is also the reason colour is decided from
+    a single place: it changes console state, so it happens once, only when
+    colour is actually wanted, and never for a redirected stdout --
+    ``GetConsoleMode`` fails on a pipe, which is the same answer as "do not
+    colour this".
+
+    The mode is widened and never narrowed: the bit is added to whatever the
+    console already had. Windows Terminal and current conhost set it
+    themselves, so on an up-to-date system this finds it already on and
+    changes nothing."""
+    if not sys.platform.startswith("win"):
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        if handle in (0, -1, None):
+            return False
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            # Not a console: redirected to a file or a pipe. Nothing there
+            # interprets ANSI, and nothing should be written to it.
+            return False
+        virtual_terminal = 0x0004
+        if mode.value & virtual_terminal:
+            return True
+        return bool(kernel32.SetConsoleMode(
+            handle, mode.value | virtual_terminal))
+    except Exception:
+        # No kernel32, a stubbed ctypes, a sandbox that refuses the call. The
+        # safe answer is the one that cannot produce garbage.
+        return False
+
+
 def enable_colour(on: bool) -> None:
     """Set once from :func:`main`, read by :func:`paint`.
 
@@ -4719,6 +4776,17 @@ def bold(text: str) -> str:
     """Weight, not hue. ``[!]`` is important and is not a tier, and giving it a
     colour would put a fourth meaning on the axis that carries the tiers."""
     return "%s%s%s" % (SGR_BOLD, text, SGR_RESET) if _COLOUR else text
+
+
+def warn(text: str) -> None:
+    """Print an operator notice in bold.
+
+    Every ``[!]`` line goes through here rather than through ``print``, which
+    is the whole of the fix: 3.14.0 shipped :func:`bold`, documented ``[!]`` as
+    bold in its changelog, and never called it from anywhere. The function was
+    tested and its use was not, so the claim and the code disagreed for a
+    release and no test noticed."""
+    print(bold(text))
 
 
 class Progress:
@@ -8882,6 +8950,29 @@ VERDICT_PRIORITY = (EXECUTION_TIER,) + tuple(
     verdict for verdict, _heading, _closing, _compact in NON_EXECUTION_SECTIONS)
 
 
+
+
+# One clause per verdict for the line that closes a run. Deliberately the same
+# claim the README's verdict table makes, in fewer words: a reader who has only
+# ever seen this line should not learn something different from one who read
+# the table.
+VERDICT_MEANING = {
+    "executed": "the target executed the input",
+    "timing-sink": "the target honoured an injected delay; what waited is not shown",
+    "file-write": "a file was written and served back uninterpreted; not execution",
+    "file-read": "the target returned a path RCEKit named; not execution",
+    "evaluation-sink": "an evaluator consumed the input; which one is not shown",
+    "deserialization-sink": "the endpoint reconstructs attacker-supplied objects",
+    "lookup-sink": "the sink resolved a URI RCEKit chose; not execution",
+    "needs-review": "a real signal that is not proof on its own; review it by hand",
+    "negative": "the probes reached the target and found nothing",
+    "inconclusive": "nothing here can be attributed to execution",
+    "blocked": "a filter refused the probes, so the sink never saw one",
+    "error": "nothing reached the target, so nothing was tested",
+    "nothing-tested": "no probes were built, so nothing was tested",
+}
+
+
 def write_detection_json(path: str, results: List[Dict[str, Any]], target: str,
                          methods: List[str]) -> None:
     """Write a detection run to ``path`` as JSON.
@@ -11366,7 +11457,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     # Decided once, from stdout: the report is what carries the tiers, so a
     # redirected report is uncoloured even when stderr is still a terminal.
-    enable_colour(want_colour(sys.stdout, args.color))
+    # Two questions, not one: whether colour is wanted, and whether the
+    # terminal will render it. `--color always` is the operator overriding
+    # both -- they may be piping into something that reads ANSI itself.
+    coloured = want_colour(sys.stdout, args.color)
+    if coloured:
+        # Always *try* to turn the console on, even under `--color always`:
+        # forcing colour onto a console that could have rendered it and was
+        # never asked is how an override turns into a screenful of `<-[1;33m`.
+        # `always` declines to be refused by the answer, not to ask.
+        rendered = enable_ansi()
+        if args.color != "always":
+            coloured = rendered
+    enable_colour(coloured)
     if not args.quiet:
         # After parsing, so --version and --help print their own output and
         # exit without a banner in front of it.
@@ -11379,7 +11482,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             listener = OOBListener(tokens=tokens, answer_ip=args.listen_answer_ip,
                                    log_path=args.listen_log)
         except ValueError as exc:
-            print(f"[!] {exc}")
+            warn(f"[!] {exc}")
             return 1
         listener.start_http(args.listen_http_port)
         dns_ok = listener.start_dns(args.listen_dns_port)
@@ -11408,7 +11511,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             with open(args.target_profile, "r", encoding="utf-8") as profile_file:
                 profile = validate_target_profile(json.load(profile_file))
         except Exception as exc:
-            print(f"[!] Unable to load target profile {args.target_profile}: {exc}")
+            warn(f"[!] Unable to load target profile {args.target_profile}: {exc}")
             return 1
         logger.info("Loaded target profile '%s' from %s", profile.get("name", "?"), args.target_profile)
 
@@ -11440,7 +11543,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             from_profile(args.include_wrappers, "include_wrappers"))
         deser_formats = _parse_name_list(from_profile(args.deser_formats, "deser_formats"))
     except ValueError as exc:
-        print(f"[!] {exc}")
+        warn(f"[!] {exc}")
         return 1
     # The observed endpoint, from either form. Resolved once, here, so the run
     # and the pre-flight plan describe the same request.
@@ -11448,7 +11551,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     observe_method, observe_data, observe_headers = "GET", None, None
     if args.observe_request:
         if observe_url:
-            print("[!] --observe-url and --observe-request name the same endpoint two ways; "
+            warn("[!] --observe-url and --observe-request name the same endpoint two ways; "
                   "pass one.")
             return 1
         try:
@@ -11457,14 +11560,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             observe_url, observe_method, observe_data, observe_headers = build_plain_request(
                 observe_raw, args.request_scheme)
         except (OSError, ValueError) as exc:
-            print(f"[!] Unable to use --observe-request {args.observe_request}: {exc}")
+            warn(f"[!] Unable to use --observe-request {args.observe_request}: {exc}")
             return 1
     # The trigger, from either form, resolved beside the endpoint it acts on.
     observe_trigger_url = args.observe_trigger
     observe_trigger_method, observe_trigger_data, observe_trigger_headers = "GET", None, None
     if args.observe_trigger_request:
         if observe_trigger_url:
-            print("[!] --observe-trigger and --observe-trigger-request name the same request "
+            warn("[!] --observe-trigger and --observe-trigger-request name the same request "
                   "two ways; pass one.")
             return 1
         try:
@@ -11473,14 +11576,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             (observe_trigger_url, observe_trigger_method, observe_trigger_data,
              observe_trigger_headers) = build_plain_request(trigger_raw, args.request_scheme)
         except (OSError, ValueError) as exc:
-            print(f"[!] Unable to use --observe-trigger-request "
+            warn(f"[!] Unable to use --observe-trigger-request "
                   f"{args.observe_trigger_request}: {exc}")
             return 1
     if observe_trigger_url and not observe_url:
         # A trigger with nothing to read afterwards would fire a request at the
         # target and measure nothing, which is the shape of a run that tests
         # nothing while looking busy.
-        print("[!] --observe-trigger needs --observe-url (or --observe-request): the trigger "
+        warn("[!] --observe-trigger needs --observe-url (or --observe-request): the trigger "
               "causes the execution and the observed endpoint is where it is read. Without "
               "one, the request would be sent and nothing would be measured.")
         return 1
@@ -11544,13 +11647,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     # zero payloads (e.g. the corpus file was quarantined by EDR after clone).
     corpus_ok, corpus_reason = generator.corpus_ready(mode)
     if not corpus_ok:
-        print(f"[!] Payload corpus is not usable: {corpus_reason}")
-        print("[!] Refusing to run with an incomplete corpus. Run "
+        warn(f"[!] Payload corpus is not usable: {corpus_reason}")
+        warn("[!] Refusing to run with an incomplete corpus. Run "
               "'python rcekit.py --doctor' to diagnose, or pass --template-file with a valid corpus.")
         return 1
 
     if mode == "exploit" and not args.acknowledge_consent:
-        print("[!] Exploitation mode requires explicit consent. Re-run with --acknowledge-consent after confirming authorization.")
+        warn("[!] Exploitation mode requires explicit consent. Re-run with --acknowledge-consent after confirming authorization.")
         return 1
 
     watermark_token = None
@@ -11582,7 +11685,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # set of tiers rather than a second copy of each.
     if args.verify_chain and not args.methods:
         if not args.acknowledge_consent:
-            print("[!] --verify-chain actively sends payloads to the target. Re-run with "
+            warn("[!] --verify-chain actively sends payloads to the target. Re-run with "
                   "--acknowledge-consent to confirm you are authorised to test it.")
             return 1
         with open(args.verify_chain, "r", encoding="utf-8") as chain_file:
@@ -11668,7 +11771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.verify_url or args.request_file or args.verify_chain:
         if not args.acknowledge_consent:
-            print("[!] Verification actively sends payloads to the target. Re-run with "
+            warn("[!] Verification actively sends payloads to the target. Re-run with "
                   "--acknowledge-consent to confirm you are authorised to test it.")
             return 1
         # Source the request from a raw capture (-r) or the --verify-* flags.
@@ -11688,7 +11791,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 with open(args.request_file, "r", encoding="utf-8") as request_fh:
                     raw_request = request_fh.read()
             except OSError as exc:
-                print(f"[!] Unable to read --request-file {args.request_file}: {exc}")
+                warn(f"[!] Unable to read --request-file {args.request_file}: {exc}")
                 return 1
             params = args.param or []
             auto_kinds = args.auto_params
@@ -11696,30 +11799,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                 auto_kinds = "all"
                 params = [p for p in params if p.lower() != "all"]
             if args.verify_chain:
-                print("[!] -r and --verify-chain are two ways to describe the same request, so "
+                warn("[!] -r and --verify-chain are two ways to describe the same request, so "
                       "only one can be the target. A chain profile carries its own steps, "
                       "paths and bodies.")
                 return 1
             if auto_kinds and not args.methods:
-                print("[!] Enumerating injection points needs --methods: the classic per-payload "
+                warn("[!] Enumerating injection points needs --methods: the classic per-payload "
                       "oracle fires a whole corpus per point, which is not a budget anyone wants "
                       "multiplied by every candidate in the capture.")
                 return 1
             if not auto_kinds and len(params) > 1:
-                print("[!] -r takes a single -p, or '-p all' / --auto-params to enumerate.")
+                warn("[!] -r takes a single -p, or '-p all' / --auto-params to enumerate.")
                 return 1
             if auto_kinds:
                 kinds = (None if auto_kinds.strip() == "all"
                          else tuple(k.strip() for k in auto_kinds.split(",") if k.strip()))
                 unknown = [k for k in (kinds or ()) if k not in INJECTION_POINT_KINDS]
                 if unknown:
-                    print(f"[!] Unknown --auto-params kind(s): {', '.join(unknown)}. "
+                    warn(f"[!] Unknown --auto-params kind(s): {', '.join(unknown)}. "
                           f"Choose from {', '.join(INJECTION_POINT_KINDS)}, or 'all'.")
                     return 1
                 try:
                     parsed_request = parse_raw_request(raw_request)
                 except ValueError as exc:
-                    print(f"[!] Could not parse {args.request_file}: {exc}")
+                    warn(f"[!] Could not parse {args.request_file}: {exc}")
                     return 1
                 points = enumerate_injection_points(
                     parsed_request, kinds=kinds,
@@ -11735,7 +11838,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                           "part of it breaks the digest, so no XML point was enumerated. Capture "
                           "the request before it is signed, or name a point outside the body.")
                 if not points:
-                    print("[!] No injection points found in the capture — nothing was tested. "
+                    warn("[!] No injection points found in the capture — nothing was tested. "
                           "Widen --auto-params, or add --include-path-segments.")
                     return 1
                 dropped = max(0, len(points) - args.max_points)
@@ -11760,7 +11863,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         continue
                     injection_runs.append((point, ) + built)
                 if not injection_runs:
-                    print("[!] Every enumerated point failed to build a request — nothing was tested.")
+                    warn("[!] Every enumerated point failed to build a request — nothing was tested.")
                     return 1
                 verify_url, method, verify_data, verify_headers, injection = injection_runs[0][1:]
                 print(f"[verify] loaded request from {args.request_file}: enumerating "
@@ -11773,7 +11876,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         raw_request, param=(params[0] if params else None),
                         scheme=args.request_scheme)
                 except ValueError as exc:
-                    print(f"[!] Could not build a request from {args.request_file}: {exc}")
+                    warn(f"[!] Could not build a request from {args.request_file}: {exc}")
                     return 1
             method = args.verify_method or method
             if injection_runs:
@@ -11794,7 +11897,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                            (h.partition(":")[0].strip() for h in verify_headers)
                            if name.lower() in RCEKit.SENSITIVE_HEADERS]
                 if resolved_scheme == "http" and exposed:
-                    print(f"[!] This request carries {', '.join(sorted(set(exposed)))} and will be "
+                    warn(f"[!] This request carries {', '.join(sorted(set(exposed)))} and will be "
                           "replayed over plain HTTP. If the target is HTTPS, pass --request-scheme "
                           "https (with --insecure for a self-signed or mismatched certificate).")
         elif args.verify_chain:
@@ -11803,7 +11906,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # whichever step the profile put it in. `chain_delivery` is what
             # makes the engine below drive those steps instead of one request.
             if args.verify_url:
-                print("[!] --verify-url and --verify-chain are two ways to name the target, "
+                warn("[!] --verify-url and --verify-chain are two ways to name the target, "
                       "so only one can be used. A chain profile's 'base' and steps say where "
                       "the requests go.")
                 return 1
@@ -11811,16 +11914,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 with open(args.verify_chain, "r", encoding="utf-8") as chain_file:
                     chain = json.load(chain_file)
             except (OSError, ValueError) as exc:
-                print(f"[!] Could not read --verify-chain {args.verify_chain}: {exc}")
+                warn(f"[!] Could not read --verify-chain {args.verify_chain}: {exc}")
                 return 1
             steps = chain.get("steps") or []
             if not steps:
-                print("[!] The chain profile declares no steps, so nothing would be sent.")
+                warn("[!] The chain profile declares no steps, so nothing would be sent.")
                 return 1
             marked = [index for index, step in enumerate(steps)
                       if "FUZZ" in json.dumps(step)]
             if not marked:
-                print("[!] No FUZZ marker found in any chain step; add FUZZ where the "
+                warn("[!] No FUZZ marker found in any chain step; add FUZZ where the "
                       "payload should be injected — a step's body, json, form, a header, "
                       "or an uploaded file's content or filename.")
                 return 1
@@ -11835,7 +11938,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             verify_headers = args.verify_header
             if "FUZZ" not in verify_url and not (verify_data and "FUZZ" in verify_data) \
                     and not any("FUZZ" in h for h in (verify_headers or [])):
-                print("[!] No FUZZ marker found in --verify-url/--verify-data/--verify-header; "
+                warn("[!] No FUZZ marker found in --verify-url/--verify-data/--verify-header; "
                       "add FUZZ where the payload should be injected.")
                 return 1
             method = args.verify_method or ("POST" if verify_data else "GET")
@@ -11885,7 +11988,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             method_names = [m.strip() for m in args.methods.split(",") if m.strip()]
             unknown = [m for m in method_names if m not in DETECTION_METHODS]
             if unknown:
-                print(f"[!] Unknown --methods: {', '.join(unknown)}. "
+                warn(f"[!] Unknown --methods: {', '.join(unknown)}. "
                       f"Available: {', '.join(sorted(DETECTION_METHODS))}.")
                 return 1
             if chain_delivery is not None:
@@ -11909,7 +12012,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # settle on a fixture.
                 through_chain = sorted(set(method_names) & CHAIN_UNSUPPORTED_METHODS)
                 if through_chain:
-                    print(f"[!] --methods {', '.join(through_chain)} cannot run through a "
+                    warn(f"[!] --methods {', '.join(through_chain)} cannot run through a "
                           "chain: both read the shape of a response *series*, and a chain's "
                           "setup steps and per-probe session change that series rather than "
                           "the sink. Drop them, or measure them with --verify-url / -r "
@@ -11970,7 +12073,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(line)
             callback_methods = [m.name for m in selected_methods if m.needs_oob_host]
             if callback_methods and not args.oob_host:
-                print("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
+                warn("[!] --methods " + "/".join(callback_methods) + " makes the TARGET call back to a "
                       "listener, so it needs "
                       "--oob-host: an address the target can reach that arrives here (a domain "
                       "delegated to this host, or an IP on a routable interface — an IP serves oob "
@@ -11995,7 +12098,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     continue
                 if SAFETY_ORDER.get(cls.safety, 1) <= allowed_rung:
                     continue
-                print(f"[!] --methods {cls.name} is a {cls.safety} technique, held back at the "
+                warn(f"[!] --methods {cls.name} is a {cls.safety} technique, held back at the "
                       f"{verify_max_safety} tier — the same tier that holds back the corpus "
                       f"payloads of that kind. Pass --verify-active-risk {cls.safety} to allow "
                       "it.")
@@ -12010,7 +12113,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     try:
                         listener.start_http(args.listen_http_port)
                     except OSError as exc:
-                        print(f"[!] OOB listener could not bind HTTP port "
+                        warn(f"[!] OOB listener could not bind HTTP port "
                               f"{args.listen_http_port}: {exc}")
                         return 1
                 else:
@@ -12029,7 +12132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # found nothing", about a channel that was never open. That
                     # is the misreport this tool exists to prevent, so the run
                     # stops instead.
-                    print(f"[!] --methods lookup confirms only through DNS, and the listener could "
+                    warn(f"[!] --methods lookup confirms only through DNS, and the listener could "
                           f"not take DNS port {args.listen_dns_port}. Every probe would be sent and "
                           "every callback lost, which would be reported as `negative` on a target "
                           "that may well be vulnerable. Free the port, or pass --listen-dns-port "
@@ -12041,7 +12144,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # so a listener on any other port hears nothing unless the
                     # operator has delegated the domain to something that
                     # forwards here. Say so rather than let the run look clean.
-                    print(f"[!] --methods lookup: the DNS listener is on :{args.listen_dns_port}, but a "
+                    warn(f"[!] --methods lookup: the DNS listener is on :{args.listen_dns_port}, but a "
                           "JNDI lookup resolves through the system resolver, which asks :53. Unless "
                           f"{args.oob_host} is delegated to something that forwards here, no callback "
                           "can arrive and a `negative` would mean nothing. Use --listen-dns-port 53 "
@@ -12056,7 +12159,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             if "file" in method_names:
                 file_channel = FileBased(generator, detection_config)._channel()
                 if file_channel is None:
-                    print("[!] --methods file writes a file to the target and fetches it back, so it "
+                    warn("[!] --methods file writes a file to the target and fetches it back, so it "
                           "needs both halves: --file-write-path DIR and --file-read-url URL "
                           "(or the web-root alias --webroot DIR --web-base-url URL).")
                     return 1
@@ -12072,14 +12175,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                              (h.partition(":")[0].strip() for h in (verify_headers or []))
                              if name.lower() in RCEKit.SENSITIVE_HEADERS]
                 if sensitive and not RCEKit.same_origin(verify_url, file_channel[1]):
-                    print(f"[!] The read-back URL is a different origin from the target, so "
+                    warn(f"[!] The read-back URL is a different origin from the target, so "
                           f"{', '.join(sorted(set(sensitive)))} will NOT be sent with it — "
                           "replaying a credential to another host would leak it. If that read-back "
                           "endpoint needs authentication, point it at the target's own origin.")
             if WriteThenExecute.name in method_names:
                 writer = WriteThenExecute(generator, detection_config)
                 if writer._channel() is None:
-                    print("[!] --methods write stores a file on the target through your own "
+                    warn("[!] --methods write stores a file on the target through your own "
                           "request and then fetches it back, so it needs --write-url-template "
                           "URL: the address that file is served at. RCEKit does not choose the "
                           "filename -- your request does -- so point it at exactly that file.")
@@ -12096,7 +12199,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # count; multiplying a *write* by it is a different kind of
                     # cost, and one the operator should have said yes to rather
                     # than discovered in the target's upload directory.
-                    print(f"[!] --methods write is combined with injection-point enumeration, so "
+                    warn(f"[!] --methods write is combined with injection-point enumeration, so "
                           f"the write is attempted at each of {len(injection_runs)} candidate "
                           "point(s). Narrow with -p/--max-points if that is more target state "
                           "than you intend to change.")
@@ -12105,7 +12208,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 chosen_deser = list(deser_formats or declared_deser)
                 unknown = [name for name in chosen_deser if name not in declared_deser]
                 if unknown:
-                    print(f"[!] Unknown --deser-formats: {', '.join(unknown)}. "
+                    warn(f"[!] Unknown --deser-formats: {', '.join(unknown)}. "
                           f"Available: auto, {', '.join(sorted(declared_deser))}.")
                     return 1
                 print(f"[detect] deserialization sink probes: {', '.join(chosen_deser)}. "
@@ -12114,7 +12217,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "depends on classpath gadgets RCEKit cannot see.")
                 with_dns = [n for n in chosen_deser if declared_deser[n].get("dns")]
                 if with_dns and not args.oob_host:
-                    print(f"[!] {', '.join(with_dns)} also has a non-executing DNS gadget, which "
+                    warn(f"[!] {', '.join(with_dns)} also has a non-executing DNS gadget, which "
                           "needs --oob-host and a listener. Without it only the error-shape "
                           "oracle runs, and that reaches needs-review at best -- a parser "
                           "fingerprint, not a proven sink.")
@@ -12125,7 +12228,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     unknown = [name for name in bridges if name not in declared]
                     if unknown:
-                        print(f"[!] Unknown --bridges: {', '.join(unknown)}. "
+                        warn(f"[!] Unknown --bridges: {', '.join(unknown)}. "
                               f"Available: auto, {', '.join(sorted(declared))}.")
                         return 1
                     chosen = list(bridges)
@@ -12156,11 +12259,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for tier in sorted(by_tier, key=lambda t: SAFETY_ORDER.get(t, 1)):
                         why = ("they create an object on the target"
                                if tier == "stateful" else "they execute a command on the target")
-                        print(f"[!] holding back {len(by_tier[tier])} {tier} bridge(s) "
+                        warn(f"[!] holding back {len(by_tier[tier])} {tier} bridge(s) "
                               f"({', '.join(by_tier[tier])}); pass --verify-active-risk {tier} "
                               f"to include them — {why}.")
                 if not active:
-                    print("[!] No bridge is active, so --bridges tested nothing. This is not a "
+                    warn("[!] No bridge is active, so --bridges tested nothing. This is not a "
                           "negative result.")
             if observe_url:
                 print(f"[detect] observing {observe_url} for second-order execution: polled every "
@@ -12200,15 +12303,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 narrowed = (sink_shapes is not None or sink_raw or separators
                             or sink_env or bool(selected_contexts))
                 label = ", ".join(effective) if narrowed else "auto (full ladder)"
-                # A heading, because these read as findings without one.
-                # `sink shapes` and the five shape descriptions under it are
-                # the run's own configuration echoed back, and they were
-                # printed at exactly the weight of an EXECUTED row -- seven
-                # `[detect]` lines, one of which was the finding and six of
-                # which explained what `env` means.
-                print("[detect] run configuration:")
-                print(f"[detect] sink shell: {sink_env or 'auto (per carrier)'}")
-                print(f"[detect] sink shapes: {label or 'none'}")
+                # `[config]`, not `[detect]`. A heading was the first
+                # attempt and it was not enough: the lines under it still wore
+                # the tag the findings wear, so on a real terminal the run's
+                # own settings still read as results -- seven `[detect]` lines
+                # where one was a finding and six explained what `env` means.
+                # The tag is what a reader scans, so the tag is what had to
+                # change.
+                print(f"[config] sink shell: {sink_env or 'auto (per carrier)'}")
+                print(f"[config] sink shapes: {label or 'none'}")
                 for line in sink_shape_plan(effective):
                     print(line)
                 if not effective:
@@ -12234,14 +12337,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # has seen the first, so a zero estimate would be the same
                     # over-claim arrived at more expensively.
                     only_shell = set(method_names) <= SHELL_PROBE_METHODS
-                    print("[detect]   (no rung survives the narrowing, so none of "
+                    print("[config]   (no rung survives the narrowing, so none of "
                           "the shell methods will build a probe"
                           + (" -- this run will report NOTHING WAS TESTED)"
                              if only_shell else
                              "; the other selected methods do not ride the "
                              "ladder and are unaffected)"))
                 if separators:
-                    print("[detect]   (separators pinned by --separators: "
+                    print("[config]   (separators pinned by --separators: "
                           f"{', '.join(repr(s) for s in separators)})")
             if injection_runs:
                 # Enumeration. Each candidate is its own request shape, so each
@@ -12427,12 +12530,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     write_detection_json(args.detect_json, results, verify_url, method_names)
                     print(f"[detect] results written to {args.detect_json}")
                 except OSError as exc:
-                    print(f"[!] could not write --detect-json {args.detect_json}: {exc}")
+                    warn(f"[!] could not write --detect-json {args.detect_json}: {exc}")
                     return 1
             by_verdict = {}
             for result in results:
                 by_verdict[result["verdict"]] = by_verdict.get(result["verdict"], 0) + 1
-            print(f"[detect] methods: {', '.join(method_names)}")
+            print(f"[config] methods: {', '.join(method_names)}")
             # Deliveries, not rows. They are the same number for a method
             # that answers from each probe, which is why this read true for so
             # long -- but an aggregate method reports one row for a whole
@@ -12514,7 +12617,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # built no probes used to end here in silence and exit 0, which
                 # reads exactly like a target that came back clean.
                 selected_envs = sorted({record.environment for record in to_send})
-                print("[!] No probes were built, so NOTHING WAS TESTED — this is not a "
+                warn("[!] No probes were built, so NOTHING WAS TESTED — this is not a "
                       "negative result.")
                 if generator.profile_dropped_probes:
                     # Name the profile as the cause before the generic advice
@@ -12523,34 +12626,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # the actionable part: it says what a probe would have to be
                     # written out of to reach this sink at all.
                     denied = "".join(sorted(set(deny_chars or "")))
-                    print(f"[!] The declared target profile removed every one of the "
+                    warn(f"[!] The declared target profile removed every one of the "
                           f"{generator.profile_dropped_probes} probe(s) this run built. "
                           "Nothing was sent, so the target was not measured.")
                     if denied:
-                        print(f"[!]   Probes must avoid {', '.join(repr(c) for c in denied)}"
+                        warn(f"[!]   Probes must avoid {', '.join(repr(c) for c in denied)}"
                               + (f" and stay under {max_length} characters." if max_length
                                  else "."))
                     elif max_length:
-                        print(f"[!]   Every probe was longer than --max-length {max_length}.")
-                    print("[!]   Relax --deny-chars/--max-length (or the --target-profile that "
+                        warn(f"[!]   Every probe was longer than --max-length {max_length}.")
+                    warn("[!]   Relax --deny-chars/--max-length (or the --target-profile that "
                           "sets them) if the filter was a guess, or treat this sink as one the "
                           "current probe vocabulary cannot reach.")
                 if not to_send:
-                    print("[!] No payloads matched the selection: widen --categories/--environments"
+                    warn("[!] No payloads matched the selection: widen --categories/--environments"
                           "/--contexts, or raise --verify-active-risk.")
                 else:
-                    print(f"[!] None of the selected methods ({', '.join(method_names)}) apply to "
+                    warn(f"[!] None of the selected methods ({', '.join(method_names)}) apply to "
                           f"environment(s): {', '.join(selected_envs)}.")
                     shell_methods = sorted(
                         set(method_names) & {ReflectedMath.name, FileBased.name, ParametricTime.name})
                     if shell_methods and not set(selected_envs) & SHELL_CAPABLE_ENVIRONMENTS:
                         verb = "needs" if len(shell_methods) == 1 else "need"
-                        print(f"[!] {', '.join(shell_methods)} {verb} an environment whose runtime "
+                        warn(f"[!] {', '.join(shell_methods)} {verb} an environment whose runtime "
                               "reaches a shell. Add --environments unix if the sink shells out, or "
                               f"use --methods {EvalExpr.name} for a template/expression sink.")
                     if (FileBased.name in method_names
                             and FileBased(generator, detection_config)._channel() is None):
-                        print("[!] --methods file also needs --file-write-path and --file-read-url "
+                        warn("[!] --methods file also needs --file-write-path and --file-read-url "
                               "(or --webroot and --web-base-url).")
                     if WriteThenExecute.name in method_names:
                         # Its probes are a file body, so the break-out contexts
@@ -12558,10 +12661,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                         # file in `'; ... -- ` writes a broken file. Narrowing
                         # --contexts past raw/transport leaves it nothing to
                         # carry, and that must not read as a clean negative.
-                        print("[!] --methods write carries a file body, so it applies only to the "
+                        warn("[!] --methods write carries a file body, so it applies only to the "
                               "raw context and the transport contexts "
                               f"({', '.join(sorted(generator.transport_contexts))}); a --contexts "
                               "narrowed past those leaves it nothing to write.")
+                # This branch returns early, and the verdict line at the end of
+                # the report is past it -- so the one outcome this project
+                # cares most about saying out loud was the one outcome that
+                # never said it. `nothing-tested` is the quietest way the tool
+                # can fail, and a run ending on advice with no verdict is how
+                # it stays quiet.
+                print("\n[detect] " + paint("VERDICT: nothing-tested",
+                                            "nothing-tested")
+                      + f" -- {VERDICT_MEANING['nothing-tested']}")
                 return 1
             executed = [r for r in results if r["verdict"] == "executed"]
             if executed:
@@ -12645,6 +12757,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for line in second_order_advice(observe_request(detection_config),
                                                     results):
                         print(line)
+            # Last, and the last thing the run prints. `overall_detection_verdict`
+            # had been computed for `--detect-json`, for the per-point marker and
+            # for one advice condition, and never said out loud: a run ended on a
+            # paragraph of suggestions, and an operator reading a real terminal
+            # could not find what the run had decided. The advice comes first
+            # because it is long; the answer comes last because it is the answer.
+            overall = overall_detection_verdict(results)
+            print("\n[detect] " + paint(f"VERDICT: {overall}", overall)
+                  + f" -- {VERDICT_MEANING.get(overall, 'see the sections above')}")
             return 0
         results = generator.run_verification(
             to_send, url=verify_url, method=method, data=verify_data,
@@ -12691,7 +12812,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # A decoder-required encoding is fine when the sink is known to decode it.
         risky = sorted((set(selected_encodings) & generator.decoder_required_encodings) - set(sink_decodes))
         if risky:
-            print(
+            warn(
                 f"[!] Warning: encoding(s) {risky} emit bare blobs that only execute where the "
                 "SINK base64/hex-decodes the input. In plain text they may look like working "
                 "payloads but do nothing on their own. Use --include-metadata (or --output-format "
@@ -12721,7 +12842,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             oob_domain=oob_domain,
         )
     except OSError as exc:
-        print(f"[!] Unable to write output to {args.output}: {exc}")
+        warn(f"[!] Unable to write output to {args.output}: {exc}")
         return 1
 
     print(f"Generated {count} payloads to {args.output} in {mode} mode")
