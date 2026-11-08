@@ -4685,6 +4685,102 @@ class ProgressTestCase(unittest.TestCase):
         self.assertLessEqual(len(drawn), max(20, shutil.get_terminal_size().columns))
 
 
+class ProgressDenominatorTestCase(unittest.TestCase):
+    """The number the operator watches has to be the number the pre-flight
+    promised.
+
+    `--max-payloads` means two things, and this is where the difference bites:
+    on a single point it is one allowance shared by every method, and under
+    enumeration it is granted per point *per question*. The cost line learned
+    that the hard way -- its comment records advertising 44 requests for a run
+    that sent 80 -- and the progress denominator then made the identical
+    mistake, estimating the cap once and watching 24 probes climb past a
+    denominator of 12.
+
+    So the rule is not "estimate it correctly twice", it is "read the figure
+    the cost line already computed". Both tests below exist to keep a third
+    estimate from appearing."""
+
+    def _records(self):
+        gen = RCEKit()
+        records = list(gen.generate_payload_records(
+            mode="detection", selected_environments=["unix"],
+            selected_contexts=["raw"], selected_encodings=["none"]))
+        self.assertTrue(records, "no unix/raw records to estimate from")
+        return gen, records
+
+    def test_counting_the_cap_once_understates_a_multi_question_run(self):
+        """The trap itself, so the guard below is not protecting nothing.
+
+        If these two figures were ever equal, the structural test would pass on
+        a codebase where the bug had been reintroduced."""
+        gen, records = self._records()
+        methods = ["reflected", "deser"]
+        questions = {}
+        for name in methods:
+            questions.setdefault(rcekit.detection_question(name), []).append(name)
+        self.assertGreater(len(questions), 1, "these methods ask one question")
+
+        counted_once = gen.estimate_detection_probes(
+            records, methods, {}, max_payloads=6)
+        per_question = sum(
+            gen.estimate_detection_probes(records, group, {}, max_payloads=6)
+            for group in questions.values())
+        self.assertLess(
+            counted_once, per_question,
+            "counting --max-payloads once should understate a run that is "
+            "granted it per question; if these are equal this whole test case "
+            "has stopped describing the engine")
+
+    def test_the_progress_total_is_read_from_the_cost_line_figure(self):
+        """Structural, because the arithmetic is right by construction once
+        both lines read one variable -- and wrong again the moment somebody
+        adds a second estimate beside it.
+
+        `per_point` is the enumeration figure, estimated per question and
+        summed; `per_run` is the single-point and chain figure. A `total=`
+        built from anything else is the bug coming back."""
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        main = next((node for node in ast.walk(tree)
+                     if isinstance(node, ast.FunctionDef) and node.name == "main"),
+                    None)
+        self.assertIsNotNone(main, "rcekit.py has no main() to read")
+
+        checked = 0
+        for node in ast.walk(main):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "start_progress"):
+                continue
+            total = next((kw.value for kw in node.keywords if kw.arg == "total"),
+                         None)
+            self.assertIsNotNone(
+                total, f"start_progress at line {node.lineno} passes no total; "
+                       "a progress line with no denominator tells the operator "
+                       "nothing about how much is left")
+            names = {inner.id for inner in ast.walk(total)
+                     if isinstance(inner, ast.Name)}
+            self.assertTrue(
+                names & {"per_point", "per_run"},
+                f"start_progress at line {node.lineno} builds its total from "
+                f"{sorted(names)} rather than from the cost line's own "
+                "per_point/per_run; a second estimate is how the denominator "
+                "came to disagree with the pre-flight")
+            calls = {inner.func.id for inner in ast.walk(total)
+                     if isinstance(inner, ast.Call)
+                     and isinstance(inner.func, ast.Name)}
+            self.assertNotIn(
+                "estimate_detection_probes", calls,
+                f"start_progress at line {node.lineno} estimates the total "
+                "again instead of reusing the figure already printed")
+            checked += 1
+
+        self.assertGreaterEqual(
+            checked, 2,
+            "expected a start_progress call on the enumeration path and one on "
+            "the single-point/chain path; this check is no longer reading main")
+
+
 class DestructiveHoldBackTestCase(unittest.TestCase):
     """A payload that installs a backdoor or destroys data must be held back by
     default on EVERY live path. The single-request verifier did this and the

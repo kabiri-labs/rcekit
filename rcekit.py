@@ -12243,17 +12243,6 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if separators:
                     print("[detect]   (separators pinned by --separators: "
                           f"{', '.join(repr(s) for s in separators)})")
-            # The minutes between the plan and the report, which printed
-            # nothing at all before this. The estimate is the cost line's own
-            # figure, so the denominator the operator watches is the one the
-            # pre-flight already promised.
-            probe_estimate = generator.estimate_detection_probes(
-                to_send, method_names, detection_config,
-                max_payloads=args.max_payloads)
-            if injection_runs:
-                probe_estimate *= len(injection_runs)
-            generator.progress = start_progress(
-                "none" if args.quiet else args.progress, total=probe_estimate)
             if injection_runs:
                 # Enumeration. Each candidate is its own request shape, so each
                 # gets its own payload-free control -- differencing a header
@@ -12307,6 +12296,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"[detect] cost: {len(injection_runs)} points x ~{per_point} probes{capped} "
                       f"= at least {len(injection_runs) * (per_point + len(waves))} requests "
                       f"(each point carries its own payload-free control)")
+                # The denominator is the figure the line above just promised,
+                # read from the same variable rather than estimated again. The
+                # first version of this estimated it separately and counted
+                # `--max-payloads` once, which is exactly the arithmetic the
+                # comment beside `per_point` records having been wrong before:
+                # the budget is granted per question, so a two-question run
+                # watched 24 probes climb past a denominator of 12.
+                generator.progress = start_progress(
+                    "none" if args.quiet else args.progress,
+                    total=per_point * len(injection_runs))
                 results = []
                 for point, point_url, point_method, point_data, point_headers, label in injection_runs:
                     point_results: List[Dict[str, Any]] = []
@@ -12380,6 +12379,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                           f"({generator.delivered_probes - point_started} probes){marker}")
                     results.extend(point_results)
             else:
+                # Probes, not requests, which is what `delivered_probes` counts
+                # and therefore what the progress line can be measured against.
+                per_run = generator.estimate_detection_probes(
+                    to_send, method_names, detection_config,
+                    max_payloads=args.max_payloads)
                 if chain_delivery is not None:
                     # A chain run is one probe and several requests, and the
                     # plan line above counts payloads. Without this the traffic
@@ -12393,13 +12397,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                     # abandoning a payload between its login and its trigger,
                     # which leaves target state the run cannot describe. Whole
                     # chain runs, with the request count said out loud instead.
-                    per_run = generator.estimate_detection_probes(
-                        to_send, method_names, detection_config,
-                        max_payloads=args.max_payloads)
                     print(f"[detect] cost: ~{per_run} probe(s) x {chain_delivery.steps} "
                           f"chain step(s) = at least "
                           f"{(per_run + 1) * chain_delivery.steps} requests "
                           "(the payload-free control is a chain run of its own)")
+                generator.progress = start_progress(
+                    "none" if args.quiet else args.progress, total=per_run)
                 results = generator.run_detection(
                     to_send, url=verify_url, methods=method_names, method=method,
                     data=verify_data, headers=verify_headers, delay=args.verify_delay,
