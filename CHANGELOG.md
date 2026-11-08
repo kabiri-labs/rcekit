@@ -413,6 +413,61 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.15.0] — 2026-11-08
+
+Four fixes from running 3.14.0 against a real target on a real terminal, which
+is where all four of these were invisible from a test suite.
+
+### Added
+
+- **A run states its own verdict, on the last line it prints.**
+
+  ```
+  [detect] VERDICT: negative -- the probes reached the target and found nothing
+  ```
+
+  `overall_detection_verdict` had been computed for `--detect-json`, for the
+  per-point marker and for one advice condition, and never said out loud. A run
+  ended on a paragraph of suggestions, so an operator reading a terminal could
+  not find what it had decided. The advice still comes first because it is long;
+  the answer comes last because it is the answer. Each verdict carries the
+  one-clause gloss the README's table makes, and a test holds every verdict the
+  engine emits to having one.
+
+### Fixed
+
+- **Colour could not render on a Windows console.** A console with
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING` unset prints escape sequences instead of
+  acting on them, so 3.14.0 would have put `<-[1;33m` in front of every verdict
+  on an older console host -- worse than the plain output it replaced. RCEKit
+  turns the bit on for its own stdout before writing any sequence, through
+  `ctypes` rather than a dependency, and where that fails colour stays off
+  instead of producing garbage. Nothing changes off Windows, and nothing
+  changes on a Windows Terminal or current `conhost`, which set the bit
+  themselves. `--color always` still tries to enable it -- forcing colour onto
+  a console that was never asked is how an override turns into a screenful of
+  escapes -- it just declines to be refused by the answer.
+
+- **`[!]` notices were documented as bold and were not.** 3.14.0 shipped
+  `bold()`, said so in its changelog, and never called it from anywhere. The
+  function had a test and its *use* did not, so the claim and the code
+  disagreed for a release. All 57 notices print through a `warn()` helper now,
+  and the test is on a real run's output rather than on the function.
+
+- **A clean run rendered entirely grey.** `negative` was deliberately left
+  uncoloured so that nothing would read as "safe" -- but it is the commonest
+  outcome, and with nothing painted the summary line was indistinguishable from
+  the configuration echo above it. The rule that mattered was narrower than
+  "no colour": nothing is green. `negative` takes a neutral cyan now, and the
+  no-green test is unchanged.
+
+- **The configuration echo still scanned as findings.** 3.13.0 gave it a
+  heading, which was not enough: the lines under it still wore `[detect]`, the
+  tag the findings wear. The run's own settings are tagged **`[config]`** now --
+  `sink shell`, `sink shapes`, the five shape descriptions and `methods` -- and
+  a test asserts no configuration line is tagged `[detect]`. The separate
+  heading is gone, because the tag carries it.
+
 ## [3.14.0] — 2026-11-07
 
 ### Added
@@ -4246,6 +4301,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.15.0]: https://github.com/kabiri-labs/rcekit/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/kabiri-labs/rcekit/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/kabiri-labs/rcekit/compare/v3.12.2...v3.13.0
 [3.12.2]: https://github.com/kabiri-labs/rcekit/compare/v3.12.1...v3.12.2

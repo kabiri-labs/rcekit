@@ -4385,19 +4385,53 @@ class BannerAndStreamsTestCase(unittest.TestCase):
         self.assertIn("Successfully generated", result.stderr,
                       "the log record moved rather than disappearing")
 
-    def test_the_configuration_block_is_announced_as_configuration(self):
-        """Port 1 so nothing is sent anywhere: the configuration echo is
-        printed before the first probe, which is the point of it."""
+    def test_the_configuration_echo_is_tagged_config_not_detect(self):
+        """A heading was the first attempt and it was not enough.
+
+        The lines under it still wore the tag the findings wear, so on a real
+        terminal the run's own settings still scanned as results. The tag is
+        what a reader's eye follows, so the tag is what had to change.
+
+        Port 1, so nothing is sent anywhere: the configuration echo is printed
+        before the first probe, which is the point of it."""
         result = self._run(
             "--acknowledge-consent", "--verify-url",
             "http://127.0.0.1:1/x?cmd=FUZZ", "--methods", "reflected",
             "--max-payloads", "1", "--environments", "unix",
             "--contexts", "raw")
-        self.assertIn("[detect] run configuration:", result.stdout)
-        self.assertLess(
-            result.stdout.index("[detect] run configuration:"),
-            result.stdout.index("[detect] sink shell:"),
-            "the heading has to come before the settings it introduces")
+        for line in ("[config] sink shell:", "[config] sink shapes:",
+                     "[config] methods:"):
+            with self.subTest(line=line):
+                self.assertIn(line, result.stdout)
+        # Including the shape descriptions, which are that block's own detail
+        # and came from a helper that baked the old tag in.
+        self.assertIn("[config]   raw ", result.stdout)
+        for line in result.stdout.splitlines():
+            if not line.startswith("[detect]"):
+                continue
+            for setting in ("sink shell:", "sink shapes:", "methods:"):
+                with self.subTest(leaked=setting):
+                    self.assertNotIn(
+                        setting, line,
+                        f"a configuration line is still tagged [detect]: {line}")
+
+    def test_the_run_states_its_own_verdict_last(self):
+        """`overall_detection_verdict` was computed for --detect-json, for the
+        per-point marker and for one advice condition, and never said out
+        loud. A run ended on a paragraph of suggestions and an operator on a
+        real terminal could not find what it had decided."""
+        result = self._run(
+            "--acknowledge-consent", "--verify-url",
+            "http://127.0.0.1:1/x?cmd=FUZZ", "--methods", "reflected",
+            "--max-payloads", "1", "--environments", "unix",
+            "--contexts", "raw")
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertTrue(lines, "the run printed nothing")
+        self.assertRegex(
+            lines[-1], r"^\[detect\] VERDICT: [a-z-]+ -- .",
+            "the last line of a run should be the run's verdict")
+        self.assertIn("error", lines[-1],
+                      "nothing reached port 1, so the verdict is `error`")
 
     def test_stdout_is_line_buffered_so_a_piped_run_is_visible(self):
         """Block-buffered and never flushed, a redirected run printed nothing
@@ -4472,8 +4506,23 @@ class ColourTestCase(unittest.TestCase):
                                  f"{tier} is green, which reads as safe")
                 self.assertNotIn("92", parameters)
 
-    def test_negative_has_no_colour_of_its_own(self):
-        self.assertNotIn("negative", rcekit.TIER_SGR)
+    def test_negative_is_coloured_but_never_green(self):
+        """Leaving `negative` plain was the first answer and it was wrong in
+        practice: a clean run is the commonest outcome, and with nothing
+        painted its summary was indistinguishable from the configuration echo
+        above it -- the whole report rendered grey and the operator had to
+        hunt for the result.
+
+        The rule that actually matters is narrower than "no colour", and it
+        survives: nothing is green. Green reads as "nothing here", and
+        `negative` means the probes reached the target."""
+        self.assertIn("negative", rcekit.TIER_SGR)
+        code = rcekit.TIER_SGR["negative"]
+        parameters = code.lstrip("\x1b[").rstrip("m").split(";")
+        self.assertNotIn("32", parameters)
+        self.assertNotIn("92", parameters)
+        # And not the colour reserved for the one tier that is execution.
+        self.assertNotEqual(code, rcekit.TIER_SGR["executed"])
 
     def test_every_tier_the_engine_reports_is_either_painted_or_plain(self):
         """The palette may not invent a verdict the engine never emits: a
@@ -4535,6 +4584,71 @@ class ColourTestCase(unittest.TestCase):
         finally:
             self._restore(saved)
 
+    def test_every_verdict_has_a_sentence_on_the_verdict_line(self):
+        """A verdict added later must not reach that line as a bare name with
+        no idea what it asserts."""
+        known = set(rcekit.VERDICT_PRIORITY) | {
+            "negative", "inconclusive", "blocked", "error", "nothing-tested"}
+        missing = sorted(known - set(rcekit.VERDICT_MEANING))
+        self.assertEqual(missing, [],
+                         f"verdicts with no sentence on the verdict line: {missing}")
+        self.assertEqual(sorted(set(rcekit.VERDICT_MEANING) - known), [],
+                         "the table glosses a verdict the engine never emits")
+
+    def test_an_operator_notice_is_bold(self):
+        """3.14.0 shipped `bold`, documented `[!]` as bold in its changelog,
+        and never called it from anywhere: the function was tested and its use
+        was not, so the claim and the code disagreed for a release. This test
+        is on the use."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "p.txt"
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--color", "always",
+                 "-o", str(out)],
+                cwd=tmp, capture_output=True, text=True, timeout=180)
+        notice = [line for line in result.stdout.splitlines()
+                  if "[!]" in line]
+        self.assertTrue(notice, "expected the consent notice on stdout")
+        for line in notice:
+            with self.subTest(line=line[:40]):
+                self.assertTrue(line.startswith(rcekit.SGR_BOLD), line[:60])
+                self.assertTrue(line.endswith(rcekit.SGR_RESET), line[-20:])
+
+    def test_enabling_ansi_is_a_no_op_away_from_windows(self):
+        """A POSIX terminal reads ANSI without being asked, and the CI matrix
+        that proves this project works is Linux."""
+        saved = sys.platform
+        try:
+            sys.platform = "linux"
+            self.assertTrue(rcekit.enable_ansi())
+            sys.platform = "darwin"
+            self.assertTrue(rcekit.enable_ansi())
+        finally:
+            sys.platform = saved
+
+    def test_enabling_ansi_answers_rather_than_raising(self):
+        """Whatever the host is, this has to return a usable answer: a
+        traceback out of a colour decision would end a run that had findings
+        to print."""
+        result = rcekit.enable_ansi()
+        self.assertIsInstance(result, bool)
+
+    def test_a_redirected_stdout_is_never_told_it_can_render_ansi(self):
+        """On Windows `GetConsoleMode` fails on a pipe, which is the same
+        answer as "do not colour this". Checked in a subprocess so the test
+        runner's own stdout is not what is being measured, and skipped off
+        Windows where the question does not arise."""
+        if not sys.platform.startswith("win"):
+            self.skipTest("Windows-only console behaviour")
+        probe = "import rcekit, sys; print(rcekit.enable_ansi())"
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, "-c", probe],
+                cwd=tmp, capture_output=True, text=True, timeout=120,
+                env=dict(os.environ, PYTHONPATH=str(REPO_ROOT)))
+        self.assertEqual(result.returncode, 0, result.stderr[-300:])
+        self.assertEqual(result.stdout.strip(), "False")
+
     def test_a_redirected_report_carries_no_escape_sequence(self):
         """The guarantee for everything that reads these runs out of a pipe,
         and the reason the two escaping tests above still hold."""
@@ -4565,7 +4679,7 @@ class ColourTestCase(unittest.TestCase):
                       result.stdout)
         # The configuration echo is not a verdict and stays plain.
         for line in result.stdout.splitlines():
-            if line.startswith("[detect] sink shell:"):
+            if line.startswith("[config] sink shell:"):
                 self.assertNotIn("\x1b", line)
 
     def test_no_escape_sequence_reaches_detect_json(self):
@@ -11551,7 +11665,7 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
                                "--environments", "windows",
                                "--sink-env", "windows", "--sink-shape", "sq")
 
-        self.assertIn("[detect] sink shapes: none", result.stdout)
+        self.assertIn("[config] sink shapes: none", result.stdout)
         self.assertIn("no rung survives the narrowing", result.stdout)
         # Not one rung line, where it used to print every one of them.
         for rung in rcekit.SINK_SHAPE_RUNGS:
@@ -11648,9 +11762,9 @@ class EnumerationEndToEndTestCase(unittest.TestCase):
                                "--sink-env", "unix", "--sink-shape", "sep",
                                "--max-payloads", "4")
 
-        self.assertIn("[detect] sink shapes: sep", result.stdout)
+        self.assertIn("[config] sink shapes: sep", result.stdout)
         self.assertNotIn("no rung survives the narrowing", result.stdout)
-        self.assertIn("[detect]   sep ", result.stdout)
+        self.assertIn("[config]   sep ", result.stdout)
         self.assertNotIn("[detect]   chain ", result.stdout)
         self.assertNotIn("NOTHING WAS TESTED", result.stdout)
 
