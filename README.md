@@ -182,11 +182,10 @@ exactly the same arguments.
 
 **If a package scanner flagged this as high risk, that is expected.** An RCE
 detection tool contains reverse-shell strings, credential file paths and
-out-of-band callback builders, so malware heuristics match on it by design —
-GuardDog scores it 10.0/10, while Snyk reports 0 vulnerabilities across all 8
-published versions. [SECURITY.md](SECURITY.md#expected-scanner-findings) lists
-every rule that fires, names the false positives, and gives the commands to
-check for yourself that nothing runs at install or import time.
+out-of-band callback builders, so malware heuristics match on it by design.
+[SECURITY.md](SECURITY.md#expected-scanner-findings) has the detail: every rule
+that fires, the false positives named, and the commands to check for yourself
+that nothing runs at install or import time.
 
 RCEKit takes a target in **three shapes**, and none is a fallback for another. A
 `--verify-url` carries a URL and nothing else; `-r` takes a request saved from
