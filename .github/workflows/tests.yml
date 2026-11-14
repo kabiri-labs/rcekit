@@ -9,7 +9,15 @@ permissions:
 
 jobs:
   unittest:
-    runs-on: ubuntu-latest
+    # `ubuntu-latest` is Ubuntu 26.04, and actions/python-versions publishes no
+    # 3.8 or 3.9 build for it: setup-python fails outright and the suite never
+    # runs, which reads as a test failure rather than the missing interpreter it
+    # is. 24.04 carries both, so the two oldest supported versions are pinned
+    # there and keep being tested rather than quietly dropped. Kept out of the
+    # matrix on purpose -- a `runs-on` dimension would rename every check from
+    # `unittest (3.8)` to `unittest (3.8, ubuntu-24.04)`. `requires-python` is
+    # >=3.8; when that floor rises, drop the versions here with it.
+    runs-on: ${{ (matrix.python-version == '3.8' || matrix.python-version == '3.9') && 'ubuntu-24.04' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
