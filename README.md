@@ -180,6 +180,14 @@ Every example below uses the second spelling, which works from a checkout and
 from the single downloaded file. An installed copy answers to `rcekit` with
 exactly the same arguments.
 
+**If a package scanner flagged this as high risk, that is expected.** An RCE
+detection tool contains reverse-shell strings, credential file paths and
+out-of-band callback builders, so malware heuristics match on it by design —
+GuardDog scores it 10.0/10, while Snyk reports 0 vulnerabilities across all 8
+published versions. [SECURITY.md](SECURITY.md#expected-scanner-findings) lists
+every rule that fires, names the false positives, and gives the commands to
+check for yourself that nothing runs at install or import time.
+
 RCEKit takes a target in **three shapes**, and none is a fallback for another. A
 `--verify-url` carries a URL and nothing else; `-r` takes a request saved from
 your proxy whole — method, path, headers, body and cookies — which is what a
@@ -877,7 +885,7 @@ target shapes.
 | [**Reference**](docs/reference.md) | Every flag, environment, category, context, encoding and code-execution sink. |
 | [**CHANGELOG.md**](CHANGELOG.md) | What changed in each release, and what to re-check when upgrading. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to add sinks, categories, encodings and detection methods. |
-| [SECURITY.md](SECURITY.md) | Reporting a vulnerability in RCEKit itself. |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability in RCEKit itself, and why package scanners flag this tool. |
 
 ---
 
