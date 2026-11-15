@@ -4,7 +4,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.16.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.17.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -544,7 +544,7 @@ sure RCEKit is:
 | **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit — so this is **a lead, not a finding**: a MongoDB `$where` sandbox and a SQL engine comparing two numbers answer identically, and only one is a vulnerability. Identify the evaluator before reporting. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph (CWE-502). Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. **A confirmed sink** — report it; the gadget analysis is the next piece of work, not a reason to withhold it. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. **A confirmed sink** whose remediation is known regardless — the Log4Shell shape. |
-| **`needs-review`** | A real signal that is not proof on its own: the parser fingerprint `deser` reads without a listener, and the static-signature match `--verify-chain` reads in band, which has no payload-free control behind it. The one verdict here that is genuinely a candidate. |
+| **`needs-review`** | A real signal that is not proof on its own: the parser fingerprint `deser` reads without a listener, a probe that hung where a payload-free control sent immediately after did not, and the static-signature match `--verify-chain` reads in band, which has no payload-free control behind it. The one verdict here that is genuinely a candidate. |
 | **`inconclusive`** | Nothing here can be attributed to execution. Either the evidence appeared and the payload-free control carried it too, or the run never gathered it — a response channel too unsteady to carry an answer, or a measurement `--max-payloads` could not afford to finish. It outranks `negative`, because a run that did not look is not a run that found nothing. |
 | **`negative`** | Probes were built, reached the target, and found nothing. |
 | **`blocked`** | A filter refused the payload where the payload-free control got through, so the sink never saw it. The probes reached something; it was not the target. |
@@ -603,6 +603,15 @@ you asked for a second-order oracle and the observed endpoint never answered, th
 probe verdicts still stand — but the run tells you they were decided without ever
 reading the channel you pointed it at, rather than letting them pass for a
 second-order negative.
+
+**`error` is held to its own claim, too.** It says nothing reached the target,
+and a request that hung because the injected command hung did reach it. So a
+probe that spends its whole timeout is asked about rather than written off: a
+payload-free control goes out immediately after, and if that one answers
+promptly the hang is attributable to the payload and the verdict is
+`needs-review` — a real signal, not proof, with `--methods time` as the next
+step. If the control was slow too, or did not arrive either, the answer stays
+`error`, because a connectivity problem has to keep reading as one.
 
 The mirror case is reported too, and it is the one a defender can act on
 fastest. If a request was refused where the payload-free control got through,
@@ -844,9 +853,12 @@ and `deserialization-sink` are confirmed sinks with known remediation, and
 `timing-sink` is a measurement waiting to be attributed. `evaluation-sink` is the
 one that is a *lead* rather than a finding: identify the evaluator before it goes
 in a report. `needs-review` is the exception: it is the parser fingerprint `deser`
-reads when it has no gadget to fire — and, off this table, the static signature
-`--verify-chain` matches in band without a control. Both are real candidates and
-**not proof** — review them by hand rather than reporting them. [What a verdict
+reads when it has no gadget to fire, a probe that hung where a payload-free
+control sent immediately after did not — any results-based method can report
+that one, since a hang is a fact about the request rather than about the sink —
+and, off this table, the static signature `--verify-chain` matches in band
+without a control. All three are real candidates and **not proof** — review them
+by hand rather than reporting them. [What a verdict
 means](#what-a-verdict-means) spells each one out,
 [Choosing methods](docs/guide.md#choosing-methods) has the costs, and the
 [Quick start](#quick-start) scenarios have a worked command for each row in both

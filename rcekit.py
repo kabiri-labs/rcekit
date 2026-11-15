@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.16.0"
+__version__ = "3.17.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -3999,6 +3999,30 @@ class RCEKit:
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
                     self._note_progress(meth, record)
+                    # A probe that timed out is asked about, not written off.
+                    # `error` says nothing reached the target, and a request
+                    # that hung because the injected command hung did reach it.
+                    # The question is which of the two happened, and only a
+                    # payload-free request sent *now* answers it: the run's own
+                    # control is minutes old by here, and a target that fell
+                    # over in between would have every probe read as a signal.
+                    #
+                    # One request, and only for a probe that spent its whole
+                    # timeout. Charged to the same meter as the evasion retry,
+                    # and gated on the budget for the same reason -- a probe
+                    # cannot be known to have timed out until it has been sent,
+                    # so the bound would otherwise overshoot by one on the last
+                    # probe of a capped run.
+                    timed_out = status is None and elapsed >= timeout * 0.9
+                    after_elapsed, after_status = 0.0, None
+                    if timed_out and not self._budget_spent(started_requests, max_payloads):
+                        after_status, _ab, _ac, after_elapsed = delivery.send(
+                            f"rcekit-after-{self._generate_canary()}", timeout)
+                        self.delivered_probes += 1
+                        # Counted on the progress line too, like the evasion
+                        # retry beside it: it is a request the target received,
+                        # and the meter the operator watches is traffic.
+                        self._note_progress(meth, record)
                     # A followup fetch (file-based self-OOB): retrieve the file the
                     # probe asked the target to write. Its body is the confirmation
                     # channel, so a blocked/failed fetch stays unconfirmed.
@@ -4011,7 +4035,9 @@ class RCEKit:
                         followup_body = f_body if f_status is not None else None
                     obs = Observation(status=status, body=body, control_body=control_body,
                                       elapsed=elapsed, followup_body=followup_body,
-                                      channels=chans, control_channels=control_channels)
+                                      channels=chans, control_channels=control_channels,
+                                      baseline=after_elapsed, control_status=after_status,
+                                      timed_out=timed_out)
                     verdict = meth.confirm(obs, probe)
                     # A refused probe is retried up the rungs before anything
                     # is concluded from it: the filter answered, so the sink has
@@ -4039,10 +4065,22 @@ class RCEKit:
                                         url, probe.followup["url"], headers),
                                     "raw", "raw", timeout)
                                 followup_body = f_body if f_status is not None else None
+                            # The retry's own timing, not the refused probe's,
+                            # so the Observation describes the request that
+                            # actually reached the sink. No control is taken for
+                            # it and none is needed: this branch is reached only
+                            # from a refusal, and `payload_refused` answers no
+                            # for a probe that never got a status at all -- so a
+                            # rung that climbs past a filter and then hangs is
+                            # reported `error`, which is what a hang with nothing
+                            # to difference it against is.
+                            timed_out = status is None and elapsed >= timeout * 0.9
                             obs = Observation(
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, followup_body=followup_body,
-                                channels=chans, control_channels=control_channels)
+                                channels=chans, control_channels=control_channels,
+                                baseline=after_elapsed, control_status=after_status,
+                                timed_out=timed_out)
                             verdict = meth.confirm(obs, probe)
                     # Decided here rather than in a method's oracle: being
                     # refused is a fact about delivery, not about what any one
@@ -5344,7 +5382,35 @@ class Observation:
     body: str
     control_body: str = ""
     elapsed: float = 0.0
+    # The payload-free control the engine sent *immediately after* this probe,
+    # and only where a timeout prompted one: its elapsed, and its status.
+    #
+    # `baseline` was declared and documented as the field a delay is differenced
+    # against for four releases and the engine never wrote it, so every oracle
+    # reading it read 0.0. `time` was unaffected -- it samples its own baseline
+    # locally and medians it -- which is exactly why nothing caught it: the one
+    # method the field was named for does not use it. Writing it was the smaller
+    # half of making a timeout readable; deleting it instead would have left the
+    # next oracle to discover the same thing by being wrong.
+    #
+    # 0.0 and None mean no such control was taken, which is the common case:
+    # this costs a request and is spent only on a probe that timed out. They do
+    # NOT mean a control failed -- `timed_out` is what separates the two.
     baseline: float = 0.0
+    control_status: Optional[int] = None
+    # Whether this probe consumed its request timeout, as against failing fast.
+    # Measured from the elapsed time rather than read off the exception text: a
+    # timeout spends the whole budget and a refused connection comes back in
+    # milliseconds, while both arrive here as `status is None` with the
+    # exception's own words in `body`. A list of exception spellings would be
+    # the hand-written list this tool keeps learning not to keep, and it would
+    # be locale- and version-dependent besides.
+    #
+    # Set on the per-probe path, which is the path that answers it with a
+    # control. The aggregate methods are not in that scope: `time` reads a
+    # timeout as a signal already, and for a callback method a timeout is not
+    # evidence of a hang because the callback can still arrive afterwards.
+    timed_out: bool = False
     followup_body: Optional[str] = None
     # Every channel of the response and of the control, as ``(name, text)``
     # pairs — body, application headers, cookie values, the redirect target, the
@@ -5670,8 +5736,34 @@ class DetectionMethod:
         across every channel of the control too — deliberately stricter than
         comparing only the channel that matched, because a payload-free response
         that already contains the expected value means the value is not
-        attributable to execution no matter where it turned up."""
+        attributable to execution no matter where it turned up.
+
+        **A timeout is not always an absence.** `error` means nothing reached the
+        target, and a request that hung because the injected command hung did
+        reach it. Where the probe spent its whole timeout and a payload-free
+        control sent immediately after came back promptly, the hang is
+        attributable to the payload rather than to reachability, and the honest
+        tier is `needs-review`: a real signal that is not proof, which is what
+        that verdict is reserved for. The operator's next step is `--methods
+        time`, which can turn it into a measured `timing-sink` -- or rule it
+        out, which is the other half of why this is not reported as a finding.
+
+        An order-of-magnitude comparison rather than a margin in seconds: the
+        probe's elapsed time *is* the request timeout here, so a fixed number of
+        seconds would mean something different at every `--verify-timeout`. If
+        the control was slow too, or did not arrive either, the answer stays
+        `error` -- a connectivity problem has to keep reading as one, and that
+        is the direction this must not get wrong."""
         if obs.status is None:
+            if (obs.timed_out and obs.control_status is not None
+                    and obs.baseline * 3 <= obs.elapsed):
+                return Verdict(
+                    "needs-review",
+                    f"the probe hung for {obs.elapsed:.1f}s and was cut off, while a "
+                    f"payload-free control sent immediately after answered in "
+                    f"{obs.baseline:.1f}s -- so the timeout is attributable to the payload "
+                    "and not to reachability. A real signal and NOT proof: run --methods "
+                    "time to turn it into a measured timing-sink, or to rule it out")
             return Verdict("error", f"request never reached the target ({obs.body[:120]})")
         channels = self._channels_of(obs.body, obs.channels)
         where = self._search_channels(probe.expected, channels, boundary=boundary)
@@ -6026,6 +6118,12 @@ class ReflectedMath(DetectionMethod):
     that did exactly that, and what it was measured against."""
     name = "reflected"
     tier = "executed"
+    # A probe that hung where a payload-free control sent immediately after did
+    # not. Declared here because three places read this attribute rather than
+    # the oracle -- see :attr:`DetectionMethod.also_reports` -- and the oracle
+    # is :meth:`_confirm_computed`, shared with `eval` and `argv`, which carry
+    # the same declaration for the same reason.
+    also_reports = ("needs-review",)
 
     def applicable(self, record: "PayloadRecord") -> bool:
         return record.environment in SHELL_CAPABLE_ENVIRONMENTS
@@ -6362,22 +6460,35 @@ class FileBased(DetectionMethod):
         return probes
 
     def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
+        # The read-back is read before the write request's own outcome, and that
+        # order is the whole of it. The followup fires whatever the write
+        # answered -- deliberately, and for releases -- so a write that landed
+        # while its request hung or was cut off has its token sitting here
+        # already. Answering `error` first threw that away: a probe whose file
+        # was on the target and readable reported "nothing reached the target".
+        #
+        # The same rule as :meth:`RCEKit._refusal` one door along. A 4xx does not
+        # unmake what the run observed, and neither does a delivery that failed.
+        # `error` is for a run with nothing to go on, and this run has a token.
+        if obs.followup_body is not None and self._search(probe.expected, obs.followup_body):
+            # The token is random, so its presence anywhere in the payload-free
+            # control — any channel, not just the body — means it did not get
+            # there by being written and served.
+            if self._search_channels(probe.expected,
+                                     self._channels_of(obs.control_body, obs.control_channels)):
+                return Verdict("inconclusive", "token also present without the payload")
+            note = ("; the write request itself never answered, so the read-back is the "
+                    "whole of the evidence" if obs.status is None else "")
+            return Verdict("executed",
+                           f"target wrote and served token {probe.expected!r} "
+                           f"(execution + write primitive){note}")
         if obs.status is None:
             return Verdict("error", f"write request never reached the target ({obs.body[:120]})")
         if obs.followup_body is None:
             return Verdict("negative",
                            "could not fetch the written file (no write, wrong write path or "
                            "read-back URL, or blocked)")
-        if not self._search(probe.expected, obs.followup_body):
-            return Verdict("negative", "token absent from the fetched file")
-        # The token is random, so its presence anywhere in the payload-free
-        # control — any channel, not just the body — means it did not get there
-        # by being written and served.
-        if self._search_channels(probe.expected,
-                                 self._channels_of(obs.control_body, obs.control_channels)):
-            return Verdict("inconclusive", "token also present without the payload")
-        return Verdict("executed",
-                       f"target wrote and served token {probe.expected!r} (execution + write primitive)")
+        return Verdict("negative", "token absent from the fetched file")
 
 
 class FileInclude(DetectionMethod):
@@ -6669,10 +6780,14 @@ class FileInclude(DetectionMethod):
         return probes
 
     def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
-        if obs.status is None:
-            return Verdict("error", f"request never reached the target ({obs.body[:120]})")
+        # The write rung first, before the injecting request's own outcome: it is
+        # judged on a file fetched in a second request, which goes out whatever
+        # the first one answered. A read rung has only the response it drew, so
+        # for one of those a delivery failure really is all there is to say.
         if probe.followup is not None:
             return self._confirm_written(obs, probe)
+        if obs.status is None:
+            return Verdict("error", f"request never reached the target ({obs.body[:120]})")
         channel = self._search_channels(probe.expected,
                                         self._channels_of(obs.body, obs.channels))
         if channel is None:
@@ -6705,6 +6820,10 @@ class FileInclude(DetectionMethod):
         served and nothing evaluated it. The second is a real finding and not
         execution, and `write` has called it `file-write` since 2.31.0."""
         if obs.followup_body is None:
+            if obs.status is None:
+                return Verdict("error",
+                               f"the write request never reached the target and the written "
+                               f"file could not be fetched either ({obs.body[:120]})")
             return Verdict("error",
                            "the write request answered but the written file could not be "
                            "fetched (wrong --include-write-url, or nothing was written)")
@@ -6930,9 +7049,14 @@ class WriteThenExecute(DetectionMethod):
         return probes
 
     def confirm(self, obs: "Observation", probe: "Probe") -> Verdict:
-        if obs.status is None:
-            return Verdict("error", f"write request never reached the target ({obs.body[:120]})")
+        # Ordered as `file` is, and for the same reason: the fetched file is the
+        # channel, it is fetched whatever the upload answered, and a request that
+        # hung after storing the file does not unmake what came back. Only once
+        # the file has nothing to say does the upload's own outcome decide.
         if obs.followup_body is None:
+            if obs.status is None:
+                return Verdict("error",
+                               f"write request never reached the target ({obs.body[:120]})")
             return Verdict("error", "could not fetch the written file back "
                                     "(the read-back URL never answered)")
         if self._search(probe.expected, obs.followup_body):
@@ -7240,6 +7364,9 @@ class EvalExpr(DetectionMethod):
     de-duplication fires each syntax once per context."""
     name = "eval"
     tier = "executed"
+    # See `reflected`: the shared computed-value oracle reports a timeout the
+    # payload-free control did not share.
+    also_reports = ("needs-review",)
 
     # Delimiters for the common expression/template evaluators, plus a bare form
     # for raw eval() sinks. {expr} is substituted with the random arithmetic.
@@ -7853,6 +7980,9 @@ class ArgvInjection(DetectionMethod):
     name = "argv"
     tier = "executed"
     safety = "safe"
+    # See `reflected`: the shared computed-value oracle reports a timeout the
+    # payload-free control did not share.
+    also_reports = ("needs-review",)
 
     def _selected(self, sink_env: str) -> List[Tuple[str, Dict[str, Any]]]:
         """``(name, primitive)`` for each selected option shape this dialect can
