@@ -9331,6 +9331,235 @@ class CallbackMethodRefusalTestCase(unittest.TestCase):
         self.assertGreaterEqual(self.gen.delivered_probes, len(results))
 
 
+class RefusedButLandedTestCase(unittest.TestCase):
+    """A refusal that did not prevent the effect.
+
+    The run already had every input to this statement and reported none of it:
+    a probe answered 4xx where the payload-free control got through, and a
+    method confirmed anyway on a channel other than that response -- the
+    read-back fetch, the listener, the observed endpoint. Whatever refused the
+    request is therefore applied after the effect, or outside its transaction,
+    which for a defender is the difference between a rule that protects
+    something and a rule that answers.
+
+    The condition that keeps it honest is the channel. An application that
+    answers 4xx from its own error path with the computed value in its body is
+    the commonest shape this could fire on, and there is no filter there to say
+    anything about -- so that case keeps its finding, as it already did, and
+    gets no line about a refusal. The test for it is below and it is the
+    important one.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    # -- the read-back channel -----------------------------------------------
+
+    def _writing_target(self, writedir, execute):
+        """A sink that runs what it is given and *then* answers 403.
+
+        The read-back handler is a different request and answers 200, which is
+        the whole point: the effect is observable where the refusal is not.
+        """
+        import os
+
+        def route(method, path, params, headers, body):
+            if path == "/download":
+                served = params.get("f", "")
+                if served and os.path.exists(served):
+                    with open(served) as handle:
+                        return 200, handle.read()
+                return 200, "no such export"
+            value = params.get("host", "")
+            if value.startswith("rcekit-control"):
+                return 200, "ok"
+            if execute:
+                pipe = sh_popen("echo LOOKUP " + value + " 2>&1")
+                pipe.read()
+                pipe.close()
+            return 403, "<html>403 Forbidden</html>"
+        return route
+
+    def _run_file(self, execute):
+        writedir = shell_writable_dir()
+        with local_target(self._writing_target(writedir, execute)) as base:
+            return self.gen.run_detection(
+                [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
+                config={"file_write_path": writedir,
+                        "file_read_url": base + "/download?f={path_enc}"},
+                timeout=15)
+
+    def test_a_write_that_landed_through_a_refused_request_is_reported(self):
+        results = self._run_file(execute=True)
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
+                        "precondition: the write must confirm through the read-back")
+        landed = [r for r in results if r.get("refused_but_landed")]
+        self.assertTrue(landed, "the refusal did not prevent the write and nothing said so")
+        for row in landed:
+            self.assertEqual(row["verdict"], "executed")
+            self.assertEqual(row["refused_but_landed"], 403)
+        joined = "\n".join(rcekit.refused_but_landed_advice(results))
+        self.assertIn("LANDED DESPITE A REFUSED REQUEST", joined)
+        self.assertIn("HTTP 403", joined)
+
+    def test_the_run_verdict_is_the_finding_and_never_blocked(self):
+        """The guard against the dangerous reading of the same run. `blocked`
+        says the sink never saw a payload, and this sink executed one."""
+        results = self._run_file(execute=True)
+        self.assertEqual(rcekit.overall_detection_verdict(results), "executed")
+
+    def test_a_refused_request_that_landed_nothing_is_just_blocked(self):
+        results = self._run_file(execute=False)
+        self.assertEqual(rcekit.overall_detection_verdict(results), "blocked",
+                         f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertFalse([r for r in results if r.get("refused_but_landed")])
+        self.assertEqual(rcekit.refused_but_landed_advice(results), [])
+
+    # -- the 4xx that carries the evidence itself ----------------------------
+
+    def test_a_4xx_carrying_the_value_in_its_own_body_is_not_this_finding(self):
+        """Post-execution validation, or an error page echoing what it choked
+        on. The finding stands -- `_refusal` has guaranteed that for releases --
+        but there is nothing here to call a refused effect: the status came from
+        the application that executed the payload, and the run never saw a
+        filter. Claiming one would be the over-reading this whole block has to
+        avoid."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-control"):
+                return 200, "ok"
+            pipe = sh_popen(value + " 2>&1")
+            out = pipe.read()
+            pipe.close()
+            return (400, f"<html>could not process: {out}</html>")
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=6, timeout=15)
+        self.assertIn("executed", {r["verdict"] for r in results},
+                      "precondition: the 4xx body carries the computed value")
+        self.assertGreater(self.gen.refused_probes, 0,
+                           "precondition: the control got through and the probe did not")
+        self.assertFalse([r for r in results if r.get("refused_but_landed")],
+                         "the evidence was in the refused response itself, so nothing "
+                         "here says the refusal failed to prevent anything")
+        self.assertEqual(rcekit.refused_but_landed_advice(results), [])
+
+    # -- the listener channel ------------------------------------------------
+
+    def test_a_callback_that_arrived_through_a_refused_request_is_reported(self):
+        """The clearest case of the finding, and the one the aggregate path
+        could not answer: `lookup` confirms from the listener, so a probe a
+        filter refused can still be the one that called back."""
+        import re as _re
+
+        listener = rcekit.OOBListener()
+
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-control"):
+                return 200, "ok"
+            match = _re.search(r"jndi:\w+://([^/]+)/", value)
+            if match:
+                listener.record("dns", "10.0.0.9", match.group(1))
+            return 403, "<html>403 Forbidden</html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [make_record(environment="java", context="raw")],
+                url=f"{base}/x?q=FUZZ", methods=["lookup"],
+                config={"oob_host": "oob.test", "oob_listener": listener,
+                        "oob_wait": 0.3},
+                timeout=15)
+        self.assertTrue(results, "precondition: the method must build probes")
+        landed = [r for r in results if r.get("refused_but_landed")]
+        self.assertTrue(landed, "a refused probe resolved the lookup and nothing said so")
+        for row in landed:
+            self.assertEqual(row["verdict"], "lookup-sink")
+            self.assertEqual(row["refused_but_landed"], 403)
+
+    def test_the_aggregate_path_records_the_probes_own_status(self):
+        """It wrote a literal `None` while the status sat in the dict the
+        refusal check beside it reads from, so three methods reported findings
+        with no status at all -- and the refused-but-landed question could not
+        be asked on the path where it matters most."""
+        listener = rcekit.OOBListener()
+
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-control"):
+                return 200, "ok"
+            return 403, "<html>403 Forbidden</html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [make_record(environment="java", context="raw")],
+                url=f"{base}/x?q=FUZZ", methods=["lookup"],
+                config={"oob_host": "oob.test", "oob_listener": listener,
+                        "oob_wait": 0.1},
+                timeout=15)
+        self.assertTrue(results, "precondition: the method must build probes")
+        self.assertEqual([r["status"] for r in results], [403] * len(results),
+                         "a row from the per-probe branch of the aggregate path must "
+                         "carry the status its own probe got")
+
+    # -- the observed channel ------------------------------------------------
+
+    def test_an_upgrade_on_the_observed_channel_reports_it_too(self):
+        """The third channel. A refusal answered the injection request and the
+        value surfaced on the endpoint the operator pointed at, so the refusal
+        did not prevent that either."""
+        stash = []
+
+        def route(method, path, params, headers, body):
+            if path == "/out":
+                return 200, "<html>" + " ".join(stash) + "</html>"
+            value = params.get("q", "")
+            if value.startswith("rcekit-control"):
+                return 200, "ok"
+            pipe = sh_popen("echo LOOKUP " + value + " 2>&1")
+            stash.append(pipe.read())
+            pipe.close()
+            return 403, "<html>403 Forbidden</html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                config={"observe_url": f"{base}/out", "observe_timeout": 0},
+                max_payloads=8, timeout=15)
+        upgraded = [r for r in results if r.get("observe_status") == "executed"]
+        self.assertTrue(upgraded, "precondition: the value must surface on the "
+                                  f"observed channel (statuses "
+                                  f"{[r.get('observe_status') for r in results]})")
+        for row in upgraded:
+            self.assertEqual(row["refused_but_landed"], 403)
+
+    # -- where the block is printed ------------------------------------------
+
+    def test_the_block_is_printed_on_a_run_that_confirmed_something(self):
+        """Everything this tool says about a refusal lives inside the branch
+        that runs when nothing was confirmed, so the one run worth saying this
+        about was the run that said nothing. Asserted through the real CLI,
+        because where the call sits is the whole of the fix."""
+        writedir = shell_writable_dir()
+        with local_target(self._writing_target(writedir, execute=True)) as base:
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--acknowledge-consent",
+                 "--verify-url", f"{base}/?host=FUZZ", "--methods", "file",
+                 "--file-write-path", writedir,
+                 "--file-read-url", base + "/download?f={path_enc}",
+                 "--verify-active-risk", "stateful",
+                 "--environments", "unix", "--contexts", "raw",
+                 "--color", "never"],
+                cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EXECUTED", result.stdout,
+                      "precondition: the run must confirm the write")
+        self.assertIn("LANDED DESPITE A REFUSED REQUEST", result.stdout)
+
+
 class RefusedAdviceTestCase(unittest.TestCase):
     """What a filtered run is told, and what it is no longer told.
 

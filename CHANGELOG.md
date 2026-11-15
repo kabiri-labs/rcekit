@@ -413,6 +413,46 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.16.0] — 2026-11-15
+
+### Added
+
+- **A refused request whose effect landed anyway says so.** A probe answered
+  4xx where the payload-free control got through, confirming a finding on a
+  channel other than that response — the read-back fetch, the listener, the
+  observed endpoint — is a separately actionable fact: whatever refused the
+  request is applied after the effect, or outside its transaction. Every input
+  to that statement was already in hand, and none of it was reported. The run
+  prints one block for it, and `--detect-json` carries `refused_but_landed`
+  with the status on each affected probe.
+
+  The block sits outside the "nothing was confirmed" branch that every other
+  refusal line lives in, which is where this had been invisible: the one run
+  worth saying it about is the run that confirmed something.
+
+  It is a property of a finding and not a verdict. No tier is added, no verdict
+  changes, and nothing new earns `executed`. What holds the claim to what was
+  observed is the third of its three conditions — the evidence has to come from
+  somewhere other than the refused response. An application answering 4xx from
+  its own error path with the computed value in its body keeps its finding, as
+  it already did, and gets no line about a refusal, because there may be no
+  filter there to say anything about. Which method reads which channel is
+  declared on the method, with a per-shape override for the two that read both:
+  `deser`'s gadget against its shape differential, and `include`'s write rung
+  against its read rungs.
+
+### Fixed
+
+- **`oob`, `lookup` and `deser` findings carried no HTTP status.** The
+  per-probe branch of the aggregate path wrote a literal `None` into every row
+  while the status sat in the dict the refusal check one line above reads from,
+  so neither the text report nor `--detect-json` showed a status for the three
+  methods that confirm from the listener. The row carries the probe's own
+  status now, and a consumer that pinned `null` there will find an integer. It
+  is also what made "refused, and the effect landed anyway" unanswerable on
+  exactly the path where the clearest case of it lives: these three confirm out
+  of band, so a probe a filter refused can still be the one that called back.
+
 ## [3.15.0] — 2026-11-08
 
 Four fixes from running 3.14.0 against a real target on a real terminal, which
@@ -4301,6 +4341,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.16.0]: https://github.com/kabiri-labs/rcekit/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/kabiri-labs/rcekit/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/kabiri-labs/rcekit/compare/v3.13.0...v3.14.0
 [3.13.0]: https://github.com/kabiri-labs/rcekit/compare/v3.12.2...v3.13.0

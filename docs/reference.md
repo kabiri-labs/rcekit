@@ -1379,6 +1379,17 @@ is the finding. `error` appears only when *nothing* reached the target, and a ru
 that built no probes is `nothing-tested` — never `negative`, which would read as
 "not vulnerable".
 
+Each probe row carries the status the target answered that probe with,
+including the rows from `oob`, `lookup` and `deser` — they confirm from the
+listener rather than from the response, and the status was dropped from their
+rows until 3.16.0. A row also carries `refused_but_landed` when that status was
+a refusal the payload-free control did not get **and** the finding was confirmed
+on a channel other than that response: the read-back fetch, the listener, or the
+observed endpoint. It is a property of the finding and not a verdict — the text
+report prints the same thing as its own block — and it claims only what was
+observed, that whatever refused the request is not preventing the effect. What
+refused it is not shown.
+
 This is the channel [`tests/bench/`](../tests/bench/README.md) reads to check
 verdicts against real vulnerable targets.
 

@@ -520,6 +520,24 @@ python rcekit.py --acknowledge-consent \
 It is deliberately minimal. If `low` isn't enough, the answer is usually a better
 injection context or a different separator, not heavier obfuscation.
 
+**A refused request is not always a prevented one.** When a probe is answered
+4xx where the payload-free control got through, and a method confirms anyway on
+a channel other than that response — the read-back fetch `file` and `write`
+use, the listener `oob` and `lookup` use, or the endpoint `--observe-url` names
+— then the effect landed while the request was being refused:
+
+```
+[detect] 1 finding(s) LANDED DESPITE A REFUSED REQUEST:
+  [file/unix/raw] HTTP 403 -> executed: target wrote and served token 'RKQWERT' (execution + write primitive)
+  -> the request was answered with that status where the payload-free control got through, and the effect was confirmed anyway on a channel other than that response -- so whatever refused the request is NOT preventing the effect: it is applied after it, or outside its transaction. What refused it is not shown.
+```
+
+Worth putting in the report in those words. The rule that answered runs after
+the effect, or outside its transaction, so it is not the thing protecting the
+endpoint — and a reader who sees only the 403 in a log will conclude the
+opposite. RCEKit does not say a WAF was there, because a status the control did
+not get is the whole of what it observed.
+
 ---
 
 ## Blind targets

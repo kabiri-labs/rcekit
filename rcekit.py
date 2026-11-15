@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.15.0"
+__version__ = "3.16.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -3507,6 +3507,49 @@ class RCEKit:
                        f"a filter refused the payload (HTTP {status}) where the "
                        "payload-free control got through -- the sink never saw it")
 
+    def _refused_but_landed(self, meth: "DetectionMethod", probe: "Probe",
+                            status: Optional[int], control_status: Optional[int],
+                            verdict: "Verdict") -> Optional[int]:
+        """The status a filter refused this probe with, when the effect landed
+        anyway -- or ``None`` when that is not what happened.
+
+        A property of a finding and deliberately not a verdict of its own. The
+        finding is whatever the method proved; this says the refusal did not
+        prevent it, which for a defender is one of the more actionable lines a
+        report can carry: the rule that answered is applied after the effect, or
+        outside its transaction.
+
+        Three conditions, and the third is the one that keeps the claim true:
+
+        * the payload was refused where the payload-free control got through --
+          :func:`payload_refused`, differential, not a status test;
+        * the verdict is a finding rather than a `negative`, `blocked` or
+          `error`, read off ``VERDICT_PRIORITY`` so a tier added later is
+          covered without this being edited;
+        * the method or the shape declares that its evidence arrives somewhere
+          other than this response.
+
+        Without the third condition the commonest thing this would fire on is an
+        application answering 4xx from its own error path with the computed value
+        in the body. Nothing there was refused by a filter -- there may be no
+        filter at all -- so "the refusal did not prevent the effect" would be a
+        claim about something the run never observed. That case keeps its
+        finding, which :meth:`_refusal` already guarantees, and gets no line
+        about a refusal. The other direction already has its own notice: a probe
+        refused and then landed by an evasion rung is reported as an escalation
+        win, and arrives here with the status the retry got rather than the
+        status the filter gave."""
+        if not payload_refused(status, control_status):
+            return None
+        if verdict.status not in VERDICT_PRIORITY:
+            return None
+        off_response = (probe.evidence_off_response
+                        if probe.evidence_off_response is not None
+                        else meth.evidence_off_response)
+        if not off_response:
+            return None
+        return status
+
     def _budget_spent(self, started_requests: int,
                       max_payloads: Optional[int]) -> bool:
         """Whether ``--max-payloads`` is used up for this call, counted in
@@ -3861,16 +3904,32 @@ class RCEKit:
                         # methods.
                         statuses = {id(p): o.status for p, o in series}
                         for probe, verdict in per_probe:
-                            refusal = self._refusal(statuses.get(id(probe)),
-                                                    control_status, verdict)
+                            probe_status = statuses.get(id(probe))
+                            refusal = self._refusal(probe_status, control_status, verdict)
                             verdict = refusal or verdict
-                            results.append({
+                            # The probe's own status, where this used to write
+                            # `None`. It was in hand all along -- the refusal
+                            # check one line up reads it -- and discarding it
+                            # left every `oob`, `lookup` and `deser` finding
+                            # with no status in the text report or in
+                            # --detect-json. It is also what made "refused, and
+                            # the effect landed anyway" unanswerable on this
+                            # path, which is where the clearest case of it is:
+                            # these three confirm from the listener, so a probe
+                            # a filter refused can still be the one that called
+                            # back.
+                            row = {
                                 "verdict": verdict.status, "detail": verdict.evidence,
-                                "status": None, "payload": probe.payload,
+                                "status": probe_status, "payload": probe.payload,
                                 "method": meth.name, "tier": probe.tier or meth.tier,
                                 "environment": record.environment, "context": record.context,
                                 "category": "detection", "expected": probe.expected,
-                            })
+                            }
+                            landed = self._refused_but_landed(
+                                meth, probe, probe_status, control_status, verdict)
+                            if landed is not None:
+                                row["refused_but_landed"] = landed
+                            results.append(row)
                         if self._budget_spent(started_requests, max_payloads):
                             return results
                         continue
@@ -3935,7 +3994,7 @@ class RCEKit:
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout,
-                            observe_trigger(config or {}))
+                            observe_trigger(config or {}), control_status)
                     seen.add(probe.payload)
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
@@ -3998,6 +4057,10 @@ class RCEKit:
                         "environment": record.environment, "context": record.context,
                         "category": "detection", "expected": probe.expected,
                     }
+                    landed = self._refused_but_landed(
+                        meth, probe, status, control_status, verdict)
+                    if landed is not None:
+                        result["refused_but_landed"] = landed
                     if probe.followup and probe.followup.get("cleanup"):
                         result["cleanup"] = probe.followup["cleanup"]
                     # Did the target hand the input back? Observed, not guessed.
@@ -4050,7 +4113,7 @@ class RCEKit:
                             observe_reached = True
                             self._observe_match(
                                 result, o_chans or ([("response body", o_body)] if o_body else []),
-                                observe_control, observe["url"])
+                                observe_control, observe["url"], control_status)
                     # Decided from the result, and only once the observed
                     # channel has had its say. A second-order sink answers on
                     # that poll and not in the response the probe drew, so
@@ -4066,10 +4129,10 @@ class RCEKit:
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout,
-                            observe_trigger(config or {}))
+                            observe_trigger(config or {}), control_status)
         return self._resolve_observed(
             results, observe, observe_control, observe_reached, timeout,
-            observe_trigger(config or {}))
+            observe_trigger(config or {}), control_status)
 
     # A probe's expected value may only be looked for on the observed channel
     # when the payload does not already carry it. That single rule is what keeps
@@ -4124,7 +4187,13 @@ class RCEKit:
                           # instance: `config_evade` set the other precedent,
                           # but hidden state on a method with three call sites
                           # is a thing a future caller forgets to set.
-                          trigger: Optional[Dict[str, Any]] = None
+                          trigger: Optional[Dict[str, Any]] = None,
+                          # Passed for the same reason ``trigger`` is, and it
+                          # has to reach :meth:`_observe_match`: an upgrade here
+                          # can land on a row whose own probe a filter refused,
+                          # and that is the third channel on which an effect can
+                          # be seen to have landed anyway.
+                          control_status: Optional[int] = None
                           ) -> List[Dict[str, Any]]:
         """Poll the observed channel and upgrade the probes whose value lands there.
 
@@ -4178,7 +4247,8 @@ class RCEKit:
                 observe_reached = True
                 searched = channels or ([("response body", body)] if body else [])
                 for result in list(pending):
-                    if self._observe_match(result, searched, observe_control, observe["url"]):
+                    if self._observe_match(result, searched, observe_control,
+                                           observe["url"], control_status):
                         pending.remove(result)
                     elif result.get("observe_status") == "in-control":
                         pending.remove(result)
@@ -4194,7 +4264,8 @@ class RCEKit:
         return results
 
     def _observe_match(self, result: Dict[str, Any], searched: List[Tuple[str, str]],
-                       observe_control: List[Tuple[str, str]], observe_url: str) -> bool:
+                       observe_control: List[Tuple[str, str]], observe_url: str,
+                       control_status: Optional[int] = None) -> bool:
         """Upgrade ``result`` if its computed value is on the observed channel.
 
         Returns whether it was upgraded. The differential is applied here and
@@ -4243,6 +4314,12 @@ class RCEKit:
                 "from that endpoint's pre-injection control and the payload never carried it, "
                 "so the observed endpoint is where it surfaced. This keeps the method's own "
                 "tier and is NOT execution")
+        # No declaration to consult here, unlike the two paths in
+        # `run_detection`: the observed endpoint is a different request by
+        # construction, so an upgrade off it is evidence that did not come from
+        # the response a filter refused.
+        if payload_refused(result.get("status"), control_status):
+            result["refused_but_landed"] = result["status"]
         return True
 
     def _observed_hit(self, expected: str,
@@ -5213,6 +5290,16 @@ class Probe:
     # when the rung became a retry; the redirect shapes are still guarded by a
     # payload test in :meth:`RCEKit._escalate` for want of this field.
     evadable: bool = True
+    # Whether THIS shape's verdict is read somewhere other than the response to
+    # this request, when that differs from its method's answer. ``None`` means
+    # "ask the method" -- :attr:`DetectionMethod.evidence_off_response`, the
+    # same ceiling-and-override pair as ``tier`` and ``safety`` above.
+    #
+    # A method is not always one channel, for the same reason it is not always
+    # one tier: `deser` reads its shape differential off the response and its
+    # gadget off the listener, and `include` judges its read rungs on what came
+    # back while its write rung is judged on a second fetch.
+    evidence_off_response: Optional[bool] = None
 
 
 @dataclass
@@ -5298,6 +5385,24 @@ class DetectionMethod:
     # own list -- the documentation tests, the benchmark's expectation
     # whitelist, and the advice printed after a clean in-band run.
     also_reports: Tuple[str, ...] = ()
+    # Whether this method's verdict is read somewhere other than the response to
+    # the probe itself -- a read-back fetch, a callback on the listener.
+    #
+    # The engine needs it to tell an effect that landed *despite* a refusal from
+    # a 4xx that carries the evidence in its own body. The first says the
+    # refusal did not prevent the effect; the second is most likely the
+    # application's own error path, which is a 4xx with no filter in it to say
+    # anything about -- see :meth:`RCEKit._refusal`, which declines to overwrite
+    # either.
+    #
+    # Declared rather than derived, and both derivations were tried.
+    # ``probe.followup`` answers for `file` and `write` and answers *no* for
+    # every callback probe, which drops the clearest case of the finding; and
+    # reading ``probe.phase`` instead puts a table of method-specific phase
+    # names in the engine, which is the hand-written list this tool keeps
+    # learning not to keep. ``Probe.evidence_off_response`` overrides this per
+    # shape. A method added later inherits ``False``, which claims nothing.
+    evidence_off_response = False
     # The ``--verify-active-risk`` rung this method needs. The payload corpus
     # has labelled its records this way from the start and the query-language
     # bridges followed; detection methods did not, so each risky one was gated
@@ -6172,6 +6277,10 @@ class FileBased(DetectionMethod):
     # that: naming the directory and the read-back URL says more than the rung.
     safety = "stateful"
     gated_by_config = True
+    # The read-back fetch is the confirmation channel, not the write response:
+    # :meth:`confirm` answers `negative` whenever ``followup_body`` is None,
+    # whatever the write request returned.
+    evidence_off_response = True
 
     def _channel(self) -> Optional[Tuple[str, str]]:
         """``(write_path, read_url_template)``, or ``None`` when not configured.
@@ -6551,6 +6660,11 @@ class FileInclude(DetectionMethod):
                                   template, leaf + ".php", leaf + ".php"),
                               "cleanup": f"remove the written file {leaf}.php from the web root",
                               "path": leaf + ".php"},
+                    # Per shape, not per method: this rung is judged on the
+                    # read-back (see :meth:`confirm`, which branches on
+                    # ``followup``) while the read rungs beside it are judged on
+                    # what came back from the probe itself.
+                    evidence_off_response=True,
                     carrier=f"{name}/depth{depth}"))
         return probes
 
@@ -6661,6 +6775,9 @@ class WriteThenExecute(DetectionMethod):
     also_reports = ("file-write",)
     safety = "stateful"
     gated_by_config = True
+    # Every one of its three verdicts is read out of the fetched file, so the
+    # response to the upload is not the channel.
+    evidence_off_response = True
 
     # One entry per file type whose interpreter is reachable by writing a file.
     # `exts` drives `--write-lang auto`; `template` takes {t1}/{t2} (boundary
@@ -7266,6 +7383,10 @@ class OobCallback(DetectionMethod):
     # that triggered it -- so no probe can be judged until the whole batch has
     # been fired and the listener has been given time to collect.
     aggregate = True
+    # The listener is the channel. A probe's own response says nothing here:
+    # :meth:`confirm_each` reads the hits and reads the body only to tell a
+    # delivery failure from a clean miss.
+    evidence_off_response = True
 
     # token -> which probe shape produced it, and the value a computed-label
     # probe asked the target to evaluate. Reporting detail only.
@@ -7531,6 +7652,8 @@ class LookupCallback(DetectionMethod):
     costly = True          # waits for a callback to arrive
     oob_needs_dns_label = True
     uses_oob_host = True
+    # The listener is the channel, exactly as for `oob`.
+    evidence_off_response = True
     # Resolving a name is intrusive; fetching from an address RCEKit did not
     # choose is not, and rides at `stateful` on the probes that do it.
     safety = "intrusive"
@@ -8326,8 +8449,12 @@ class DeserSink(DetectionMethod):
             # default tier, so it goes and the run says it went: a resolution
             # is a request the target makes and nothing more, which is an
             # effect a notice undoes.
+            # Per shape, for the same reason as `include`: the gadget's
+            # answer arrives on the listener, while the shape probes beside it
+            # are read off the response.
             probes.append(Probe(payload=self._wrap_context(record, body), expected=token,
-                                carrier=name, phase="dns", reaches_past="intrusive"))
+                                carrier=name, phase="dns", reaches_past="intrusive",
+                                evidence_off_response=True))
             if listener is not None:
                 listener.tokens[token] = {"payload": body, "category": "detection",
                                           "context": record.context}
@@ -9235,6 +9362,48 @@ def refused_advice(refused: int, total: int, statuses: Dict[int, int],
                  "on particular separators; name ones it may not carry)")
     lines.append("[detect]   --encodings ...                    (see --doctor for the "
                  "corpus encodings, for a filter that inspects the raw value)")
+    return lines
+
+
+def refused_but_landed_advice(results: List[Dict[str, Any]]) -> List[str]:
+    """What to say when a request was refused and its effect landed anyway.
+
+    The counterpart to :func:`refused_advice`, which answers the run where a
+    filter had the last word. This one answers the run where it did not: the
+    probe was refused where the payload-free control got through, and the
+    finding was confirmed on a channel other than that response. What follows
+    is a statement about the refusal and not about the finding -- whatever
+    answered is applied after the effect, or outside its transaction -- and for
+    a defender it is usually the most actionable line in the report, because it
+    says the rule that answered is not the one protecting anything.
+
+    Deliberately not a verdict. The finding keeps its own tier, and the
+    engine's :meth:`RCEKit._refused_but_landed` holds the claim to what was
+    observed. Deliberately not a WAF, either: a status the control did not get
+    is the whole of what the run knows, and it does not know what produced it.
+
+    Painted in the strongest tier among the rows it describes, read off
+    ``VERDICT_PRIORITY`` like every other ordering in this report. A property of
+    those findings borrows their colour rather than claiming one of its own."""
+    landed = [result for result in results if result.get("refused_but_landed")]
+    if not landed:
+        return []
+    shown_tiers = {result["verdict"] for result in landed}
+    heading_tier = next((tier for tier in VERDICT_PRIORITY if tier in shown_tiers),
+                        "needs-review")
+    lines = ["\n[detect] " + paint(
+        f"{len(landed)} finding(s) LANDED DESPITE A REFUSED REQUEST:", heading_tier)]
+    for result in landed:
+        shown = display_result(result)
+        at = f" at {shown['point']}" if shown.get("point") else ""
+        lines.append(f"  [{shown['method']}/{shown['environment']}/"
+                     f"{shown['context']}]{at} HTTP {shown['refused_but_landed']} "
+                     f"-> {shown['verdict']}: {shown['detail']}")
+    lines.append("  -> the request was answered with that status where the payload-free "
+                 "control got through, and the effect was confirmed anyway on a channel "
+                 "other than that response -- so whatever refused the request is NOT "
+                 "preventing the effect: it is applied after it, or outside its "
+                 "transaction. What refused it is not shown.")
     return lines
 
 
@@ -12719,6 +12888,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     if shown.get("cleanup"):
                         print(f"      cleanup: {shown['cleanup']}")
                 print(f"  -> {closing}")
+            # Printed here, outside the `if not executed:` below, and that is
+            # the whole reason this block exists as its own thing. Everything
+            # the tool says about a refusal today lives in that branch, so the
+            # one run where a refusal is worth a line of its own -- the run that
+            # confirmed something anyway -- was the run that got none.
+            for line in refused_but_landed_advice(results):
+                print(line)
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
                 # verdicts below were decided without ever reading the place the
