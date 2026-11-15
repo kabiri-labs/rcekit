@@ -4,7 +4,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.15.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.16.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -603,6 +603,15 @@ you asked for a second-order oracle and the observed endpoint never answered, th
 probe verdicts still stand — but the run tells you they were decided without ever
 reading the channel you pointed it at, rather than letting them pass for a
 second-order negative.
+
+The mirror case is reported too, and it is the one a defender can act on
+fastest. If a request was refused where the payload-free control got through,
+and the finding was confirmed anyway on a channel other than that response — the
+read-back fetch, the listener, the observed endpoint — then whatever refused the
+request is **not preventing the effect**: it is applied after it, or outside its
+transaction. That is a property of the finding rather than a verdict of its own,
+so the finding keeps its tier and `--detect-json` carries `refused_but_landed`
+beside it. What refused the request is not shown, because the run never saw it.
 
 ---
 
