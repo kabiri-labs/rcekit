@@ -413,6 +413,68 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.17.0] — 2026-11-15
+
+### Fixed
+
+- **A timeout the payload-free control did not share was reported as
+  `error`.** `VERDICT_MEANING` spells `error` out as "nothing reached the
+  target, so nothing was tested", and a request that hung because the injected
+  command hung did reach it. Every results-based method collapsed that case:
+  `_confirm_computed` answered `error` on `status is None` and asked nothing
+  further.
+
+  A probe that spends its whole request timeout is now asked about. One
+  payload-free control goes out immediately after it, and where that control
+  answers promptly the hang is attributable to the payload rather than to
+  reachability: `needs-review`, with both timings in the evidence line and
+  `--methods time` named as the step that turns it into a measured
+  `timing-sink` or rules it out. `reflected`, `eval` and `argv` declare it in
+  `also_reports`, since the oracle they share is where it is decided.
+
+  Three guards hold it to that, and they are the point rather than the
+  trimming. The control is sent *after* the probe, not read off the run's own
+  control, which is minutes old by then -- a target that fell over in between
+  would otherwise make every probe read as a signal. A control that was slow
+  too, or that did not arrive either, keeps the verdict at `error`. And a
+  failure that was never a timeout is told apart by the clock rather than by
+  matching the exception text: a timeout spends its whole budget where a
+  refused connection comes back in milliseconds, both arrive as
+  `status is None`, and a list of exception spellings would be the
+  hand-written list this tool keeps learning not to keep.
+
+  One extra request per timed-out probe, spent only on those, charged to
+  `delivered_probes` and gated on `--max-payloads` exactly as the evasion retry
+  is.
+
+  The guard that pinned `needs-review` to one reporter was widened for this,
+  deliberately and in the direction it allows. What 3.0.0 established is that a
+  *settled measurement* must not be reported as a candidate -- it took
+  `timing-sink`, `file-write` and `evaluation-sink` out for that reason -- and a
+  hang `--methods time` has still to settle is a candidate in exactly the sense
+  `deser`'s fingerprint is. The set is pinned as tightly as before, the reason
+  is now in the test's own words, and an assertion was added rather than
+  loosened: `needs-review` is nobody's ceiling.
+
+- **`Observation.baseline` was declared, documented and never written.** It had
+  been the field a delay is differenced against for four releases while the
+  engine discarded the control's elapsed time, so any oracle reading it read
+  `0.0`. `time` was unaffected -- it samples its own baseline locally and
+  medians it -- which is exactly why nothing caught it: the one method the
+  field was named for does not use it. It now carries the contemporaneous
+  control's elapsed, beside a new `control_status`, and `timed_out` says
+  whether the probe spent its timeout.
+
+- **A write that landed while its own request hung was reported as `error`.**
+  `file`, `write` and `include`'s write rung all read `status is None` before
+  looking at the file they had already fetched back -- and that fetch fires
+  whatever the injecting request answered, deliberately, so the token or the
+  product was sitting in hand. The read-back is consulted first now, which is
+  the rule `_refusal` states one door along: a 4xx does not unmake what the run
+  observed, and neither does a delivery that failed. `error` is for a run with
+  nothing to go on. A confirmation reached this way says in its evidence line
+  that the request never answered and the read-back is the whole of it.
+
 ## [3.16.0] — 2026-11-15
 
 ### Added
@@ -4341,6 +4403,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.17.0]: https://github.com/kabiri-labs/rcekit/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/kabiri-labs/rcekit/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/kabiri-labs/rcekit/compare/v3.14.0...v3.15.0
 [3.14.0]: https://github.com/kabiri-labs/rcekit/compare/v3.13.0...v3.14.0

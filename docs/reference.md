@@ -84,8 +84,8 @@ starting point — this page is for looking things up once you know what you wan
 
 | `--methods` value | Confirms | Rung | Tier it can reach |
 |---|---|---|---|
-| `reflected` | OS command injection, via computed arithmetic | `safe` | `executed` |
-| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `safe` | `executed` |
+| `reflected` | OS command injection, via computed arithmetic | `safe` | `executed`, or `needs-review` for a probe that hung where a payload-free control sent immediately after did not |
+| `eval` | SSTI / SpEL / OGNL / Groovy / raw `eval()`, via a computed product | `safe` | `executed`, or `needs-review` for a probe that hung where a payload-free control sent immediately after did not |
 | `file` | Execution + a write primitive, via write-and-fetch | `stateful` † | `executed` |
 | `write` | A write primitive proven to be RCE, by executing the written file | `stateful` † | `executed`, or `file-write` for a write that is served but not interpreted |
 | `oob` | Blind execution, via a DNS/HTTP callback carrying a per-probe token | `intrusive` | `executed` |
@@ -93,7 +93,7 @@ starting point — this page is for looking things up once you know what you wan
 | `time` | Blind execution, via a `0/N/2N` regression | `safe` | `timing-sink` only — proven, and not execution |
 | `deser` | That the endpoint **deserializes** attacker data — never RCE | `safe` | `deserialization-sink`, or `needs-review` for the shape fingerprint |
 | `boolean` | A sink that **evaluates a predicate and renders nothing of it** (MongoDB `$where`, filter and rule expressions), via a response-shape differential across randomised true/false comparisons. The `OR` connectives need `stateful`; everything else is inert | `safe` | `evaluation-sink` only — proven, and not execution |
-| `argv` | **Argument injection** into a program spawned with no shell: the value is one of its arguments, so every separator is inert, and an option it names runs a command. Builds nothing until `--argv-binary` names the program, because the option that does this is specific to it | `safe` | `executed` |
+| `argv` | **Argument injection** into a program spawned with no shell: the value is one of its arguments, so every separator is inert, and an option it names runs a command. Builds nothing until `--argv-binary` names the program, because the option that does this is specific to it | `safe` | `executed`, or `needs-review` for a probe that hung where a payload-free control sent immediately after did not |
 | `include` | **File inclusion**: the sink opens a path the request names and returns what it read, and given `--include-write-url` it also writes a computed one-liner *through* that sink and fetches the file back. That write goes at `stateful`, declared on the shape rather than on the method, and every depth writes its own file and computes its own product so a depth that failed cannot confirm on one that worked. Both traversal shapes are sent: whether the path must name `pearcmd.php` or `pearcmd` depends on whether the sink appends an extension of its own, and at most one can confirm on a given sink. Sweeps traversal depth from an absolute path downward and reads through a PHP stream filter as well as plainly; `--include-wrappers` narrows which wrappers go out, and `--verify-active-risk` decides whether a credential-adjacent file is read at all | `safe` | `file-read` for a read — proven, and not execution, because its evidence is a signature known in advance rather than a value the target computed; **`executed`** for a file written through the sink and interpreted, and `file-write` where it is served verbatim. `--include-write-param` names the parameter the sink reads its path from, default `lang` |
 
 **Rung** is the `--verify-active-risk` tier a method needs. A method above the
@@ -1389,6 +1389,14 @@ observed endpoint. It is a property of the finding and not a verdict — the tex
 report prints the same thing as its own block — and it claims only what was
 observed, that whatever refused the request is not preventing the effect. What
 refused it is not shown.
+
+`error` carries a narrower claim than it reads. It means nothing reached the
+target, so a probe that spent its whole request timeout is asked about instead:
+a payload-free control goes out immediately after, and where that one answers
+promptly the hang is attributed to the payload and the row is `needs-review`
+rather than `error`. Where the control was slow too, or did not arrive either,
+the row stays `error`. That costs one request per timed-out probe, spent only on
+probes that timed out and bounded by `--max-payloads` like any other.
 
 This is the channel [`tests/bench/`](../tests/bench/README.md) reads to check
 verdicts against real vulnerable targets.

@@ -6549,24 +6549,55 @@ class MethodSafetyRungTestCase(unittest.TestCase):
 
     def test_the_weaker_tiers_a_method_reports_are_the_ones_it_says(self):
         # Pinned against the code that emits them, so the declaration cannot
-        # quietly stop being true.
+        # quietly stop being true. The three computed-value methods arrived in
+        # 3.17.0 with the timeout their shared oracle reports -- the test below
+        # is where that entry is justified, and where the rule for the next one
+        # is written down.
         declared = {name: set(method.also_reports)
                     for name, method in rcekit.DETECTION_METHODS.items()
                     if method.also_reports}
         self.assertEqual(declared, {"write": {"file-write"},
                                     "deser": {"needs-review"},
-                                    "include": {"file-read", "file-write"}})
+                                    "include": {"file-read", "file-write"},
+                                    "reflected": {"needs-review"},
+                                    "eval": {"needs-review"},
+                                    "argv": {"needs-review"}})
 
-    def test_needs_review_is_left_with_one_reporter(self):
+    def test_needs_review_is_left_to_the_signals_that_really_are_candidates(self):
         """The point of the 3.0.0 retier, as a property rather than a rename.
 
         `needs-review` had four reporters and three of them had measured their
-        answer. It is now `deser`'s shape fingerprint alone -- the one signal
-        that really is a candidate -- and that is what makes the word mean
-        something again. A settled measurement arriving here is the regression."""
+        answer. The retier took those three out: `timing-sink`, `file-write`
+        and `evaluation-sink` are settled measurements, and reporting one as a
+        candidate was the tool declaring itself unsure of something it had
+        proven -- a `file-write` finding printed the words "ARBITRARY FILE
+        WRITE" under a verdict that said the opposite. **A settled measurement
+        arriving here is the regression**, and that is the property this pins.
+        The set is how it pins it, not what it is about.
+
+        Widened once, deliberately, in 3.17.0, and the direction is the whole
+        of why that was allowed. The three computed-value methods report it for
+        a probe that hung where a payload-free control sent immediately after
+        did not: a real signal, not proof, which `--methods time` can turn into
+        a measurement or rule out. That is a candidate in exactly the sense
+        `deser`'s shape fingerprint is, and nothing measured moved in.
+
+        So an entry added here is a claim about the *signal* and not about the
+        method. If what it reports has been measured, it belongs in a tier of
+        its own, and this test is the place that says so rather than the place
+        that gets edited."""
         reporters = {name for name, method in rcekit.DETECTION_METHODS.items()
                      if "needs-review" in {method.tier} | set(method.also_reports)}
-        self.assertEqual(reporters, {"deser"})
+        self.assertEqual(reporters, {"deser", "reflected", "eval", "argv"})
+        # The half of the same invariant a set of reporters cannot state:
+        # `needs-review` is nobody's ceiling. A method whose strongest possible
+        # answer is a candidate is a method that cannot prove anything, and
+        # every other tier here is named for what the target did.
+        self.assertEqual(
+            [name for name, method in rcekit.DETECTION_METHODS.items()
+             if method.tier == "needs-review"], [],
+            "a method now tops out at a candidate, which is not a tier a "
+            "finding can be reported from")
 
     def test_a_probe_inherits_its_method_rung_unless_it_names_its_own(self):
         method = rcekit.LookupCallback(RCEKit(), {"oob_host": "x.example"})
@@ -9558,6 +9589,152 @@ class RefusedButLandedTestCase(unittest.TestCase):
         self.assertIn("EXECUTED", result.stdout,
                       "precondition: the run must confirm the write")
         self.assertIn("LANDED DESPITE A REFUSED REQUEST", result.stdout)
+
+
+class TimeoutAttributionTestCase(unittest.TestCase):
+    """A timeout the payload-free control did not share.
+
+    `error` means nothing reached the target, and `VERDICT_MEANING` says so in
+    those words. A request that hung because the injected command hung did reach
+    it, and reporting that as `error` is the false clean this project guards
+    against everywhere else -- arriving by the one route nothing watched.
+
+    What separates the two is a payload-free request sent *immediately after*
+    the probe. The run's own control is minutes old by then, so a target that
+    fell over in between would otherwise make every probe read as a signal.
+    That is the direction these tests push on: three of the eight below exist to
+    keep a connectivity problem reading as a connectivity problem.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    def _hanging_target(self, probe_sleep, control_sleep):
+        """A sink that hangs on a payload and answers the control in
+        ``control_sleep`` seconds."""
+        import time as _time
+
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-"):
+                _time.sleep(control_sleep)
+                return 200, "ok"
+            _time.sleep(probe_sleep)
+            return 200, "ok"
+        return route
+
+    def _run(self, probe_sleep, control_sleep, max_payloads=4, timeout=2):
+        with local_target(self._hanging_target(probe_sleep, control_sleep)) as base:
+            return self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["reflected"],
+                max_payloads=max_payloads, timeout=timeout)
+
+    def test_a_probe_that_hung_where_the_control_did_not_is_a_candidate(self):
+        results = self._run(probe_sleep=6, control_sleep=0)
+        self.assertTrue(results, "precondition: probes must have been built")
+        self.assertEqual({r["verdict"] for r in results}, {"needs-review"},
+                         f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "needs-review",
+                         "a run of attributable timeouts still collapsed to error, which "
+                         "reads as 'nothing was tested'")
+        detail = results[0]["detail"]
+        self.assertIn("hung for", detail)
+        self.assertIn("answered in", detail)
+        self.assertIn("--methods time", detail,
+                      "the operator is not told what turns this into a measurement")
+
+    def test_the_contemporaneous_control_costs_one_request_per_timeout(self):
+        results = self._run(probe_sleep=6, control_sleep=0)
+        self.assertEqual(self.gen.delivered_probes, 2 * len(results),
+                         "one payload-free control per timed-out probe, and no more")
+
+    def test_a_control_that_timed_out_too_stays_an_error(self):
+        results = self._run(probe_sleep=6, control_sleep=6)
+        self.assertEqual({r["verdict"] for r in results}, {"error"},
+                         "the target stopped answering anything, which is connectivity "
+                         f"and not a signal: {[r['detail'] for r in results]}")
+
+    def test_a_control_that_was_merely_slow_stays_an_error(self):
+        """No over-claiming on a target that is slow all round. The comparison
+        is an order of magnitude, so a control at half the probe's time is not
+        a differential."""
+        results = self._run(probe_sleep=6, control_sleep=1)
+        self.assertEqual({r["verdict"] for r in results}, {"error"},
+                         f"details were {[r['detail'] for r in results]}")
+
+    def test_a_connection_that_failed_fast_is_not_a_timeout(self):
+        """A refused connection and an expired timeout both arrive as
+        `status is None` with the exception's own words in the body. They are
+        told apart by the clock -- a timeout spends its whole budget -- rather
+        than by matching the exception text, and nothing is spent asking."""
+        results = self.gen.run_detection(
+            [self.rec], url="http://127.0.0.1:9/x?q=FUZZ", methods=["reflected"],
+            max_payloads=3, timeout=5)
+        self.assertTrue(results, "precondition: probes must have been built")
+        self.assertEqual({r["verdict"] for r in results}, {"error"})
+        self.assertEqual(self.gen.delivered_probes, len(results),
+                         "a control was sent for a failure that was never a timeout")
+
+    def test_nothing_is_spent_once_the_budget_is_gone(self):
+        results = self._run(probe_sleep=6, control_sleep=0, max_payloads=1)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(self.gen.delivered_probes, 1,
+                         "the extra control was sent past --max-payloads")
+        self.assertEqual(results[0]["verdict"], "error",
+                         "with no control to difference against, the honest answer is error")
+
+    def test_a_candidate_timeout_does_not_outrank_a_finding(self):
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "needs-review"}, {"verdict": "executed"}]),
+            "executed")
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "needs-review"}, {"verdict": "negative"}]),
+            "needs-review")
+
+    # -- the evidence was already in hand ------------------------------------
+
+    def test_a_write_that_landed_while_its_request_hung_still_confirms(self):
+        """`file`'s read-back fires whatever the write request answered, so a
+        write that landed while its own request hung has its token in hand. The
+        status gate used to be read first and reported `error` about a file that
+        was on the target and readable."""
+        import os
+        import time as _time
+
+        writedir = shell_writable_dir()
+
+        def route(method, path, params, headers, body):
+            if path == "/download":
+                served = params.get("f", "")
+                if served and os.path.exists(served):
+                    with open(served) as handle:
+                        return 200, handle.read()
+                return 200, "no such export"
+            value = params.get("host", "")
+            if value.startswith("rcekit-"):
+                return 200, "ok"
+            pipe = sh_popen("echo LOOKUP " + value + " 2>&1")
+            pipe.read()
+            pipe.close()
+            # The write has landed; now the request hangs and is cut off.
+            _time.sleep(6)
+            return 200, "ok"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/?host=FUZZ", methods=["file"],
+                config={"file_write_path": writedir,
+                        "file_read_url": base + "/download?f={path_enc}"},
+                max_payloads=4, timeout=2)
+        executed = [r for r in results if r["verdict"] == "executed"]
+        self.assertTrue(executed,
+                        "the file was written and served back, and the run reported "
+                        f"{[r['verdict'] for r in results]}")
+        self.assertIn("never answered", executed[0]["detail"],
+                      "the evidence line should say the read-back is the whole of it")
 
 
 class RefusedAdviceTestCase(unittest.TestCase):
