@@ -3999,6 +3999,35 @@ class RCEKit:
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
                     self._note_progress(meth, record)
+                    # A followup fetch (file-based self-OOB): retrieve the file the
+                    # probe asked the target to write. Its body is the confirmation
+                    # channel, so a blocked/failed fetch stays unconfirmed.
+                    #
+                    # Before anything else is sent, and that order is load
+                    # bearing rather than tidy. The timeout control below goes
+                    # out through the same delivery as the probe, and for
+                    # `write` the delivery *is* the write: the injection point
+                    # carries the file's content. Sent first, it overwrote the
+                    # file the probe had just stored. Measured against a storing
+                    # endpoint whose upload hung and whose read-back interprets
+                    # the file: `--max-payloads 1` left no budget for the
+                    # control and reported `executed`, `--max-payloads 2` let it
+                    # fire and reported `negative`, with the read-back serving
+                    # `rcekit-after-...`. Worse than the verdict, the artifact
+                    # the finding names was gone, and its cleanup line pointed
+                    # at a file holding RCEKit's own canary.
+                    #
+                    # The rule is the one :meth:`FileBased.confirm` states for
+                    # the same reason one layer up: what the run has already
+                    # observed is read before anything further touches the
+                    # target.
+                    followup_body: Optional[str] = None
+                    if probe.followup and probe.followup.get("url"):
+                        f_status, f_body, _ = self._fire(
+                            "", probe.followup["url"], "GET", None,
+                            self._followup_headers(url, probe.followup["url"], headers),
+                            "raw", "raw", timeout)
+                        followup_body = f_body if f_status is not None else None
                     # A probe that timed out is asked about, not written off.
                     # `error` says nothing reached the target, and a request
                     # that hung because the injected command hung did reach it.
@@ -4008,14 +4037,16 @@ class RCEKit:
                     # over in between would have every probe read as a signal.
                     #
                     # One request, and only for a probe that spent its whole
-                    # timeout. Charged to the same meter as the evasion retry,
-                    # and gated on the budget for the same reason -- a probe
-                    # cannot be known to have timed out until it has been sent,
-                    # so the bound would otherwise overshoot by one on the last
-                    # probe of a capped run.
+                    # timeout *and* whose method reads the answer. Charged to
+                    # the same meter as the evasion retry, and gated on the
+                    # budget for the same reason -- a probe cannot be known to
+                    # have timed out until it has been sent, so the bound would
+                    # otherwise overshoot by one on the last probe of a capped
+                    # run.
                     timed_out = status is None and elapsed >= timeout * 0.9
                     after_elapsed, after_status = 0.0, None
-                    if timed_out and not self._budget_spent(started_requests, max_payloads):
+                    if (timed_out and meth.reads_timeout_differential
+                            and not self._budget_spent(started_requests, max_payloads)):
                         after_status, _ab, _ac, after_elapsed = delivery.send(
                             f"rcekit-after-{self._generate_canary()}", timeout)
                         self.delivered_probes += 1
@@ -4023,16 +4054,6 @@ class RCEKit:
                         # retry beside it: it is a request the target received,
                         # and the meter the operator watches is traffic.
                         self._note_progress(meth, record)
-                    # A followup fetch (file-based self-OOB): retrieve the file the
-                    # probe asked the target to write. Its body is the confirmation
-                    # channel, so a blocked/failed fetch stays unconfirmed.
-                    followup_body: Optional[str] = None
-                    if probe.followup and probe.followup.get("url"):
-                        f_status, f_body, _ = self._fire(
-                            "", probe.followup["url"], "GET", None,
-                            self._followup_headers(url, probe.followup["url"], headers),
-                            "raw", "raw", timeout)
-                        followup_body = f_body if f_status is not None else None
                     obs = Observation(status=status, body=body, control_body=control_body,
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels,
@@ -5451,6 +5472,20 @@ class DetectionMethod:
     # own list -- the documentation tests, the benchmark's expectation
     # whitelist, and the advice printed after a clean in-band run.
     also_reports: Tuple[str, ...] = ()
+    # Whether this method's oracle reads a timeout differential: a probe that
+    # spent its whole request timeout, against a payload-free control the engine
+    # sends immediately after it. Only a method that says yes is worth that
+    # control, because the control is a request -- and through `write`'s
+    # delivery it is a *write*, which overwrote the file the probe had just
+    # stored until this gate existed.
+    #
+    # Declared rather than derived from `evidence_off_response` below. That
+    # attribute answers yes for exactly the methods this has to skip today, and
+    # it would be a coincidence rather than a reason: it says where a verdict is
+    # read, not whether a hang can be attributed. A method added later that
+    # reads a second channel *and* wants the attribution would silently lose it,
+    # which is the same bug one step along.
+    reads_timeout_differential = False
     # Whether this method's verdict is read somewhere other than the response to
     # the probe itself -- a read-back fetch, a callback on the listener.
     #
@@ -6118,6 +6153,9 @@ class ReflectedMath(DetectionMethod):
     that did exactly that, and what it was measured against."""
     name = "reflected"
     tier = "executed"
+    # Its oracle is :meth:`_confirm_computed`, which reads the timeout
+    # differential the engine measures for it.
+    reads_timeout_differential = True
     # A probe that hung where a payload-free control sent immediately after did
     # not. Declared here because three places read this attribute rather than
     # the oracle -- see :attr:`DetectionMethod.also_reports` -- and the oracle
@@ -7364,6 +7402,9 @@ class EvalExpr(DetectionMethod):
     de-duplication fires each syntax once per context."""
     name = "eval"
     tier = "executed"
+    # Its oracle is :meth:`_confirm_computed`, which reads the timeout
+    # differential the engine measures for it.
+    reads_timeout_differential = True
     # See `reflected`: the shared computed-value oracle reports a timeout the
     # payload-free control did not share.
     also_reports = ("needs-review",)
@@ -7980,6 +8021,9 @@ class ArgvInjection(DetectionMethod):
     name = "argv"
     tier = "executed"
     safety = "safe"
+    # Its oracle is :meth:`_confirm_computed`, which reads the timeout
+    # differential the engine measures for it.
+    reads_timeout_differential = True
     # See `reflected`: the shared computed-value oracle reports a timeout the
     # payload-free control did not share.
     also_reports = ("needs-review",)

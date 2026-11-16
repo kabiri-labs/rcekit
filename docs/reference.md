@@ -1396,7 +1396,11 @@ a payload-free control goes out immediately after, and where that one answers
 promptly the hang is attributed to the payload and the row is `needs-review`
 rather than `error`. Where the control was slow too, or did not arrive either,
 the row stays `error`. That costs one request per timed-out probe, spent only on
-probes that timed out and bounded by `--max-payloads` like any other.
+probes that timed out under a method whose oracle reads it -- `reflected`,
+`eval` and `argv` -- and bounded by `--max-payloads` like any other. The methods
+that confirm from a second request or from the listener do not pay it: their
+verdict does not rest on this response, and for `write` the delivery itself
+stores what it is sent.
 
 This is the channel [`tests/bench/`](../tests/bench/README.md) reads to check
 verdicts against real vulnerable targets.

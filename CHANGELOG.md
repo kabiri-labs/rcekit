@@ -443,9 +443,16 @@ formats, or the template schema.
   `status is None`, and a list of exception spellings would be the
   hand-written list this tool keeps learning not to keep.
 
-  One extra request per timed-out probe, spent only on those, charged to
-  `delivered_probes` and gated on `--max-payloads` exactly as the evasion retry
-  is.
+  One extra request per timed-out probe, spent only on those and only for a
+  method whose oracle reads the answer, charged to `delivered_probes` and gated
+  on `--max-payloads` exactly as the evasion retry is. That restriction is not
+  an optimisation: `write`'s injection point is the file's *content*, so a
+  payload-free request through its delivery is a write, and sent before the
+  read-back it overwrote the file the probe had just stored -- `executed`
+  became `negative` on an executable upload directory, with the read-back
+  serving the canary. The probe's own evidence is now read before anything
+  further touches the target, which is the rule `file`'s oracle already states
+  one layer up.
 
   The guard that pinned `needs-review` to one reporter was widened for this,
   deliberately and in the direction it allows. What 3.0.0 established is that a

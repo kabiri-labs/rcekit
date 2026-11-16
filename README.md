@@ -854,7 +854,7 @@ and `deserialization-sink` are confirmed sinks with known remediation, and
 one that is a *lead* rather than a finding: identify the evaluator before it goes
 in a report. `needs-review` is the exception: it is the parser fingerprint `deser`
 reads when it has no gadget to fire, a probe that hung where a payload-free
-control sent immediately after did not — any results-based method can report
+control sent immediately after did not — `reflected`, `eval` and `argv` report
 that one, since a hang is a fact about the request rather than about the sink —
 and, off this table, the static signature `--verify-chain` matches in band
 without a control. All three are real candidates and **not proof** — review them
