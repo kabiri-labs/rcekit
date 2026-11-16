@@ -9696,6 +9696,54 @@ class TimeoutAttributionTestCase(unittest.TestCase):
 
     # -- the evidence was already in hand ------------------------------------
 
+    def test_the_control_is_not_sent_through_a_delivery_that_stores_it(self):
+        """`write`'s injection point is the file's *content*, so a request
+        through its delivery is a write -- including a payload-free one.
+
+        Sent before the read-back, the control overwrote the file the probe had
+        just stored and the run reported `negative` about an executable upload
+        directory. Measured at the time: `--max-payloads 1` left no budget for
+        the control and reported `executed`, `--max-payloads 2` let it fire and
+        reported `negative`, with the read-back serving `rcekit-after-...`.
+
+        Two things close it and this pins both. The control goes out only for a
+        method whose oracle reads it, and the probe's own evidence is read
+        before anything further touches the target."""
+        import re as _re
+        import time as _time
+
+        stored = {"body": ""}
+
+        def route(method, path, params, headers, body):
+            if path == "/probe.jsp":
+                # "Interprets" the stored file, which is the minimum a target
+                # has to do for `write` to reach `executed`.
+                served = _re.sub(r"(\d+)\*(\d+)",
+                                 lambda m: str(int(m.group(1)) * int(m.group(2))),
+                                 stored["body"])
+                return 200, served.replace("<%=", "").replace("%>", "")
+            stored["body"] = body or ""
+            # The store landed; now the response hangs and is cut off.
+            _time.sleep(6)
+            return 200, "stored"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [make_record(environment="java", context="raw")],
+                url=f"{base}/store", methods=["write"], method="POST",
+                data="FUZZ", body_location="raw",
+                config={"write_read_url": f"{base}/probe.jsp",
+                        "write_langs": ("jsp",)},
+                max_payloads=2, timeout=2)
+        self.assertTrue([r for r in results if r["verdict"] == "executed"],
+                        "the file was written and interpreted, and the run reported "
+                        f"{[(r['verdict'], r['detail'][:60]) for r in results]}")
+        self.assertEqual(self.gen.delivered_probes, len(results),
+                         "a payload-free control went out through a delivery that "
+                         "stores what it is given")
+        self.assertIn("<%=", stored["body"],
+                      "the probe's own file is no longer what the target holds")
+
     def test_a_write_that_landed_while_its_request_hung_still_confirms(self):
         """`file`'s read-back fires whatever the write request answered, so a
         write that landed while its own request hung has its token in hand. The
