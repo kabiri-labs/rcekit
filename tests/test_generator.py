@@ -6099,8 +6099,8 @@ class TierVocabularyTestCase(unittest.TestCase):
         """The other direction. A tier spelled one way on the class and another
         in the branch that emits it is two verdicts, and only one is documented."""
         documented = {rcekit.EXECUTION_TIER, "timing-sink", "file-write",
-                      "file-read", "evaluation-sink", "deserialization-sink",
-                      "lookup-sink",
+                      "file-read", "evaluation-sink", "syntax-sink",
+                      "deserialization-sink", "lookup-sink",
                       "needs-review", "negative", "inconclusive", "blocked",
                       "error", "nothing-tested"}
         emitted = set()
@@ -6175,6 +6175,12 @@ class NonExecutionSectionTestCase(unittest.TestCase):
         "file-write",
         "file-read",
         "evaluation-sink",
+        # Below `evaluation-sink` and above the two different-subsystem sinks.
+        # It answers the execution question and answers it weakly: an evaluator
+        # that consumed a predicate is a stronger statement about the same
+        # question than a parser that read the syntax, and neither is a sink
+        # whose remediation is somebody else's subsystem.
+        "syntax-sink",
         "deserialization-sink",
         "lookup-sink",
         "needs-review",
@@ -6947,6 +6953,7 @@ class BlindSinkAdviceTestCase(unittest.TestCase):
         "file-read": ("file read", "file-read"),
         "evaluation-sink": ("evaluation sink", "evaluation-sink"),
         "lookup-sink": ("lookup sink", "lookup-sink"),
+        "syntax-sink": ("syntax sink", "syntax-sink"),
         "deserialization-sink": ("deserialization sink", "deserialization-sink"),
     }
     # A denial is the opposite of a claim to confirm, so it comes out before the
@@ -8421,7 +8428,11 @@ class DetectionQuestionTestCase(unittest.TestCase):
     # twice: a test that recomputes the grouping rule agrees with the rule
     # whatever the rule became.
     EXPECTED_GROUPS = (
-        ("reflected", "eval", "file", "write", "oob", "time", "boolean", "argv"),
+        ("reflected", "eval", "file", "write", "oob", "time", "boolean", "argv",
+         # `syntax` asks the execution question and earns a weak answer to it,
+         # which is the whole reason it is here: a point where execution is
+         # already proven skips it, and one that is clean still gets it.
+         "syntax"),
         ("lookup",),
         ("deser",),
         ("include",),
@@ -9360,6 +9371,257 @@ class CallbackMethodRefusalTestCase(unittest.TestCase):
                          sum(self.gen.refused_statuses.values()))
         self.assertGreaterEqual(self.gen.delivered_probes, self.gen.refused_probes)
         self.assertGreaterEqual(self.gen.delivered_probes, len(results))
+
+
+class SyntaxDifferentialTestCase(unittest.TestCase):
+    """The valid/invalid differential, and the five ways it can lie.
+
+    Three of the tests below exist to keep it quiet rather than to make it
+    speak, and one of those is the reason the method is shaped the way it is: a
+    filter that refuses malformed syntax and lets the well-formed form through
+    produces a perfect differential with no parser behind it, on exactly the
+    hardened targets this tool is aimed at.
+    """
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    # (opener, closer) per form, for the fixtures below.
+    DELIMS = (("${", "}"), ("{{", "}}"), ("#{", "}"), ("%{", "}"),
+              ("<%=", "%>"), ("@(", ")"))
+
+    @classmethod
+    def _malformed(cls, value):
+        """What a parser would choke on: an opening delimiter with no closer
+        after it. A brace count was tried first and was too coarse -- it read
+        `@(a*b` as well formed and a quoted wrapper's own `#` as a closer, so
+        the fixture answered alike where a parser would not."""
+        for opener, closer in cls.DELIMS:
+            at = value.find(opener)
+            if at < 0:
+                continue
+            if closer not in value[at + len(opener):]:
+                return True
+        return False
+
+    # The one pair a context wrapper repairs. `$(` ... `)` closes the broken
+    # `@(a*b` with its own paren, so in that context the pair is not a pair any
+    # more and the form answers `negative`. Measured rather than reasoned, and
+    # it is a false negative rather than a false claim -- the direction this
+    # project will take when it has to pick one.
+    REPAIRED = ("@()", "shell_subshell")
+
+    def _run(self, route, **config):
+        with local_target(route) as base:
+            return self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["syntax"],
+                config=config, timeout=15)
+
+    # -- what it is for ------------------------------------------------------
+
+    def test_a_target_that_parses_the_syntax_is_reported(self):
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            if self._malformed(value):
+                return 500, ("<html><body><h1>Internal Server Error</h1>"
+                             "<pre>TemplateSyntaxError</pre></body></html>")
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route)
+        self.assertTrue(results, "precondition: the method must build probes")
+        claimed = {(r["context"], r["verdict"]) for r in results}
+        for context, verdict in claimed:
+            if (results[0] and verdict == "negative"
+                    and context == self.REPAIRED[1]):
+                continue
+            self.assertEqual(
+                verdict, "syntax-sink",
+                f"verdicts were {[(r['payload'], r['verdict']) for r in results]}")
+        detail = next(r["detail"] for r in results if r["verdict"] == "syntax-sink")
+        self.assertIn("something on the target parsed this syntax", detail)
+        self.assertIn("nothing here says it evaluates what it parses", detail,
+                      "the finding has to disclaim the evaluator it does not prove")
+
+    def test_a_wrapper_that_repairs_the_broken_half_reports_negative(self):
+        """The known limit, pinned so it cannot drift into a claim. A subshell
+        context closes `@(a*b` with its own paren, so that form's two halves
+        are both well formed there and the honest answer is `negative`."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            if self._malformed(value):
+                return 500, "<html><body><h1>Internal Server Error</h1></body></html>"
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route)
+        repaired = [r for r in results
+                    if r["context"] == self.REPAIRED[1] and self.REPAIRED[0] in r["detail"]]
+        self.assertTrue(repaired, "the @() form was not measured in a subshell context")
+        self.assertEqual({r["verdict"] for r in repaired}, {"negative"},
+                         "a form whose halves a wrapper made identical must not be a "
+                         "finding either way")
+
+    def test_a_target_that_answers_both_forms_alike_is_negative(self):
+        def route(method, path, params, headers, body):
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route)
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+        self.assertEqual(rcekit.overall_detection_verdict(results), "negative")
+
+    # -- the three guards that keep it quiet ---------------------------------
+
+    def test_a_filter_that_refuses_only_the_malformed_half_is_not_a_finding(self):
+        """The guard this method is shaped around. A WAF answering 403 to
+        malformed syntax and 200 to the well-formed form produces a textbook
+        differential, and nothing on the target ever parsed an expression."""
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            if self._malformed(value):
+                return 403, "<html><head><title>403 Forbidden</title></head></html>"
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route)
+        self.assertTrue(results)
+        self.assertNotIn("syntax-sink", {r["verdict"] for r in results},
+                         "a filter was read as a parser")
+        inconclusive = [r for r in results if r["verdict"] == "inconclusive"]
+        self.assertGreaterEqual(len(inconclusive), len(results) - 1,
+                                f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertIn("because of the filter and not because anything parsed",
+                      inconclusive[0]["detail"])
+
+    def test_a_filter_that_refuses_both_halves_is_blocked(self):
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            return 403, "<html><head><title>403 Forbidden</title></head></html>"
+
+        results = self._run(route)
+        self.assertEqual({r["verdict"] for r in results}, {"blocked"})
+        self.assertEqual(rcekit.overall_detection_verdict(results), "blocked")
+
+    def test_a_target_that_echoes_the_probe_is_not_a_finding(self):
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            return 200, f"<html><body><p>No results for {value}</p></body></html>"
+
+        results = self._run(route)
+        self.assertNotIn("syntax-sink", {r["verdict"] for r in results})
+        self.assertIn("the response carries the probe back", results[0]["detail"])
+
+    def test_an_endpoint_that_will_not_hold_still_is_not_a_finding(self):
+        """The same malformed probe is sent twice inside one batch, so a page
+        that changes structure between adjacent requests cannot answer. The
+        banner alternates, which makes the two adjacent sendings of the broken
+        form differ whatever the batch's parity."""
+        state = {"n": 0}
+
+        def route(method, path, params, headers, body):
+            state["n"] += 1
+            banner = "<div>notice</div>" if state["n"] % 2 == 0 else ""
+            return 200, f"<html><body>{banner}<p>No results</p></body></html>"
+
+        results = self._run(route)
+        self.assertNotIn("syntax-sink", {r["verdict"] for r in results},
+                         "drift was read as a differential")
+        self.assertIn("did not hold still", results[0]["detail"])
+
+    def test_a_differential_that_does_not_reproduce_is_not_a_finding(self):
+        """The screen is not the claim. This target partitions the forms once
+        and then answers everything alike, which is what a one-off wobble looks
+        like from here."""
+        state = {"n": 0}
+
+        def route(method, path, params, headers, body):
+            value = params.get("q", "")
+            state["n"] += 1
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            # Only the first group's malformed sendings error; the confirming
+            # round sees a uniform target.
+            if state["n"] <= 5 and self._malformed(value):
+                return 500, "<html><body><h1>Internal Server Error</h1></body></html>"
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route, probe_depth="quick")
+        self.assertNotIn("syntax-sink", {r["verdict"] for r in results},
+                         "a differential was claimed from one round")
+        self.assertTrue(
+            any("did not reproduce" in r["detail"] or "not sent" in r["detail"]
+                or "not in the same way twice" in r["detail"] for r in results),
+            f"details were {[r['detail'][:70] for r in results]}")
+
+    # -- the shape of the probe set ------------------------------------------
+
+    def test_the_bare_form_has_no_broken_twin_and_is_not_sent(self):
+        """`eval`'s bare `a*b` form has no delimiter to break, so it is not part
+        of this differential at all rather than being given a fabricated twin."""
+        import random as _random
+
+        method = rcekit.SyntaxDifferential(self.gen, {"probe_depth": "full"})
+        probes = method.build_probes(self.rec, _random.Random(3))
+        self.assertEqual(len(probes), 24, "four probes per form, six forms")
+        self.assertEqual({p.carrier for p in probes},
+                         {"${}", "{{}}", "#{}", "%{}", "<%= %>", "@()"})
+        for probe in probes:
+            self.assertTrue(
+                any(delim in probe.payload for delim in ("${", "{{", "#{", "%{", "<%=", "@(")),
+                f"a probe carries no delimiter at all: {probe.payload!r}")
+
+    def test_quick_narrows_the_forms_and_not_the_guards(self):
+        import random as _random
+
+        method = rcekit.SyntaxDifferential(self.gen, {"probe_depth": "quick"})
+        probes = method.build_probes(self.rec, _random.Random(3))
+        self.assertEqual(len(probes), 12)
+        self.assertEqual(sorted({p.phase.split("/", 1)[1] for p in probes}),
+                         ["broken", "broken_again", "valid", "valid_again"])
+
+    def test_the_second_round_is_spent_only_where_the_screen_said_something(self):
+        clean = {"n": 0}
+
+        def route(method, path, params, headers, body):
+            clean["n"] += 1
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        results = self._run(route, probe_depth="quick")
+        # Four probes per form and nothing more: one row per form, and the
+        # confirming round is spent on none of them. Stated against the row
+        # count rather than a constant, because a run sweeps one carrier per
+        # context the ladder names and that is not this test's subject.
+        self.assertEqual(self.gen.delivered_probes, 4 * len(results),
+                         "a confirming round went out on a target that screened clean")
+
+    # -- where it sits -------------------------------------------------------
+
+    def test_it_never_outranks_execution_and_always_outranks_negative(self):
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "syntax-sink"}, {"verdict": "executed"}]), "executed")
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "syntax-sink"}, {"verdict": "negative"}]), "syntax-sink")
+        self.assertEqual(
+            rcekit.overall_detection_verdict(
+                [{"verdict": "syntax-sink"}, {"verdict": "evaluation-sink"}]),
+            "evaluation-sink",
+            "an evaluator consuming the input is a stronger answer to the same "
+            "question than a parser reading its syntax")
+
+    def test_it_reports_no_candidate_tier(self):
+        """It is a measurement of what the target did, named for that, so it
+        does not touch the one verdict reserved for a candidate -- see
+        MethodSafetyRungTestCase."""
+        self.assertEqual(rcekit.SyntaxDifferential.also_reports, ())
+        self.assertNotEqual(rcekit.SyntaxDifferential.tier, "needs-review")
 
 
 class RefusedButLandedTestCase(unittest.TestCase):
@@ -13283,13 +13545,13 @@ class ResponseChannelTestCase(unittest.TestCase):
         docstring: a change to ``EvalExpr``, to a file or OOB token, or a method
         added later would never have reached it.
 
-        ``time`` and ``boolean`` are named rather than skipped. Both search no
-        value in a response -- one measures a delay, the other compares response
-        shape -- so an empty ``expected`` is right for them and only for them. A
-        third method falling silent here is a change worth looking at, not one to
-        absorb."""
+        ``time``, ``boolean`` and ``syntax`` are named rather than skipped. None
+        searches a value in a response -- one measures a delay, the other two
+        compare response *shape* -- so an empty ``expected`` is right for them
+        and only for them. A fourth method falling silent here is a change worth
+        looking at, not one to absorb."""
         import random as _random
-        searches_no_value = {"time", "boolean"}
+        searches_no_value = {"time", "boolean", "syntax"}
         # Enough configuration that every method is willing to build: `file`
         # and `write` are gated on their paths, the callback methods on a host.
         config = {
@@ -16281,7 +16543,10 @@ class WholeSeriesBudgetTestCase(unittest.TestCase):
         method that overrides `confirm_each` has a per-probe answer to give."""
         per_probe = {name for name, cls in rcekit.DETECTION_METHODS.items()
                      if cls.decides_per_probe()}
-        self.assertEqual(per_probe, {"deser", "lookup", "oob"})
+        # `syntax` joins them: its answer is per *form*, and a form is a probe
+        # group rather than the whole series, so it has a per-probe answer to
+        # give for each one.
+        self.assertEqual(per_probe, {"deser", "lookup", "oob", "syntax"})
         for name in ("time", "boolean"):
             with self.subTest(method=name):
                 self.assertFalse(rcekit.DETECTION_METHODS[name].decides_per_probe())

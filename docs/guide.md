@@ -201,6 +201,7 @@ reported separately.
 | No output, and somewhere writable you can also read back | `file` | writes files; the read-back channel can be a web root *or* an LFI, download or export endpoint (see [No-egress targets](#no-egress-targets)) |
 | Your own request stores a file somewhere it is served from | `write` | writes one file, then fetches it (see [Upload and write-primitive targets](#upload-and-write-primitive-targets)) |
 | The parameter takes a serialized object | `deser` | 4 payloads per ecosystem and no listener at all — but that differential is a parser fingerprint, `needs-review`, not proof. `deserialization-sink` comes only from the DNS gadget, which needs a **delegated name** and a listener, and which only `java` and `fastjson` ship (see [Deserialization sinks](reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce)). Either way, **not** execution |
+| The sink **parses** a template and renders nothing of it | `syntax` | 24 requests per context at `full` and 12 at `quick`, plus 4 for each form that screens positive; reads the *shape* of a valid/invalid pair, twice over. Proves something parsed the syntax, **not** that it evaluates it and **not** execution |
 | Execution with no output and no egress | `time` | slow — each probe waits on a real delay |
 | The sink evaluates a predicate and renders nothing of it (MongoDB `$where`, a filter or rule expression) | `boolean` | 27 requests per context; reads the *shape* of the response. Proves an evaluator consumed the input, **not** execution |
 | My value becomes an argument of a program run without a shell, and every separator is inert | `argv` | One probe per option shape you select with `--argv-binary`. The cheapest method here, and the only one that reaches a sink where `escapeshellarg` did its job |
@@ -567,6 +568,8 @@ lookup-sink, NOT execution)
 [detect]   --methods file --file-write-path DIR --file-read-url URL   (needs somewhere
 writable the target can also read back -- a web root, an LFI endpoint, a download
 handler; proves execution)
+[detect]   --methods syntax                   (needs nothing from you, and reaches a
+template sink whose output never appears; reports syntax-sink, NOT execution)
 [detect]   --methods time                     (no egress and no read-back needed; reports
 timing-sink, NOT execution)
 ```
@@ -961,6 +964,7 @@ Each step is a `method` + `path` (+ optional `headers`) with exactly one body of
 | **`file-read`** | Arbitrary file read, proven by content absent from the control. A vulnerability in its own right (CWE-22 / CWE-98), not a weaker RCE. | Report it as a file read, on its own merits. What it is worth depends on what you can reach: application config, database credentials, source, keys. Try those paths before writing the severity down. |
 | **`file-write`** | Arbitrary file write, proven by reading the file back uninterpreted (CWE-434). | Report it as a file write. Often the more serious of the two, because a write reaches configuration and startup paths. |
 | **`lookup-sink`** | The sink resolved a URI RCEKit chose, so it evaluates expressions it is given — the Log4Shell shape. | Report it. The remediation is known and does not wait on a gadget: patch or configure the library out. Severity does not depend on whether anyone popped a shell. |
+| **`syntax-sink`** | Something on the target **parsed** expression syntax: valid and invalid forms were answered differently, twice over, with a clean control and no echo behind it. | A real finding, and not execution. Which parser is not shown and nothing says it evaluates what it parses — `--methods eval` for a computed value, `--methods boolean` for a predicate. |
 | **`deserialization-sink`** | The endpoint reconstructed an attacker-supplied object graph (CWE-502). | Report the sink. Whether it reaches RCE depends on the target's classpath, which is the next piece of work and not a reason to withhold the finding. |
 | **`timing-sink`** | Something on the target honoured a delay. Proven, and *what* waited is not shown. | Attribute it before reporting: pair with `oob` or `file`, which reach `executed` on the same blind sink. On its own it is strong evidence of a live sink and weak evidence of what the sink is. |
 | **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it. **Which** evaluator is not shown. | This one is a **lead, not a finding**. A MongoDB `$where` sandbox and a SQL engine comparing two numbers produce the same differential, and only one of those is a vulnerability. Identify the evaluator by hand before it goes in a report. |

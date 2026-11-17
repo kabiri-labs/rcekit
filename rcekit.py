@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.17.0"
+__version__ = "3.18.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -3830,7 +3830,8 @@ class RCEKit:
                             series.append((probe, Observation(
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, channels=chans,
-                                control_channels=control_channels)))
+                                control_channels=control_channels,
+                                control_status=control_status)))
                             if delay:
                                 time.sleep(delay)
                         if not built:
@@ -4057,7 +4058,8 @@ class RCEKit:
                     obs = Observation(status=status, body=body, control_body=control_body,
                                       elapsed=elapsed, followup_body=followup_body,
                                       channels=chans, control_channels=control_channels,
-                                      baseline=after_elapsed, control_status=after_status,
+                                      control_status=control_status,
+                                      baseline=after_elapsed, after_status=after_status,
                                       timed_out=timed_out)
                     verdict = meth.confirm(obs, probe)
                     # A refused probe is retried up the rungs before anything
@@ -4100,7 +4102,8 @@ class RCEKit:
                                 status=status, body=body, control_body=control_body,
                                 elapsed=elapsed, followup_body=followup_body,
                                 channels=chans, control_channels=control_channels,
-                                baseline=after_elapsed, control_status=after_status,
+                                control_status=control_status,
+                                baseline=after_elapsed, after_status=after_status,
                                 timed_out=timed_out)
                             verdict = meth.confirm(obs, probe)
                     # Decided here rather than in a method's oracle: being
@@ -4782,6 +4785,7 @@ TIER_SGR = {
     "file-write": "\033[33m",
     "file-read": "\033[33m",
     "evaluation-sink": "\033[33m",
+    "syntax-sink": "\033[33m",
     "deserialization-sink": "\033[33m",
     "lookup-sink": "\033[33m",
     "needs-review": "\033[33m",
@@ -5403,6 +5407,13 @@ class Observation:
     body: str
     control_body: str = ""
     elapsed: float = 0.0
+    # The status of the run's payload-free control -- the one `control_body` and
+    # `control_channels` beside it came from. Carried so an oracle can ask
+    # :func:`payload_refused` itself, which a differential across *several*
+    # probes has to do: the engine's own refusal check runs once, against the
+    # probe a verdict is anchored to, and a form whose malformed half alone was
+    # refused is a differential with a filter behind it rather than a parser.
+    control_status: Optional[int] = None
     # The payload-free control the engine sent *immediately after* this probe,
     # and only where a timeout prompted one: its elapsed, and its status.
     #
@@ -5417,8 +5428,12 @@ class Observation:
     # 0.0 and None mean no such control was taken, which is the common case:
     # this costs a request and is spent only on a probe that timed out. They do
     # NOT mean a control failed -- `timed_out` is what separates the two.
+    #
+    # Named for *when* it was taken rather than for being a control, because
+    # `control_status` above is one too and the pair were one name for a
+    # release: the differencing control, and the one sent after this probe.
     baseline: float = 0.0
-    control_status: Optional[int] = None
+    after_status: Optional[int] = None
     # Whether this probe consumed its request timeout, as against failing fast.
     # Measured from the elapsed time rather than read off the exception text: a
     # timeout spends the whole budget and a refused connection comes back in
@@ -5790,7 +5805,7 @@ class DetectionMethod:
         `error` -- a connectivity problem has to keep reading as one, and that
         is the direction this must not get wrong."""
         if obs.status is None:
-            if (obs.timed_out and obs.control_status is not None
+            if (obs.timed_out and obs.after_status is not None
                     and obs.baseline * 3 <= obs.elapsed):
                 return Verdict(
                     "needs-review",
@@ -7515,6 +7530,350 @@ class EvalExpr(DetectionMethod):
         return self._confirm_computed(obs, probe, boundary=True)
 
 
+class SyntaxDifferential(DetectionMethod):
+    """A sink that **parses** expression syntax and renders nothing of it.
+
+    The gap this closes is a template sink whose output never reaches the
+    response: `eval` needs the product rendered, `boolean` sends no template
+    delimiters at all -- its connectives are `&&`, `and`, `||`, `or` -- `time`
+    needs a sleep and `oob` needs egress. Against such a sink every shipped
+    oracle is structurally blind, and the run reports `negative` about a target
+    whose template engine is reading attacker input.
+
+    It does NOT claim an evaluator. The answer is "something parsed this
+    syntax", which is weaker than `evaluation-sink` -- that one requires the
+    response to be partitioned on a predicate the target computed -- and much
+    weaker than `executed`. There is no path from here to either.
+
+    **The channel is the shape of the response**, which makes this the second
+    weakest oracle in the tool, and most of this docstring is about the ways it
+    can lie. Each form gets four probes, judged together:
+
+    ======================  =========================================
+    ``syntax/valid``        the well-formed payload, ``${a*b}``
+    ``syntax/broken``       the same with its closing delimiter gone
+    ``syntax/broken_again`` byte-for-byte the broken one, again
+    ``syntax/valid_again``  byte-for-byte the valid one, again
+    ======================  =========================================
+
+    Both halves are bracketed because one bracket was not enough. Every guard
+    earned its place against a fixture built to make it lie, at 200 runs x 6
+    forms = 1200 judgements each:
+
+    * **The structural signature** -- :func:`response_shape`, not the body and
+      not its length. Against a target that only echoes its input (into
+      markup, into a word-counted plain-text body, and HTML-escaped) it
+      claimed a parser in 0 of 1200 each. `deser`'s ``_signature`` could not
+      serve here: it carries the whole body, so the one character between
+      ``${a*b}`` and ``${a*b`` moves it wherever the input is echoed.
+    * **A declared broken twin**, never a derived one -- see :attr:`_FORMS`.
+    * **Both halves bracketed.** Against a page carrying an independent banner
+      on 20% of requests, three probes claimed a parser in 199 of 1200; the
+      fourth probe brought that to 56.
+    * **A second round on fresh operands.** 56 of 1200 became 2.
+    * **The two rounds must agree on what each half looked like**, not merely
+      that the halves differed. It costs no request, and it is what a page
+      carrying an independent banner cannot do -- the banner lands on a
+      different half each round. 2 of 1200 became 0.
+
+    At 20% drift the guards hold completely. At 50% -- a page whose *structure*
+    is a coin flip per request -- 8 of 1200 survive, and that is the limit
+    rather than a bug to file: no response-shape oracle can answer about such a
+    page, and a run has no way to know it is reading one. Against a target that
+    really parses, the guards cost nothing they were not meant to: 1000 of 1000
+    judgements on the forms that fixture distinguishes.
+
+    The guard that matters most on a real engagement is none of those. **A WAF
+    that refuses malformed syntax with a 4xx and lets the well-formed form
+    through produces a perfect differential while nothing on the target ever
+    parsed an expression**, and reading that as a parser would be a false
+    positive on precisely the hardened targets this tool is for. So a form
+    whose halves a filter answered differently is `inconclusive`, and one whose
+    halves were both refused is `blocked`. Measured against a 403-on-malformed
+    fixture: 0 of 1200.
+
+    Requests: 4 per form per round. Six forms at ``--probe-depth full`` is 24
+    per carrier, three at ``quick`` is 12, and a form that screens positive
+    costs 4 more. Nothing is spent on the bare form -- it has no delimiter to
+    break."""
+    name = "syntax"
+    tier = "syntax-sink"
+    # It answers the execution question weakly, so a point where execution is
+    # already proven skips it -- the wave driver reads this, not the tier.
+    question = "execution"
+    aggregate = True
+    # No probe of it says anything on its own: the answer is the partition
+    # across a form's four probes, twice over.
+    costly = True
+    # The broken probes change nothing and make the target resolve nothing.
+    # They are strictly less intrusive than the valid ones beside them.
+    safety = "safe"
+
+    PHASES = ("valid", "broken", "broken_again", "valid_again")
+
+    # ``(name, valid, broken)``. The broken twin is DECLARED, not derived.
+    # Deriving it by dropping the last character is wrong for ``<%= {expr} %>``
+    # -- that drops the space, not the delimiter -- and for any form whose
+    # template ends in text. A pair whose broken half is still valid syntax
+    # reads as "no parser here", which is the false negative this oracle exists
+    # to remove, made by the oracle itself.
+    #
+    # ``<%= {expr} %`` drops one character inside a token rather than a whole
+    # word, and that is load bearing: :func:`response_shape`'s plain-text
+    # reading counts the words on each line, so a twin that dropped ``%>``
+    # entirely would differ from its valid half by a word count and manufacture
+    # the very differential the rest of this is controlling for.
+    #
+    # The bare ``{expr}`` form `eval` sends is absent: it has no delimiter to
+    # break, so it has no declarable twin, and a fabricated one would compare
+    # two expressions rather than two syntaxes.
+    _FORMS = (
+        ("${}", "${{{expr}}}", "${{{expr}"),
+        ("{{}}", "{{{{{expr}}}}}", "{{{{{expr}}}"),
+        ("#{}", "#{{{expr}}}", "#{{{expr}"),
+        ("%{}", "%{{{expr}}}", "%{{{expr}"),
+        ("<%= %>", "<%= {expr} %>", "<%= {expr} %"),
+        ("@()", "@({expr})", "@({expr}"),
+    )
+    # `quick` keeps the three delimiters that cover the most engines per
+    # request; `full` sends all six. There is no rung below three that is worth
+    # the traffic, since each form is an independent question.
+    QUICK_FORMS = 3
+
+    def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
+        super().__init__(gen, config)
+        # Contexts already measured in this run. Template syntax carries no
+        # shell dialect, so the probes for `unix` and for `windows` in the same
+        # context are the same bytes -- and the aggregate branch, unlike the
+        # per-probe one, has no payload de-duplication to notice.
+        #
+        # `boolean` carries the same set for the same reason, and the first
+        # version of this method said that reducing records to distinct
+        # (environment, context) carriers made it unnecessary. Measured: a
+        # single record at `--probe-depth quick` sent 60 requests where 12 were
+        # expected -- the whole series, once per environment, to ask a question
+        # whose answer cannot differ.
+        self._contexts_done: Set[str] = set()
+
+    def applicable(self, record: "PayloadRecord") -> bool:
+        # No environment is excluded: a template delimiter is not a shell
+        # construct, so there is no dialect for it to be wrong in. Which
+        # *context* the value lands in does matter -- it decides the wrapper --
+        # and that axis is deduplicated in `build_probes`.
+        return True
+
+    def _selected_forms(self):
+        forms = self._FORMS
+        if self._depth() != "full":
+            forms = forms[:self.QUICK_FORMS]
+        return forms
+
+    def _round(self, record: "PayloadRecord", rng: "random.Random",
+               name: str, valid: str, broken: str, tag: str) -> List[Probe]:
+        a = rng.randint(1000, 9999)
+        b = rng.randint(1000, 9999)
+        expr = f"{a}*{b}"
+        probes: List[Probe] = []
+        for phase, form in (("valid", valid), ("broken", broken),
+                            ("broken_again", broken), ("valid_again", valid)):
+            probes.append(Probe(
+                # `expected` is empty, as `boolean`'s is: nothing here is a
+                # value the target has to produce. It also keeps the
+                # second-order channel from being asked about these probes,
+                # which is right -- a response's shape is not something another
+                # endpoint can carry.
+                payload=self._wrap_context(record, form.format(expr=expr)),
+                expected="", carrier=name, phase=f"{tag}/{phase}"))
+        return probes
+
+    def build_probes(self, record: "PayloadRecord", rng: "random.Random") -> List[Probe]:
+        if record.context in self._contexts_done:
+            return []
+        self._contexts_done.add(record.context)
+        # Held for `next_probes`, which the engine calls with the series alone.
+        # The same thing `time` does for the same reason.
+        self._record = record
+        self._rng = rng
+        probes: List[Probe] = []
+        for name, valid, broken in self._selected_forms():
+            probes.extend(self._round(record, rng, name, valid, broken, "syntax"))
+        return probes
+
+    def next_probes(self, series: "List[Tuple[Probe, Observation]]") -> List[Probe]:
+        """Round two, for the forms that screened positive -- and only those.
+
+        Screen-then-confirm rather than two rounds always: on a target with
+        nothing to find this method costs 4 requests per form and stops, while
+        requiring a reproduction before claiming anything is what took the
+        drift fixture from 56 of 1200 to 2. The expensive half is spent only
+        where the cheap half said something."""
+        if any((probe.phase or "").startswith("syntax2/") for probe, _ in series):
+            return []
+        record = getattr(self, "_record", None)
+        rng = getattr(self, "_rng", None)
+        if record is None or rng is None:
+            return []
+        probes: List[Probe] = []
+        for name, valid, broken in self._selected_forms():
+            group = self._group(series, "syntax", name)
+            if len(group) < len(self.PHASES):
+                continue
+            verdict, _shapes = self._round_verdict(name, group)
+            if verdict == "differential":
+                probes.extend(self._round(record, rng, name, valid, broken, "syntax2"))
+        return probes
+
+    # --- verdicts -----------------------------------------------------------
+
+    @staticmethod
+    def _group(series, tag: str, carrier: str):
+        """The ``phase -> (probe, obs)`` map for one form in one round."""
+        out = {}
+        for probe, obs in series:
+            phase = probe.phase or ""
+            if probe.carrier == carrier and phase.startswith(tag + "/"):
+                out[phase.split("/", 1)[1]] = (probe, obs)
+        return out
+
+    def _reflects_its_input(self, name: str, group) -> bool:
+        """Whether the target carried the probe back into its own response.
+
+        Two sentinels, and the second is the one that matters. The form's
+        opening delimiter is the obvious one and it goes blind exactly where an
+        echo is most likely: a page that escapes what it echoes returns
+        ``&lt;%=`` and a search for ``<%=`` finds nothing. The expression's
+        operands are random to this probe, carried by every form by
+        construction, and untouched by HTML escaping.
+
+        Differenced against the payload-free control, like every other oracle
+        here: a sentinel the control carries too is one the probe cannot have
+        put there."""
+        valid_form = next((valid for form_name, valid, _broken in self._FORMS
+                           if form_name == name), "")
+        opening = valid_form.split("{expr}")[0].replace("{{", "{").replace("}}", "}")
+        for probe, obs in group.values():
+            found = re.search(r"\d{4}\*\d{4}", probe.payload or "")
+            control = obs.control_body or ""
+            for sentinel in ((found.group(0) if found else ""), opening):
+                if not sentinel:
+                    continue
+                if (self._search(sentinel, obs.body or "")
+                        and not self._search(sentinel, control)):
+                    return True
+        return False
+
+    def _round_verdict(self, name: str, group):
+        """One round's answer for one form, plus the shapes it read.
+
+        Guard order is the same as `deser`'s shape differential, with the
+        refusal check added -- and that one is not a formality: it is the
+        difference between reporting a WAF and reporting a parser."""
+        if any(obs.status is None for _probe, obs in group.values()):
+            return "error", {}
+        control_status = next(
+            (obs.control_status for _p, obs in group.values()
+             if obs.control_status is not None), None)
+        refused = [phase for phase in ("valid", "broken")
+                   if payload_refused(group[phase][1].status, control_status)]
+        if len(refused) == len(("valid", "broken")):
+            return "blocked", {}
+        if refused:
+            return "refused-half", {}
+        if self._reflects_its_input(name, group):
+            return "reflected", {}
+        shapes = {phase: response_shape(obs.status, obs.body)
+                  for phase, (_probe, obs) in group.items()}
+        if shapes["broken"] != shapes["broken_again"]:
+            return "drifted-broken", shapes
+        if shapes["valid"] != shapes["valid_again"]:
+            return "drifted-valid", shapes
+        if shapes["valid"] != shapes["broken"]:
+            return "differential", shapes
+        return "negative", shapes
+
+    _INCONCLUSIVE = {
+        "refused-half": "a filter answered one half of the pair and not the other, so the "
+                        "forms differ because of the filter and not because anything parsed "
+                        "them -- nothing on the target has been asked this question yet",
+        "reflected": "the response carries the probe back, so the forms differ because the "
+                     "input did and not because anything parsed it",
+        "drifted-broken": "the same malformed probe, sent twice in one batch, came back two "
+                          "different ways -- the endpoint did not hold still, so a "
+                          "differential read across it is reading the drift",
+        "drifted-valid": "the same well-formed probe, sent at either end of the batch, came "
+                         "back two different ways -- the endpoint did not hold still, so a "
+                         "differential read across it is reading the drift",
+    }
+
+    def confirm_each(self, series: "List[Tuple[Probe, Observation]]"
+                     ) -> "Optional[List[Tuple[Probe, Verdict]]]":
+        out: List[Tuple[Probe, Verdict]] = []
+        for name, _valid, _broken in self._selected_forms():
+            first = self._group(series, "syntax", name)
+            if len(first) < len(self.PHASES):
+                continue
+            anchor = first["valid"][0]
+            verdict, shapes = self._round_verdict(name, first)
+            if verdict in self._INCONCLUSIVE:
+                out.append((anchor, Verdict("inconclusive",
+                                            f"{name}: " + self._INCONCLUSIVE[verdict])))
+                continue
+            if verdict in ("error", "blocked"):
+                out.append((anchor, Verdict(
+                    verdict,
+                    f"{name}: a syntax probe never reached the target" if verdict == "error"
+                    else f"{name}: a filter refused both halves of the pair, so the sink "
+                         "never saw either")))
+                continue
+            if verdict == "negative":
+                out.append((anchor, Verdict(
+                    "negative",
+                    f"{name}: the target answers valid and invalid {name} syntax alike, so "
+                    "nothing here parses it")))
+                continue
+            second = self._group(series, "syntax2", name)
+            if len(second) < len(self.PHASES):
+                # The screen said something and the confirmation never went
+                # out -- the budget, almost always. A differential that was
+                # never reproduced is not a finding, and saying so is the whole
+                # point of screening before claiming.
+                out.append((anchor, Verdict(
+                    "inconclusive",
+                    f"{name}: the forms were answered differently once, and the second "
+                    "round that would have to reproduce it was not sent -- most likely "
+                    "--max-payloads")))
+                continue
+            again, second_shapes = self._round_verdict(name, second)
+            if again != "differential":
+                out.append((anchor, Verdict(
+                    "inconclusive",
+                    f"{name}: the differential did not reproduce on fresh operands, so what "
+                    "the first round measured was not the syntax")))
+                continue
+            if (shapes["valid"] != second_shapes["valid"]
+                    or shapes["broken"] != second_shapes["broken"]):
+                out.append((anchor, Verdict(
+                    "inconclusive",
+                    f"{name}: both rounds answered the halves differently, but not in the "
+                    "same way twice -- the endpoint is moving under the measurement rather "
+                    "than answering it")))
+                continue
+            out.append((anchor, Verdict(
+                "syntax-sink",
+                f"{name}: the target answered structurally valid and structurally invalid "
+                f"{name} syntax differently, twice over on fresh operands, with both halves "
+                "bracketed, where the payload-free control got through and nothing carried "
+                "the probe back -- so something on the target parsed this syntax. Which "
+                "parser is not shown and nothing here says it evaluates what it parses: add "
+                "--methods eval for a computed value, or --methods boolean for a predicate")))
+        return out or None
+
+    def confirm_series(self, series: "List[Tuple[Probe, Observation]]") -> Verdict:
+        # Never reached while there are probes: confirm_each always answers.
+        # Kept because the engine's contract allows either.
+        return Verdict("inconclusive", "no syntax differential produced a decision")
+
+
 class OobCallback(DetectionMethod):
     """Out-of-band confirmation for a target that returns nothing at all.
 
@@ -8985,6 +9344,7 @@ DETECTION_METHODS = {
     WriteThenExecute.name: WriteThenExecute,
     ParametricTime.name: ParametricTime,
     EvalExpr.name: EvalExpr,
+    SyntaxDifferential.name: SyntaxDifferential,
     OobCallback.name: OobCallback,
     LookupCallback.name: LookupCallback,
     DeserSink.name: DeserSink,
@@ -9230,6 +9590,12 @@ NON_EXECUTION_SECTIONS = (
      "an evaluator consumed the input and partitioned the response on it. Which "
      "evaluator is not shown: a query engine comparing two numbers produces this same "
      "differential, so it is not execution.", False),
+    ("syntax-sink", "SYNTAX SINK(S)",
+     "the target answered structurally valid and structurally invalid expression syntax "
+     "differently, twice over, so something on it parsed what it was handed. Which parser "
+     "is not shown, and nothing here says it evaluates what it parses -- so it is weaker "
+     "than an evaluation sink and it is not execution. Add --methods eval for a computed "
+     "value.", False),
     ("deserialization-sink", "DESERIALIZATION SINK(S)",
      "the endpoint reconstructs attacker-supplied object graphs. Reaching RCE from "
      "here depends on gadgets in the target's classpath, which is outside what RCEKit "
@@ -9263,6 +9629,8 @@ VERDICT_MEANING = {
     "file-write": "a file was written and served back uninterpreted; not execution",
     "file-read": "the target returned a path RCEKit named; not execution",
     "evaluation-sink": "an evaluator consumed the input; which one is not shown",
+    "syntax-sink": "something on the target parsed the expression syntax; what parsed it "
+                   "is not shown",
     "deserialization-sink": "the endpoint reconstructs attacker-supplied objects",
     "lookup-sink": "the sink resolved a URI RCEKit chose; not execution",
     "needs-review": "a real signal that is not proof on its own; review it by hand",
@@ -9433,6 +9801,9 @@ def blind_sink_advice(method_names: List[str], args: Any) -> List[str]:
         lines.append("[detect]   --methods file --file-write-path DIR --file-read-url URL   "
                      "(needs somewhere writable the target can also read back -- a web root, an "
                      f"LFI endpoint, a download handler; {method_claim('file')})")
+    lines.append("[detect]   --methods syntax                   "
+                 "(needs nothing from you, and reaches a template sink whose output never "
+                 f"appears; {method_claim('syntax')})")
     lines.append("[detect]   --methods time                     "
                  f"(no egress and no read-back needed; {method_claim('time')})")
     return lines
@@ -11558,7 +11929,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Comma-separated RCE detection methods to run against --verify-url/-r instead of "
                              "the classic per-payload oracle. Available: reflected (results-based execution "
                              "proof via computed arithmetic); eval (SSTI/SpEL/OGNL/Groovy/raw-eval via a "
-                             "computed product); file (self-OOB write+read-back, needs --file-write-path "
+                             "computed product); syntax (a sink that PARSES expression syntax and renders "
+                             "nothing of it, via a valid/invalid differential read twice over; "
+                             "reports syntax-sink, NOT execution); file (self-OOB "
+                             "write+read-back, needs --file-write-path "
                              "and --file-read-url, or the --webroot/--web-base-url alias); write (the inverse "
                              "of file — your request stores a file and RCEKit executes it, needs "
                              "--write-url-template; file-write for a write that is served but not "
