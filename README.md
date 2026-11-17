@@ -299,6 +299,15 @@ controlled 0/N/2N delay series — but it reports `timing-sink`, which proves th
 target honoured a delay and not that a shell ran.
 [No-egress targets](docs/guide.md#no-egress-targets).
 
+And when nothing comes back because the sink never ran a command in the first
+place — a template engine that parses your input and renders none of it — none
+of the three above can reach it: there is no delay to measure, no file to write
+and no callback to make. `--methods syntax` asks the one question such a sink
+can answer, by sending each delimiter form well formed and then broken and
+reading the *shape* of the two replies. It needs nothing from you and reports
+`syntax-sink`: something parsed the syntax, which is not a claim that it
+evaluates it.
+
 ### 4. Your own request stores the file
 
 An upload, or a `PUT` the server accepts. Nothing in the response is computed,
@@ -396,7 +405,7 @@ flow, and is in [Multi-step chains](docs/guide.md#multi-step-chains).
 # query string — the widest a single point can carry
 python rcekit.py --acknowledge-consent \
   --verify-url "https://target.example/lookup?host=FUZZ" \
-  --methods reflected,eval,time,oob,lookup,deser,boolean,include \
+  --methods reflected,eval,syntax,time,oob,lookup,deser,boolean,include \
   --oob-host oob.yourdomain.example --listen-dns-port 53 \
   --probe-depth full --confirm-depth every --bridges auto \
   --observe-url "https://target.example/profile" \
@@ -407,18 +416,20 @@ python rcekit.py --acknowledge-consent \
 # captured request — the same, plus every injection point in the capture
 python rcekit.py --acknowledge-consent \
   -r search.req --auto-params all --point-order thorough --include-path-segments \
-  --methods reflected,eval,time,oob,lookup,deser,boolean,include \
+  --methods reflected,eval,syntax,time,oob,lookup,deser,boolean,include \
   --oob-host oob.yourdomain.example --listen-dns-port 53 \
   --probe-depth full --confirm-depth every --bridges auto \
   --verify-active-risk stateful --insecure --detect-json findings.json
 ```
 
-That is 8 of the 11 methods, and the three it leaves out each need something
+That is 9 of the 12 methods, and the three it leaves out each need something
 only you can supply: a write path for `file`, the URL your own upload lands at
 for `write`, and the binary whose options to inject for `argv` — scenarios 3, 4
-and 5. `include` is in the 8 and reads without being told anything; reaching
+and 5. `include` is in the 9 and reads without being told anything; reaching
 `executed` through it needs `--include-write-url` as well, which is scenario 5
-too. `--auto-params all` takes every query value,
+too. `syntax` is in it for the same reason -- it needs nothing from you -- and
+it is the one method there that answers about a sink the other eight cannot see
+at all. `--auto-params all` takes every query value,
 JSON leaf — booleans and `null` included — XML element, attribute and CDATA
 section, form field, multipart part and upload filename, cookie and header, with
 each occurrence of a repeated query or form key counted separately, and the
