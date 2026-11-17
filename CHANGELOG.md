@@ -413,6 +413,67 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.18.0] — 2026-11-17
+
+### Added
+
+- **`--methods syntax`, and the `syntax-sink` verdict it reports.** A template
+  sink whose output never reaches the response was invisible to every oracle
+  here: `eval` needs the product rendered, `boolean` sends no template
+  delimiters at all -- its connectives are `&&`, `and`, `||`, `or` -- `time`
+  needs a sleep and `oob` needs egress. The run reported `negative` about a
+  target whose template engine was reading attacker input.
+
+  The new method sends each delimiter form twice, well formed and with its
+  closing delimiter removed, and reads the *shape* of the answers. It claims
+  only that something parsed the syntax: which parser is not shown, nothing
+  says it evaluates what it parses, and there is no path from here to
+  `evaluation-sink` or `executed`. The verdict sits between them in the
+  report's order for exactly that reason.
+
+  Every guard earned its place against a fixture built to make it lie, at 200
+  runs x 6 forms = 1200 judgements each. The structural signature
+  (`response_shape`, not a body or its length) claimed a parser in 0 of 1200
+  against a target that only echoes its input -- into markup, into a
+  word-counted plain-text body, and HTML-escaped. One bracket was not enough:
+  against a page carrying an independent banner on 20% of requests, three
+  probes claimed a parser in 199 of 1200, bracketing both halves brought that
+  to 56, a second round on fresh operands to 2, and requiring the two rounds to
+  agree about what each half *looked like* -- which costs no request -- to 0. At
+  50% drift, 8 of 1200 survive, and that is the limit rather than a bug to
+  file: no response-shape oracle can answer about a page whose structure is a
+  coin flip per request.
+
+  The guard that matters most on a real engagement is none of those. A WAF that
+  refuses malformed syntax and lets the well-formed form through produces a
+  perfect differential with nothing on the target having parsed anything, which
+  would be a false positive on precisely the hardened targets this tool is for.
+  A form whose halves a filter answered differently is `inconclusive`; one whose
+  halves were both refused is `blocked`. Measured against a 403-on-malformed
+  fixture: 0 of 1200.
+
+  Cost: 4 requests per form per round, 24 per carrier at `--probe-depth full`
+  and 12 at `quick`, plus 4 for each form that screens positive. `costly`, so
+  it runs in the expensive wave and is skipped at a point where execution is
+  already proven.
+
+  One known limit is pinned by a test rather than left to be discovered: a
+  subshell context closes the broken `@(a*b` with its own paren, so that form's
+  halves are both well formed there and it reports `negative`. A false negative
+  rather than a false claim, which is the direction this project takes when it
+  has to pick one.
+
+### Changed
+
+- **`Observation.control_status` is the run control's status again, and the
+  field 3.17.0 gave that name is `after_status`.** Two controls needed two
+  names: the payload-free control a verdict is differenced against, whose body
+  and channels the Observation already carried, and the one sent immediately
+  after a probe that timed out. A differential across several probes has to ask
+  `payload_refused` itself -- the engine's own check runs once, against the
+  probe a verdict is anchored to -- and a form whose malformed half alone was
+  refused is a filter rather than a parser.
+
 ## [3.17.0] — 2026-11-15
 
 ### Fixed
@@ -4410,6 +4471,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.18.0]: https://github.com/kabiri-labs/rcekit/compare/v3.17.0...v3.18.0
 [3.17.0]: https://github.com/kabiri-labs/rcekit/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/kabiri-labs/rcekit/compare/v3.15.0...v3.16.0
 [3.15.0]: https://github.com/kabiri-labs/rcekit/compare/v3.14.0...v3.15.0

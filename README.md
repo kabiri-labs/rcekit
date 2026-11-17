@@ -4,7 +4,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.17.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.18.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -531,7 +531,7 @@ retest is the hard part, and it fails in two directions: a "possibly vulnerable"
 that turns out to be reflection, and a "not vulnerable" from a run that never
 actually tested anything.
 
-RCEKit answers with **thirteen verdicts that are never collapsed into each
+RCEKit answers with **fourteen verdicts that are never collapsed into each
 other**. Every one of them is named for **what the target did**, not for how
 sure RCEKit is:
 
@@ -542,6 +542,7 @@ sure RCEKit is:
 | **`file-write`** | The target stored a file at a path RCEKit chose, and served it back uninterpreted. Arbitrary file write, proven by reading it back (CWE-434) — **a vulnerability in its own right**, not a weaker RCE. |
 | **`file-read`** | The target opened a path RCEKit named and returned what it read, and that content is absent from a payload-free control. What proves it is a signature RCEKit knew in advance rather than a value the target computed, which is exactly why it stops here. Arbitrary file read (CWE-22 / CWE-98) — **a vulnerability in its own right**, and what it is worth depends on which paths you can reach. |
 | **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit — so this is **a lead, not a finding**: a MongoDB `$where` sandbox and a SQL engine comparing two numbers answer identically, and only one is a vulnerability. Identify the evaluator before reporting. |
+| **`syntax-sink`** | The target answered structurally valid and structurally invalid expression syntax differently — twice over on fresh operands, with both halves of each pair sent twice, against a payload-free control that got through and with nothing carrying the probe back. So something on it **parsed** what it was handed. Which parser is not shown, and nothing here says it *evaluates* what it parses, which makes this weaker than `evaluation-sink` and not execution. It is the only oracle that reaches a template sink whose output never appears at all. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph (CWE-502). Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. **A confirmed sink** — report it; the gadget analysis is the next piece of work, not a reason to withhold it. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. **A confirmed sink** whose remediation is known regardless — the Log4Shell shape. |
 | **`needs-review`** | A real signal that is not proof on its own: the parser fingerprint `deser` reads without a listener, a probe that hung where a payload-free control sent immediately after did not, and the static-signature match `--verify-chain` reads in band, which has no payload-free control behind it. The one verdict here that is genuinely a candidate. |
@@ -638,6 +639,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
 | **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
+| **Template sinks that render nothing** — a parser reading input whose output never comes back | `syntax` | Sends each delimiter form twice, well formed and with its closing delimiter gone, and reads the *shape* of the two answers — both halves repeated, the pair confirmed on fresh operands, and a filter that refuses only the malformed half reported as a filter rather than a parser. Reported `syntax-sink`: proven that something parsed the syntax, and no more. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 | **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
 | **File inclusion** — a path the request names (CWE-22 / CWE-98) | `include` | The sink opens the path and returns what it read. Sweeps the traversal depth from an absolute path downward, because which one works is a property of the sink's own directory, and reads through a PHP stream filter as well as plainly. Proven on content absent from the payload-free control, and the path itself is the *forbidden* literal: a sink that cannot open it echoes it back inside its own error. The read rungs report `file-read` and never `executed` — their evidence is a signature known in advance, not a value the target computed. Given `--include-write-url` it also writes a computed one-liner *through* the sink and fetches the file back, which reaches `executed`, or `file-write` where the file is served verbatim — each depth writing its own file and computing its own product, so a depth that failed cannot confirm on one that worked. Both traversal shapes go out, because whether the path must name `pearcmd.php` or `pearcmd` depends on whether the sink appends an extension of its own, and at most one can confirm on a given sink. A wrapper carrying code (`data://`, `php://input`) is not that route: both need `allow_url_include`, off by default since PHP 5.2. |
@@ -742,6 +744,7 @@ one:
 | `cmd.exe` and PowerShell sinks | ✅ *per-dialect probes* | ✅ *(cmd)* | — | per template |
 | Upload → write-then-execute — `write` | ✅ *write vs. execute, separate tiers* | — | — | per template |
 | Predicate sink, nothing rendered — `boolean` | ✅ *response-shape differential, own tier, never RCE* | — | — | — |
+| Template sink that parses and renders nothing — `syntax` | ✅ *valid/invalid differential, own tier, never RCE* | — | — | — |
 | Second-order — lands here, runs there | ✅ | — | — | — |
 | Query-language bridge to the OS | ✅ | — | — | per template |
 | Deserialization sink — `deser` | ✅ *own tier, never called RCE* | — | — | per template |
@@ -842,15 +845,17 @@ which is the same method fighting a filter, a quote or an encoding.
 | The sink interpolates `${…}` rather than shelling out | `lookup` | a delegated domain | `lookup-sink` |
 | The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
 | The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
+| The sink *parses* a template and renders nothing of it | `syntax` | nothing | `syntax-sink` |
 | Your value becomes an argument of a program spawned with no shell | `argv` | the binary it is spawned as, for `--argv-binary` | **`executed`** |
 | Your value names a file the application opens | `include` | nothing for the read; the URL a file written through the sink is served at, for `--include-write-url` | `file-read`, or **`executed`** with the write-back URL |
 
 Only `reflected`, `eval`, `oob`, `file`, `write`, `argv` and `include` reach
-**`executed`**. `timing-sink`, `lookup-sink`,
+**`executed`**. `timing-sink`, `lookup-sink`, `syntax-sink`,
 `file-read` and `deserialization-sink` are proven findings about something else --
 `file-read` and `file-write` are vulnerabilities on their own terms, `lookup-sink`
 and `deserialization-sink` are confirmed sinks with known remediation, and
-`timing-sink` is a measurement waiting to be attributed. `evaluation-sink` is the
+`timing-sink` is a measurement waiting to be attributed, and `syntax-sink` says a
+parser read the syntax without saying it evaluates it. `evaluation-sink` is the
 one that is a *lead* rather than a finding: identify the evaluator before it goes
 in a report. `needs-review` is the exception: it is the parser fingerprint `deser`
 reads when it has no gadget to fire, a probe that hung where a payload-free
