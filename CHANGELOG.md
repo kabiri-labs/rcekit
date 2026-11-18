@@ -442,6 +442,57 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.18.1] — 2026-11-18
+
+### Fixed
+
+- **A syntax form its context could not carry was reported `negative`.** A
+  context is a prefix and a suffix, and a suffix can hand back the character
+  the broken twin removed: `shell_subshell` wraps the payload in `$(` ... `)`,
+  so the broken `@(a*b` arrives as `$(@(a*b)` and both halves of the pair are
+  well formed. They answer alike, and the form read as a clean negative about a
+  question nobody put to the target.
+
+  3.18.0 shipped that as a known limit with a test pinning it, on the grounds
+  that a false negative is better than a false claim. Both are true and neither
+  was the point: the README's opening says a run that could not test something
+  never reports it as clean, and this reported it as clean. The limit was the
+  reporting, not the oracle.
+
+  Each pair is now checked against the context it will be wrapped in. A form
+  that does not survive is not sent -- it would cost four requests to ask
+  nothing -- and the run discloses it rather than voting on it: `N probe
+  shape(s) could not be carried by the context they landed in and were NOT
+  tested`, with the form and the context named. That is the treatment the
+  partly-blinded second-order run already gets, one level down: the verdicts
+  describe what was measured, and the run says what it never asked.
+
+  A verdict row was tried first and withdrawn. It made every sweep containing a
+  subshell context collapse to `inconclusive` -- which is almost every sweep --
+  so the one method that can answer about a parse-only sink could no longer
+  report a clean negative at all. A disclosure costs the operator nothing and
+  claims nothing.
+
+  Measured across every shipped context: exactly one pair is voided, `@()`
+  inside `shell_subshell`.
+
+- **An observed endpoint behind a login read as one that had been read.** The
+  second-order fetch carries no credentials of its own -- deliberately, and the
+  README lists that under the engagement controls -- so a page behind a login
+  answers 401 or 403 to every poll. The run recorded that as `polled`, which
+  claims the channel was read and carried nothing, and then let the in-band
+  negatives stand as second-order ones.
+
+  It is its own state now, `unauthorised`, distinct from a channel that never
+  answered at all, and the run names the flag that fixes it:
+  `--observe-request` with a captured request that has the session.
+
+  What was *not* done, and deliberately: making the observed fetch inherit each
+  probe's session. That fetch sending no credentials is a documented guarantee
+  rather than an oversight, and inheriting a chain's cookies would change it
+  without the operator asking. The path already exists; what was missing was
+  the run pointing at it.
+
 ## [3.18.0] — 2026-11-17
 
 ### Added
@@ -4500,6 +4551,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.18.1]: https://github.com/kabiri-labs/rcekit/compare/v3.18.0...v3.18.1
 [3.18.0]: https://github.com/kabiri-labs/rcekit/compare/v3.17.0...v3.18.0
 [3.17.0]: https://github.com/kabiri-labs/rcekit/compare/v3.16.0...v3.17.0
 [3.16.0]: https://github.com/kabiri-labs/rcekit/compare/v3.15.0...v3.16.0

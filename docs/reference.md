@@ -659,6 +659,14 @@ python rcekit.py --acknowledge-consent \
   --observe-request profile.txt --observe-poll 10 --observe-timeout 120
 ```
 
+That second form is the one to reach for when the page needs a session, and the
+run will tell you so: the observed fetch carries no credentials of its own --
+deliberately, and it says so out loud when it withholds them -- so a page behind
+a login answers 401 or 403 to every read. A run where it did reports
+`unauthorised` for that channel rather than `polled`, which would claim the page
+was read and carried nothing, and names `--observe-request` as the fix. It is
+not the same state as a channel that never answered at all.
+
 **It is still fully differential**, which is why it can legitimately reach
 `executed` rather than a weaker tier:
 
