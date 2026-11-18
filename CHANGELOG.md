@@ -442,6 +442,53 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.18.2] — 2026-11-18
+
+Both of these were raised by automated review on the pull request that shipped
+3.18.1, verified against the code, and are defects in that release rather than
+in what it replaced.
+
+### Fixed
+
+- **A syntax pair was voided by its own transport encoding.** 3.18.1 judged
+  whether a form's broken twin survives its context by looking at the fully
+  wrapped payload -- escaping included. A context has two parts doing different
+  things: the prefix and suffix are text the sink concatenates, while the escape
+  is how the value survives the trip, and an XML consumer turns `&lt;%=` back
+  into `<%=` before any template parser sees it. So the `xml` context voided
+  `<%= %>` for a reason that has nothing to do with the sink, dropping the sixth
+  form and with it a real `syntax-sink` on a target whose ERB is reached through
+  an XML body.
+
+  Survival is read from the prefix and suffix now. Measured across every shipped
+  context, before and after: `xml` voided `<%= %>` and no longer does, and
+  `shell_subshell` still voids `@()`, which is the one a structural suffix
+  really does repair.
+
+  It is 3.18.1's own mistake mirrored. That release stopped a form that was
+  never tested from reading as a clean negative, and introduced a form that was
+  perfectly testable reading as untested.
+
+- **A refused read counted as a read.** 3.18.1 added an `unauthorised` state for
+  an observed endpoint that answers 401/403, and drew it from the poll phase
+  alone -- so a session that expired mid-run overwrote rows that had been read
+  successfully. The first fix for that was to stop overwriting `polled`, and a
+  test showed it was not enough: the per-probe read path marked a row `polled`
+  from a 403 as well, so `polled` never meant "read, and the value was not
+  there" at all. It meant "a status came back".
+
+  A refused read is not a read, at all three sites that take one -- the control,
+  the per-probe read and the poll -- and `polled` means what it says again. A
+  refused control is not a control either: there is no page in a 403 for the
+  differential to rule anything out against. A row whose channel was never read
+  is `unauthorised`; a row that was read keeps its reading; a run where a session
+  expired part-way leaves both kinds, and the notice reports how many of each
+  rather than claiming every read was refused.
+
+  No version of this ever claimed a finding it should not have. What it claimed
+  was that a channel had not been read when it had, which is the same class of
+  error one door along: a run-wide assertion erasing a per-probe observation.
+
 ## [3.18.1] — 2026-11-18
 
 ### Fixed
@@ -4551,6 +4598,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.18.2]: https://github.com/kabiri-labs/rcekit/compare/v3.18.1...v3.18.2
 [3.18.1]: https://github.com/kabiri-labs/rcekit/compare/v3.18.0...v3.18.1
 [3.18.0]: https://github.com/kabiri-labs/rcekit/compare/v3.17.0...v3.18.0
 [3.17.0]: https://github.com/kabiri-labs/rcekit/compare/v3.16.0...v3.17.0
