@@ -4,7 +4,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.18.0** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.18.1** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -614,7 +614,16 @@ A run that was only *partly* blinded gets the same treatment one level down. If
 you asked for a second-order oracle and the observed endpoint never answered, the
 probe verdicts still stand — but the run tells you they were decided without ever
 reading the channel you pointed it at, rather than letting them pass for a
-second-order negative.
+second-order negative. An endpoint that answered **401 or 403 to every read** is
+reported as its own case for the same reason: that fetch carries no credentials
+of its own by design, so a page behind a login needs `--observe-request` with a
+captured request that has the session, and the run says so instead of counting
+the reads as clean.
+
+The same rule reaches one level further in. A probe shape the context it lands
+in cannot carry — a syntax pair whose broken half that context's own suffix
+closes — is not sent and is not voted on: the run discloses it and the verdicts
+describe the shapes that were measured.
 
 **`error` is held to its own claim, too.** It says nothing reached the target,
 and a request that hung because the injected command hung did reach it. So a

@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.18.0"
+__version__ = "3.18.1"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -962,6 +962,12 @@ class RCEKit:
         # are disclosed.
         self.reach_noted_probes = 0
         self.reach_notes: Dict[str, int] = {}
+        # Probe shapes a context cannot carry, and which were therefore never
+        # put to the target. Disclosed rather than counted as an answer: the
+        # verdicts describe what was measured, and this says what was not
+        # asked. The same treatment the partly-blinded second-order run gets.
+        self.untested_shapes = 0
+        self.untested_notes: Dict[str, int] = {}
         # And apart once more from the shapes not sent because the carrier they
         # belong to had already confirmed. A fourth number rather than a fourth
         # meaning for one of the others: this says the probe *could* have been
@@ -4288,6 +4294,11 @@ class RCEKit:
         import time
         if observe is None:
             return results
+        # Every status the observed endpoint answered with. A channel that only
+        # ever says 401 or 403 was read and told the run nothing, which is a
+        # different thing from one that never answered -- and it has a fix the
+        # operator can apply, which is why it is worth separating.
+        answered: Set[int] = set()
         for result in results:
             result.setdefault("observe_status", "not-observed")
         pending = [r for r in results
@@ -4316,6 +4327,7 @@ class RCEKit:
             status, body, channels, _ = self._fire_observed(observe, timeout)
             if status is not None:
                 observe_reached = True
+                answered.add(status)
                 searched = channels or ([("response body", body)] if body else [])
                 for result in list(pending):
                     if self._observe_match(result, searched, observe_control,
@@ -4332,6 +4344,16 @@ class RCEKit:
             # the place the execution was expected to appear.
             for result in results:
                 result["observe_status"] = "unreachable"
+        elif answered and answered <= {401, 403}:
+            # Read, and refused every time. The observed fetch carries no
+            # credentials of its own -- deliberately, and the README lists that
+            # under the engagement controls -- so a page behind a login answers
+            # this way until the operator hands it a request that has the
+            # session. Marked distinctly from `polled`, which claims the channel
+            # was read and carried nothing: this one was not read at all.
+            for result in results:
+                if result.get("observe_status") in ("polled", "not-observed"):
+                    result["observe_status"] = "unauthorised"
         return results
 
     def _observe_match(self, result: Dict[str, Any], searched: List[Tuple[str, str]],
@@ -7620,10 +7642,22 @@ class SyntaxDifferential(DetectionMethod):
     halves were both refused is `blocked`. Measured against a 403-on-malformed
     fixture: 0 of 1200.
 
+    **A pair has to survive the context it is wrapped in**, and one does not.
+    A context is a prefix and a suffix, and a suffix can hand back the very
+    character the broken twin removed: `shell_subshell` wraps the payload in
+    `$(` ... `)`, so the broken ``@(a*b`` arrives as ``$(@(a*b)`` and a Razor
+    parser sees a balanced expression. Both halves are then well formed, they
+    answer alike, and the form reported `negative` until 3.18.1 -- a clean bill
+    of health for a question nobody put to the target. :meth:`_pair_survives`
+    checks each pair against its context now; a form that does not survive is
+    not sent and is disclosed on the run as untested. Measured across every
+    shipped context: exactly one pair is voided, ``@()`` inside
+    `shell_subshell`.
+
     Requests: 4 per form per round. Six forms at ``--probe-depth full`` is 24
     per carrier, three at ``quick`` is 12, and a form that screens positive
     costs 4 more. Nothing is spent on the bare form -- it has no delimiter to
-    break."""
+    break -- or on a form its context voids."""
     name = "syntax"
     tier = "syntax-sink"
     # It answers the execution question weakly, so a point where execution is
@@ -7655,13 +7689,17 @@ class SyntaxDifferential(DetectionMethod):
     # The bare ``{expr}`` form `eval` sends is absent: it has no delimiter to
     # break, so it has no declarable twin, and a fabricated one would compare
     # two expressions rather than two syntaxes.
+    #
+    # The fourth element is the form's own closing token. It is declared for the
+    # same reason the broken twin is: it is what decides whether a pair survives
+    # the context it is wrapped in. See :meth:`_pair_survives`.
     _FORMS = (
-        ("${}", "${{{expr}}}", "${{{expr}"),
-        ("{{}}", "{{{{{expr}}}}}", "{{{{{expr}}}"),
-        ("#{}", "#{{{expr}}}", "#{{{expr}"),
-        ("%{}", "%{{{expr}}}", "%{{{expr}"),
-        ("<%= %>", "<%= {expr} %>", "<%= {expr} %"),
-        ("@()", "@({expr})", "@({expr}"),
+        ("${}", "${{{expr}}}", "${{{expr}", "}"),
+        ("{{}}", "{{{{{expr}}}}}", "{{{{{expr}}}", "}}"),
+        ("#{}", "#{{{expr}}}", "#{{{expr}", "}"),
+        ("%{}", "%{{{expr}}}", "%{{{expr}", "}"),
+        ("<%= %>", "<%= {expr} %>", "<%= {expr} %", "%>"),
+        ("@()", "@({expr})", "@({expr}", ")"),
     )
     # `quick` keeps the three delimiters that cover the most engines per
     # request; `full` sends all six. There is no rung below three that is worth
@@ -7696,6 +7734,52 @@ class SyntaxDifferential(DetectionMethod):
             forms = forms[:self.QUICK_FORMS]
         return forms
 
+    def _opening(self, valid: str) -> str:
+        """The form's opening delimiter, unescaped from its format template."""
+        return valid.split("{expr}")[0].replace("{{", "{").replace("}}", "}")
+
+    def _pair_survives(self, record: "PayloadRecord", valid: str, broken: str,
+                       closer: str) -> bool:
+        """Whether the broken twin is still malformed *after* the context wraps
+        it.
+
+        A context is a prefix and a suffix, and a suffix can hand back the very
+        character the twin had removed: `shell_subshell` wraps the payload in
+        `$(` ... `)`, so the broken `@(a*b` arrives as `$(@(a*b)` and the Razor
+        parser sees a balanced `@(a*b)`. The pair is then two well-formed
+        payloads, the halves answer alike, and the form reported `negative` --
+        about a question nobody asked.
+
+        That is the shape of false clean this whole project is built against:
+        the README's own opening says a run that could not test something never
+        reports it as clean. So the pair is checked here, and a form that does
+        not survive its context is reported untested instead. Measured across
+        every shipped context at the time of writing: exactly one pair is
+        voided, `@()` inside `shell_subshell`.
+
+        The check is a search rather than a parse, for the reason
+        :func:`response_shape` gives about regexes: the input is a payload this
+        tool built, and a parser that raised on one would turn an oracle into an
+        error."""
+        wrapped = self._wrap_context(record, broken.format(expr="1*1"))
+        opening = self._opening(valid)
+        at = wrapped.find(opening)
+        if at < 0:
+            # The wrapper rewrote the opening delimiter itself -- an escaping
+            # context, say. Nothing can be concluded about the pair, so it is
+            # not claimed to have been tested either.
+            return False
+        return closer not in wrapped[at + len(opening):]
+
+    def _split_forms(self, record: "PayloadRecord"):
+        """``(testable, voided)`` for this context."""
+        testable, voided = [], []
+        for form in self._selected_forms():
+            name, valid, broken, closer = form
+            (testable if self._pair_survives(record, valid, broken, closer)
+             else voided).append(form)
+        return testable, voided
+
     def _round(self, record: "PayloadRecord", rng: "random.Random",
                name: str, valid: str, broken: str, tag: str) -> List[Probe]:
         a = rng.randint(1000, 9999)
@@ -7722,8 +7806,27 @@ class SyntaxDifferential(DetectionMethod):
         # The same thing `time` does for the same reason.
         self._record = record
         self._rng = rng
+        testable, voided = self._split_forms(record)
+        # Held for `confirm_each`, which has the series and not the record, and
+        # has to say that these forms were not tested rather than let them fall
+        # silent. If every form were voided this method would build nothing and
+        # the carrier would contribute no row at all -- the engine's own
+        # `nothing-tested` path is what covers that, and no shipped context
+        # comes close: one pair is voided in one context.
+        for name, _v, _b, _c in voided:
+            # Recorded on the run rather than returned as a verdict. A verdict
+            # row made every sweep that includes a subshell context collapse to
+            # `inconclusive`, which is almost every sweep -- so the one method
+            # that can answer about a parse-only sink could no longer report a
+            # clean negative at all. The honest shape is the one the README
+            # already describes for a partly blinded run: the verdicts stand,
+            # and the run says what it never asked.
+            note = (f"{self.name}/{record.context}: the {name} form's broken half is "
+                    "closed by this context's own suffix, so the pair asks nothing here")
+            self.gen.untested_shapes += 1
+            self.gen.untested_notes[note] = self.gen.untested_notes.get(note, 0) + 1
         probes: List[Probe] = []
-        for name, valid, broken in self._selected_forms():
+        for name, valid, broken, _closer in testable:
             probes.extend(self._round(record, rng, name, valid, broken, "syntax"))
         return probes
 
@@ -7742,7 +7845,7 @@ class SyntaxDifferential(DetectionMethod):
         if record is None or rng is None:
             return []
         probes: List[Probe] = []
-        for name, valid, broken in self._selected_forms():
+        for name, valid, broken, _closer in self._selected_forms():
             group = self._group(series, "syntax", name)
             if len(group) < len(self.PHASES):
                 continue
@@ -7776,9 +7879,9 @@ class SyntaxDifferential(DetectionMethod):
         Differenced against the payload-free control, like every other oracle
         here: a sentinel the control carries too is one the probe cannot have
         put there."""
-        valid_form = next((valid for form_name, valid, _broken in self._FORMS
+        valid_form = next((valid for form_name, valid, _broken, _closer in self._FORMS
                            if form_name == name), "")
-        opening = valid_form.split("{expr}")[0].replace("{{", "{").replace("}}", "}")
+        opening = self._opening(valid_form)
         for probe, obs in group.values():
             found = re.search(r"\d{4}\*\d{4}", probe.payload or "")
             control = obs.control_body or ""
@@ -7836,7 +7939,7 @@ class SyntaxDifferential(DetectionMethod):
     def confirm_each(self, series: "List[Tuple[Probe, Observation]]"
                      ) -> "Optional[List[Tuple[Probe, Verdict]]]":
         out: List[Tuple[Probe, Verdict]] = []
-        for name, _valid, _broken in self._selected_forms():
+        for name, _valid, _broken, _closer in self._selected_forms():
             first = self._group(series, "syntax", name)
             if len(first) < len(self.PHASES):
                 continue
@@ -13375,6 +13478,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for note, count in sorted(generator.reach_notes.items(),
                                           key=lambda item: (-item[1], item[0])):
                     print(f"[detect]   {count} x {note}")
+            if generator.untested_shapes:
+                # Not a verdict -- a disclosure. These shapes were never put to
+                # the target, so no verdict describes them, and the run says so
+                # rather than letting the forms that *were* measured stand for
+                # the ones that could not be.
+                print(f"[detect] {generator.untested_shapes} probe shape(s) could not be "
+                      "carried by the context they landed in and were NOT tested; the "
+                      "verdicts above describe the shapes that were:")
+                for note, count in sorted(generator.untested_notes.items(),
+                                          key=lambda item: (-item[1], item[0])):
+                    print(f"[detect]   {count} x {note}")
             if not results:
                 # Nothing was tested. Saying so is the whole point: a run that
                 # built no probes used to end here in silence and exit 0, which
@@ -13489,6 +13603,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             # confirmed something anyway -- was the run that got none.
             for line in refused_but_landed_advice(results):
                 print(line)
+            if observe_url and any(r.get("observe_status") == "unauthorised"
+                                   for r in results):
+                warn(f"[!] The OBSERVED endpoint ({observe_url}) answered 401/403 on every "
+                     "read, so nothing was read from it. That fetch carries no credentials "
+                     "of its own by design — pass --observe-request with a captured request "
+                     "that has the session, and the reads go out as you. Any negative below "
+                     "was decided from the injected response alone.")
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
                 # verdicts below were decided without ever reading the place the

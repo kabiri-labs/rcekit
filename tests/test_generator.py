@@ -9407,10 +9407,10 @@ class SyntaxDifferentialTestCase(unittest.TestCase):
 
     # The one pair a context wrapper repairs. `$(` ... `)` closes the broken
     # `@(a*b` with its own paren, so in that context the pair is not a pair any
-    # more and the form answers `negative`. Measured rather than reasoned, and
-    # it is a false negative rather than a false claim -- the direction this
-    # project will take when it has to pick one.
+    # more -- and the form is reported as NOT TESTED rather than negative,
+    # which is what `_pair_survives` is for. Measured rather than reasoned.
     REPAIRED = ("@()", "shell_subshell")
+    UNTESTED = "asks nothing here"
 
     def _run(self, route, **config):
         with local_target(route) as base:
@@ -9432,23 +9432,22 @@ class SyntaxDifferentialTestCase(unittest.TestCase):
 
         results = self._run(route)
         self.assertTrue(results, "precondition: the method must build probes")
-        claimed = {(r["context"], r["verdict"]) for r in results}
-        for context, verdict in claimed:
-            if (results[0] and verdict == "negative"
-                    and context == self.REPAIRED[1]):
-                continue
-            self.assertEqual(
-                verdict, "syntax-sink",
-                f"verdicts were {[(r['payload'], r['verdict']) for r in results]}")
-        detail = next(r["detail"] for r in results if r["verdict"] == "syntax-sink")
+        self.assertEqual(
+            {r["verdict"] for r in results}, {"syntax-sink"},
+            f"verdicts were {[(r['payload'], r['verdict']) for r in results]}")
+        detail = results[0]["detail"]
         self.assertIn("something on the target parsed this syntax", detail)
         self.assertIn("nothing here says it evaluates what it parses", detail,
                       "the finding has to disclaim the evaluator it does not prove")
 
-    def test_a_wrapper_that_repairs_the_broken_half_reports_negative(self):
-        """The known limit, pinned so it cannot drift into a claim. A subshell
-        context closes `@(a*b` with its own paren, so that form's two halves
-        are both well formed there and the honest answer is `negative`."""
+    def test_a_wrapper_that_repairs_the_broken_half_reports_it_untested(self):
+        """A subshell context closes `@(a*b` with its own paren, so that form's
+        two halves would both be well formed there and the pair asks nothing.
+
+        It reported `negative` until 3.18.1, which is a clean bill of health
+        for a question nobody put to the target -- the one thing the README's
+        opening promises the tool never does. No probe is spent on such a form
+        now, and the row says it was not tested."""
         def route(method, path, params, headers, body):
             value = params.get("q", "")
             if value.startswith("rcekit-"):
@@ -9458,12 +9457,20 @@ class SyntaxDifferentialTestCase(unittest.TestCase):
             return 200, "<html><body><p>No results</p></body></html>"
 
         results = self._run(route)
-        repaired = [r for r in results
-                    if r["context"] == self.REPAIRED[1] and self.REPAIRED[0] in r["detail"]]
-        self.assertTrue(repaired, "the @() form was not measured in a subshell context")
-        self.assertEqual({r["verdict"] for r in repaired}, {"negative"},
-                         "a form whose halves a wrapper made identical must not be a "
-                         "finding either way")
+        form, context = self.REPAIRED
+        subshell = [r for r in results if r["context"] == context]
+        self.assertTrue(subshell, "no carrier ran in a subshell context")
+        self.assertNotIn(form, {r["detail"].split(":")[0] for r in subshell},
+                         "a form whose pair the context voids must not get a verdict, "
+                         "and least of all a negative one")
+        self.assertEqual(len(subshell), len(self.DELIMS) - 1,
+                         "five forms survive that wrapper, so five rows")
+        # Not silence: the run discloses what it did not ask.
+        self.assertGreater(self.gen.untested_shapes, 0)
+        note = " ".join(self.gen.untested_notes)
+        self.assertIn(context, note)
+        self.assertIn(form, note)
+        self.assertIn(self.UNTESTED, note)
 
     def test_a_target_that_answers_both_forms_alike_is_negative(self):
         def route(method, path, params, headers, body):
@@ -9471,7 +9478,9 @@ class SyntaxDifferentialTestCase(unittest.TestCase):
 
         results = self._run(route)
         self.assertEqual({r["verdict"] for r in results}, {"negative"})
-        self.assertEqual(rcekit.overall_detection_verdict(results), "negative")
+        self.assertEqual(rcekit.overall_detection_verdict(results), "negative",
+                         "a shape the context could not carry is disclosed, not voted: "
+                         "the verdicts describe what was measured")
 
     # -- the three guards that keep it quiet ---------------------------------
 
@@ -14617,6 +14626,39 @@ class ObservedChannelTestCase(unittest.TestCase):
                         "observe_timeout": 0})
         self.assertTrue(results)
         self.assertEqual({r["observe_status"] for r in results}, {"unreachable"})
+
+    def test_an_observed_endpoint_behind_a_login_is_told_apart_from_a_dead_one(self):
+        """401/403 on every read is not `polled`, and not `unreachable` either.
+
+        The observed fetch carries no credentials of its own -- deliberately,
+        and the README lists that under the engagement controls -- so a page
+        behind a login answers this way until the operator hands it a request
+        with the session. Reported as its own state so the run can name the
+        flag that fixes it instead of letting the negatives below pass for
+        second-order ones."""
+        def route(method, path, params, headers, body):
+            if path == "/profile":
+                return 403, "<html><body>Please sign in</body></html>"
+            return 200, "<html><body>saved</body></html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/bio?bio=FUZZ", methods=["eval"],
+                max_payloads=6,
+                config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
+                        "observe_timeout": 0})
+        self.assertTrue(results)
+        self.assertEqual({r["observe_status"] for r in results}, {"unauthorised"},
+                         "a refused read was reported as though the channel had been "
+                         "read and carried nothing")
+
+    def test_an_observed_endpoint_that_answers_is_not_called_unauthorised(self):
+        with local_target(self._stored_route(self._render_ssti, store="append")) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/bio?bio=FUZZ", methods=["eval"],
+                max_payloads=6,
+                config={"observe_url": f"{base}/profile", "observe_timeout": 0})
+        self.assertNotIn("unauthorised", {r["observe_status"] for r in results})
 
     def test_a_zero_timeout_reads_once_and_does_not_wait(self):
         """`--observe-timeout 0` means "read it once", not "use the default".
