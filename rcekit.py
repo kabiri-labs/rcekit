@@ -3386,6 +3386,15 @@ class RCEKit:
         """Whether this run may send this probe shape. Counts nothing."""
         return SAFETY_ORDER.get(meth.probe_safety(probe), 1) <= self._safety_ceiling(meth)
 
+    # --- Delivery facts, decided once for every method ----------------------
+    #
+    # What a filter's answer means, before any oracle sees it. These are on the
+    # engine rather than on a method because being refused -- or never
+    # answered -- is a fact about delivery and not about what any one method
+    # was looking for, so every method inherits the right answer instead of
+    # the current one. The first of the three trust-core regions
+    # `docs/oracle-model.md` indexes.
+
     def _escalate(self, meth: "DetectionMethod", probe: "Probe",
                   record: "PayloadRecord", delivery: "ProbeDelivery",
                   timeout: float,
@@ -5288,6 +5297,21 @@ NON_APPLICATION_HEADERS = frozenset({
 })
 
 
+# =========================================================================
+# TRUST CORE (2 of 3) -- the oracle contract
+#
+# What a method may declare, and what one probe carries. Everything a verdict
+# rests on is declared here rather than inferred: the tier a shape can reach,
+# the rung it needs, the question it answers, where its evidence arrives. The
+# repeated lesson in the comments below is that deriving one of those from a
+# neighbour that happens to agree works until it does not.
+#
+# Indexed, with the invariants and the test that holds each, in
+# `docs/oracle-model.md`. The oracles themselves follow, one class per
+# `--methods` value; the vocabulary their verdicts are named in is region 3,
+# beside `DETECTION_METHODS`.
+# =========================================================================
+
 @dataclass
 class Probe:
     """One request RCEKit will send, plus the values it computed *locally* to
@@ -6140,6 +6164,10 @@ class DetectionMethod:
         escaped = self.gen._escape_for_context(body, ctx.get("escape", "none"))
         return f"{ctx.get('prefix', '')}{escaped}{ctx.get('suffix', '')}"
 
+
+# =========================================================================
+# End of the oracle contract. From here to `DETECTION_METHODS`: the oracles.
+# =========================================================================
 
 class ReflectedMath(DetectionMethod):
     """Results-based confirmation (highest value). Force the target's shell to
@@ -9338,6 +9366,20 @@ class DeserSink(DetectionMethod):
 # carrier rather than the sink.
 CHAIN_UNSUPPORTED_METHODS = frozenset({"time", "boolean"})
 
+# =========================================================================
+# TRUST CORE (3 of 3) -- the verdict vocabulary
+#
+# What the names mean, and which one describes a whole run. Ordering is data
+# here rather than a sequence of print statements, because the summary line and
+# the report's sections used to state it separately and disagreed.
+#
+# Nothing in this region sends a request or reads a response body for evidence:
+# it decides what was refused (`payload_refused`), what a response *is* with
+# what it said taken out (`response_shape`), and what a set of verdicts
+# collapses to (`overall_detection_verdict`). Indexed in
+# `docs/oracle-model.md`.
+# =========================================================================
+
 DETECTION_METHODS = {
     ReflectedMath.name: ReflectedMath,
     FileBased.name: FileBased,
@@ -9641,6 +9683,10 @@ VERDICT_MEANING = {
     "nothing-tested": "no probes were built, so nothing was tested",
 }
 
+
+# =========================================================================
+# End of the verdict vocabulary. From here: reporting and the CLI.
+# =========================================================================
 
 def write_detection_json(path: str, results: List[Dict[str, Any]], target: str,
                          methods: List[str]) -> None:

@@ -10,6 +10,35 @@ formats, or the template schema.
 
 ### Documentation
 
+- **`docs/oracle-model.md`: where to audit the verdict logic.** The trust core
+  -- the oracle contract, the verdict vocabulary, and the delivery facts the
+  engine decides for every method -- is interleaved with HTTP delivery, CLI
+  parsing, injection-point enumeration and an embedded corpus, because
+  `rcekit.py` is one file on purpose. A reviewer's first question is where the
+  verdict logic lives, and the answer was "read 14,000 lines".
+
+  The page is an index rather than a second copy of anything: the three regions
+  with the symbols in each, and every invariant the model rests on with **the
+  test that holds it**. `rcekit.py` now fences those three regions with the
+  banner style the rest of the file already uses, so each is citable.
+
+  The citations are checked. `OracleModelPageTestCase` asserts that every test
+  the page names exists and that every symbol in its region table is a symbol,
+  because which test guards which property is a judgement and cannot be
+  derived -- so without the check the page would rot the way every
+  hand-written cross-reference here has rotted before: the property stays
+  true, the test gets renamed, and the page sends a reviewer after something
+  that is not there.
+
+  Module extraction was considered and declined. One file is a distribution
+  property -- `rcekit.py` runs alone on a jump box -- and the three regions
+  cannot be made one contiguous block without moving code, so the page says
+  where they are instead of pretending they are adjacent.
+
+  No version bump -- this is documentation and comments only.
+
+### Documentation
+
 - **The README said a run that reached nothing exits non-zero, and it exits 0.**
   The sentence bundled `error` together with `nothing-tested` and claimed the
   status for both, and it left `blocked` out although the paragraph above it

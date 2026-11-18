@@ -7,6 +7,7 @@ dependency.
 """
 
 import argparse
+import ast
 import html
 import os
 import random
@@ -26,6 +27,7 @@ SCRIPT = REPO_ROOT / "rcekit.py"
 README = REPO_ROOT / "README.md"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 DOCS_DIR = REPO_ROOT / "docs"
+TESTS_DIR = REPO_ROOT / "tests"
 
 FENCE_RE = re.compile(r"^\s*```", re.MULTILINE)
 LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)\)")
@@ -220,6 +222,75 @@ class ConfirmationContractTestCase(unittest.TestCase):
             f"{channels} channels", self.contract,
             f"the contract names {channels} distinct channels and the prose "
             f"does not say so")
+
+
+class OracleModelPageTestCase(unittest.TestCase):
+    """`docs/oracle-model.md` is an index, and an index that points at nothing
+    is worse than no index.
+
+    Its whole claim is "here is the invariant, and here is the test that holds
+    it". A test renamed afterwards leaves the property true and the page
+    lying -- which is the failure every hand-written cross-reference in this
+    repository has had at least once, and the reason the others are derived.
+    This one cannot be derived, because which test guards which property is a
+    judgement rather than a fact about the source. So it is checked instead.
+    """
+
+    PAGE = DOCS_DIR / "oracle-model.md"
+    CODE_RE = re.compile(r"`([^`]+)`")
+    # `ClassTestCase` or `ClassTestCase.test_something`.
+    CITATION_RE = re.compile(r"^(\w+TestCase)(?:\.(test_\w+))?$")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.PAGE.read_text(encoding="utf-8")
+        cls.defined = {}
+        for path in sorted(TESTS_DIR.glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    cls.defined.setdefault(node.name, set()).update(
+                        child.name for child in node.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    def _citations(self):
+        for span in self.CODE_RE.findall(self.text):
+            match = self.CITATION_RE.match(span)
+            if match:
+                yield match.group(1), match.group(2)
+
+    def test_the_page_cites_tests_at_all(self):
+        # Without this the check below passes the moment the page stops being
+        # an index, which is how a docs check dies quietly.
+        self.assertGreaterEqual(len(list(self._citations())), 10,
+                                "the oracle model page names almost no tests, so it is "
+                                "no longer the index it claims to be")
+
+    def test_every_test_the_page_names_exists(self):
+        for klass, method in self._citations():
+            with self.subTest(citation=klass if not method else f"{klass}.{method}"):
+                self.assertIn(klass, self.defined,
+                              f"docs/oracle-model.md names {klass}, which no test module "
+                              "defines")
+                if method:
+                    self.assertIn(
+                        method, self.defined[klass],
+                        f"docs/oracle-model.md names {klass}.{method}, and that class has "
+                        "no such test")
+
+    def test_every_symbol_the_region_table_names_is_in_the_module(self):
+        """The three-region table is the map a reviewer navigates by, so every
+        symbol in it has to be a symbol."""
+        start = self.text.index("| Region |")
+        end = self.text.index("\n\n", start)
+        named = {span for span in self.CODE_RE.findall(self.text[start:end])}
+        self.assertGreaterEqual(len(named), 10, "the region table was not read")
+        source = SCRIPT.read_text(encoding="utf-8")
+        for symbol in sorted(named):
+            with self.subTest(symbol=symbol):
+                self.assertTrue(
+                    re.search(r"(?:^|[^\w.])%s\b" % re.escape(symbol), source, re.M),
+                    f"the region table names {symbol}, which rcekit.py does not define")
 
 
 class VersionBadgeTestCase(unittest.TestCase):
