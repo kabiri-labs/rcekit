@@ -919,6 +919,7 @@ target shapes.
 | [**Field guide**](docs/guide.md) | Example-driven walkthrough of every real situation, from a first probe to multi-step chains. **Start here.** |
 | [**Payload generation &amp; exports**](docs/generation.md) | RCEKit as a payload generator: target profiles, and Burp / ffuf / Nuclei exports. |
 | [**Reference**](docs/reference.md) | Every flag, environment, category, context, encoding and code-execution sink. |
+| [**The oracle model**](docs/oracle-model.md) | Where to audit the verdict logic, and the invariant behind each verdict with the test that holds it. For a reviewer rather than an operator. |
 | [**CHANGELOG.md**](CHANGELOG.md) | What changed in each release, and what to re-check when upgrading. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to add sinks, categories, encodings and detection methods. |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability in RCEKit itself, and why package scanners flag this tool. |
