@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.18.1"
+__version__ = "3.18.2"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -3724,6 +3724,11 @@ class RCEKit:
         observe = observe_request(config or {})
         observe_control: List[Tuple[str, str]] = []
         observe_reached = False
+        # Whether any read of that endpoint was refused. Carried beside
+        # `observe_reached` because the two say different things and only
+        # together do they say which: never answered, answered, or answered
+        # with a refusal.
+        observe_denied = False
         if observe is not None:
             # The trigger fires for the control too, so the control and every
             # later read differ in the payload and in nothing else -- the same
@@ -3735,7 +3740,11 @@ class RCEKit:
             self._fire_trigger(observe_trigger(config or {}), timeout)
             o_status, o_body, o_channels, _ = self._fire_observed(observe, timeout)
             observe_reached = o_status is not None
-            observe_control = o_channels or ([("response body", o_body)] if o_body else [])
+            observe_denied = o_status in OBSERVE_REFUSED
+            # A refused control is not a control either: there is no page in a
+            # 403 for the differential to rule anything out against.
+            observe_control = ([] if observe_denied else
+                               o_channels or ([("response body", o_body)] if o_body else []))
 
         # Reduce records to distinct (environment, context) carriers so the same
         # probe shape is not refired for every payload sharing that carrier.
@@ -4010,7 +4019,8 @@ class RCEKit:
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout,
-                            observe_trigger(config or {}), control_status)
+                            observe_trigger(config or {}), control_status,
+                            observe_denied)
                     seen.add(probe.payload)
                     status, body, chans, elapsed = delivery.send(probe.payload, timeout)
                     self.delivered_probes += 1
@@ -4186,7 +4196,14 @@ class RCEKit:
                         # pre-flight counts it per probe rather than per poll.
                         self._fire_trigger(observe_trigger(config or {}), timeout)
                         o_status, o_body, o_chans, _ = self._fire_observed(observe, timeout)
-                        if o_status is not None:
+                        if o_status in OBSERVE_REFUSED:
+                            # Not read. Leaving the row `not-observed` is what
+                            # lets the run say so at the end, and calling
+                            # `_observe_match` here would mark it `polled` --
+                            # read, and the value absent -- about a page nobody
+                            # was shown.
+                            observe_denied = True
+                        elif o_status is not None:
                             observe_reached = True
                             self._observe_match(
                                 result, o_chans or ([("response body", o_body)] if o_body else []),
@@ -4206,10 +4223,11 @@ class RCEKit:
                     if self._budget_spent(started_requests, max_payloads):
                         return self._resolve_observed(
                             results, observe, observe_control, observe_reached, timeout,
-                            observe_trigger(config or {}), control_status)
+                            observe_trigger(config or {}), control_status,
+                            observe_denied)
         return self._resolve_observed(
             results, observe, observe_control, observe_reached, timeout,
-            observe_trigger(config or {}), control_status)
+            observe_trigger(config or {}), control_status, observe_denied)
 
     # A probe's expected value may only be looked for on the observed channel
     # when the payload does not already carry it. That single rule is what keeps
@@ -4270,7 +4288,12 @@ class RCEKit:
                           # can land on a row whose own probe a filter refused,
                           # and that is the third channel on which an effect can
                           # be seen to have landed anyway.
-                          control_status: Optional[int] = None
+                          control_status: Optional[int] = None,
+                          # Whether any read before this one was refused. The
+                          # poll phase cannot see the control or the per-probe
+                          # reads, and a session that expires mid-run is
+                          # answered 200 by those and 401 here.
+                          observe_denied: bool = False
                           ) -> List[Dict[str, Any]]:
         """Poll the observed channel and upgrade the probes whose value lands there.
 
@@ -4294,11 +4317,6 @@ class RCEKit:
         import time
         if observe is None:
             return results
-        # Every status the observed endpoint answered with. A channel that only
-        # ever says 401 or 403 was read and told the run nothing, which is a
-        # different thing from one that never answered -- and it has a fix the
-        # operator can apply, which is why it is worth separating.
-        answered: Set[int] = set()
         for result in results:
             result.setdefault("observe_status", "not-observed")
         pending = [r for r in results
@@ -4325,9 +4343,14 @@ class RCEKit:
             # control, and the pre-flight says so before any of it happens.
             self._fire_trigger(trigger, timeout)
             status, body, channels, _ = self._fire_observed(observe, timeout)
+            if status in OBSERVE_REFUSED:
+                observe_denied = True
+                if not pending or time.time() >= deadline:
+                    break
+                time.sleep(interval)
+                continue
             if status is not None:
                 observe_reached = True
-                answered.add(status)
                 searched = channels or ([("response body", body)] if body else [])
                 for result in list(pending):
                     if self._observe_match(result, searched, observe_control,
@@ -4344,15 +4367,20 @@ class RCEKit:
             # the place the execution was expected to appear.
             for result in results:
                 result["observe_status"] = "unreachable"
-        elif answered and answered <= {401, 403}:
-            # Read, and refused every time. The observed fetch carries no
+        elif observe_denied:
+            # Refused, and so never read. The observed fetch carries no
             # credentials of its own -- deliberately, and the README lists that
             # under the engagement controls -- so a page behind a login answers
             # this way until the operator hands it a request that has the
-            # session. Marked distinctly from `polled`, which claims the channel
-            # was read and carried nothing: this one was not read at all.
+            # session.
+            #
+            # Only a row that was never read is marked, and `not-observed` is
+            # what that looks like now that a refusal no longer counts as a
+            # reading. `polled` means the channel *was* read for that probe and
+            # did not carry the value, which is a measurement: overwriting one
+            # would be a run-wide assertion erasing a per-probe observation.
             for result in results:
-                if result.get("observe_status") in ("polled", "not-observed"):
+                if result.get("observe_status") == "not-observed":
                     result["observe_status"] = "unauthorised"
         return results
 
@@ -5312,6 +5340,16 @@ SHELL_CAPABLE_ENVIRONMENTS = UNIX_SHELL_ENVIRONMENTS | {"windows"} | {
 # that collision would read as a confirmation the target never earned. The
 # guarantee that `executed` means executed outranks the last few percent of
 # channel coverage.
+# A read the observed endpoint refused is not a read. `401`/`403` carry no page
+# to search, and counting one as a reading made `polled` -- "read, and the value
+# was not there" -- true of a probe whose channel had never been looked at.
+#
+# One constant because three read sites have to agree: the control, the
+# per-probe read, and the poll. The first version of this lived in the poll
+# alone, and a test caught what that missed -- the per-probe path had already
+# marked the rows `polled` from a 403.
+OBSERVE_REFUSED = frozenset({401, 403})
+
 NON_APPLICATION_HEADERS = frozenset({
     "content-length", "content-range", "content-encoding", "transfer-encoding",
     "date", "age", "expires", "last-modified", "etag", "retry-after",
@@ -7757,17 +7795,32 @@ class SyntaxDifferential(DetectionMethod):
         every shipped context at the time of writing: exactly one pair is
         voided, `@()` inside `shell_subshell`.
 
+        Read from the context's prefix and suffix and **not** from the escaped
+        payload, which is the distinction the first version of this missed. A
+        context has two parts and they do different things: the prefix and
+        suffix are text the sink itself concatenates, while the escape is how
+        the value survives the trip -- `_escape_for_context` exists for exactly
+        that, and an XML consumer turns `&lt;%=` back into `<%=` before any
+        template parser sees it. Judging survival on the escaped form voided
+        `<%= %>` in the `xml` context for a reason that has nothing to do with
+        the sink: measured, that dropped the sixth form and with it a real
+        `syntax-sink` on a target whose ERB is reached through an XML body.
+
         The check is a search rather than a parse, for the reason
         :func:`response_shape` gives about regexes: the input is a payload this
         tool built, and a parser that raised on one would turn an oracle into an
         error."""
-        wrapped = self._wrap_context(record, broken.format(expr="1*1"))
+        ctx = self.gen.contexts.get(record.context,
+                                    {"prefix": "", "suffix": "", "escape": "none"})
+        wrapped = "%s%s%s" % (ctx.get("prefix", ""), broken.format(expr="1*1"),
+                              ctx.get("suffix", ""))
         opening = self._opening(valid)
         at = wrapped.find(opening)
         if at < 0:
-            # The wrapper rewrote the opening delimiter itself -- an escaping
-            # context, say. Nothing can be concluded about the pair, so it is
-            # not claimed to have been tested either.
+            # Unreachable by construction now that the escape is not applied --
+            # a broken twin carries its own opening delimiter. Kept because the
+            # honest answer to "cannot tell" is not to claim the pair was
+            # tested.
             return False
         return closer not in wrapped[at + len(opening):]
 
@@ -13603,13 +13656,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             # confirmed something anyway -- was the run that got none.
             for line in refused_but_landed_advice(results):
                 print(line)
-            if observe_url and any(r.get("observe_status") == "unauthorised"
-                                   for r in results):
-                warn(f"[!] The OBSERVED endpoint ({observe_url}) answered 401/403 on every "
-                     "read, so nothing was read from it. That fetch carries no credentials "
-                     "of its own by design — pass --observe-request with a captured request "
-                     "that has the session, and the reads go out as you. Any negative below "
-                     "was decided from the injected response alone.")
+            denied = [r for r in results if r.get("observe_status") == "unauthorised"]
+            if observe_url and denied:
+                # Counted rather than described as "every read", because some
+                # reads may have succeeded earlier in the run: a session that
+                # expires mid-run leaves rows that were read and rows that were
+                # not, and only the second kind are these.
+                warn(f"[!] The OBSERVED endpoint ({observe_url}) refused the read with "
+                     f"401/403 for {len(denied)} of {len(results)} probe(s), so nothing was "
+                     "read from it for those. That fetch carries no credentials of its own "
+                     "by design — pass --observe-request with a captured request that has "
+                     "the session, and the reads go out as you. Any negative among them was "
+                     "decided from the injected response alone.")
             if observe_url and all(r.get("observe_status") == "unreachable" for r in results):
                 # The operator asked for a channel that never answered, so the
                 # verdicts below were decided without ever reading the place the

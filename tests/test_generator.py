@@ -9585,6 +9585,53 @@ class SyntaxDifferentialTestCase(unittest.TestCase):
                 any(delim in probe.payload for delim in ("${", "{{", "#{", "%{", "<%=", "@(")),
                 f"a probe carries no delimiter at all: {probe.payload!r}")
 
+    def test_an_escaped_delimiter_is_transport_and_not_a_voided_pair(self):
+        """A context has two parts doing different things.
+
+        The prefix and suffix are text the sink concatenates; the escape is how
+        the value survives the trip, and the consumer undoes it before any
+        template parser sees it. Judging survival on the escaped payload voided
+        `<%= %>` in the `xml` context -- `&lt;%=` is not `<%=` to a string
+        search -- and dropped a form that was perfectly testable."""
+        method = rcekit.SyntaxDifferential(self.gen, {"probe_depth": "full"})
+        xml = make_record(environment="unix", context="xml")
+        for name, valid, broken, closer in method._FORMS:
+            with self.subTest(form=name):
+                self.assertTrue(
+                    method._pair_survives(xml, valid, broken, closer),
+                    f"{name} was voided in the xml context by its own escaping")
+        # And the one pair a *structural* suffix really does repair still is.
+        subshell = make_record(environment="unix", context="shell_subshell")
+        voided = [name for name, valid, broken, closer in method._FORMS
+                  if not method._pair_survives(subshell, valid, broken, closer)]
+        self.assertEqual(voided, [self.REPAIRED[0]])
+
+    def test_a_form_reached_through_an_xml_body_still_confirms(self):
+        """End to end: the target decodes the entities, as an XML consumer
+        does, and rejects malformed ERB."""
+        import html as _html
+
+        def route(method, path, params, headers, body):
+            value = _html.unescape(params.get("q", ""))
+            if value.startswith("rcekit-"):
+                return 200, "<html><body><p>No results</p></body></html>"
+            if self._malformed(value):
+                return 500, "<html><body><h1>Internal Server Error</h1></body></html>"
+            return 200, "<html><body><p>No results</p></body></html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [make_record(environment="unix", context="xml")],
+                url=f"{base}/x?q=FUZZ", methods=["syntax"], config={}, timeout=15)
+        self.assertTrue(results)
+        self.assertIn("<%= %>", {r["detail"].split(":")[0] for r in results},
+                      "the ERB form was dropped from an xml context")
+        self.assertEqual({r["verdict"] for r in results}, {"syntax-sink"},
+                         f"verdicts were {[r['verdict'] for r in results]}")
+        self.assertNotIn("xml", " ".join(self.gen.untested_notes),
+                         "a form was reported untested in a context that carries it; the "
+                         "subshell carrier in the same sweep legitimately voids one")
+
     def test_quick_narrows_the_forms_and_not_the_guards(self):
         import random as _random
 
@@ -14651,6 +14698,39 @@ class ObservedChannelTestCase(unittest.TestCase):
         self.assertEqual({r["observe_status"] for r in results}, {"unauthorised"},
                          "a refused read was reported as though the channel had been "
                          "read and carried nothing")
+
+    def test_a_read_that_succeeded_keeps_its_reading_when_a_later_one_is_refused(self):
+        """`polled` is a measurement: the channel was read for that probe and
+        did not carry the value. The 401/403 state is drawn from the poll phase
+        alone, so a session that expires mid-run refuses only the later reads --
+        and overwriting `polled` from that claims no read ever succeeded when
+        one had."""
+        state = {"reads": 0}
+
+        def route(method, path, params, headers, body):
+            if path == "/profile":
+                state["reads"] += 1
+                if state["reads"] <= 3:
+                    return 200, "<html><body>nothing here yet</body></html>"
+                return 403, "<html><body>Please sign in</body></html>"
+            return 200, "<html><body>saved</body></html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/bio?bio=FUZZ", methods=["eval"],
+                max_payloads=6,
+                config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
+                        "observe_timeout": 0})
+        self.assertTrue(results)
+        statuses = {r["observe_status"] for r in results}
+        # Both, and that is the point: the rows whose channel was read keep
+        # their reading, and the rows whose read was refused are reported as
+        # never read. The old state overwrote the first kind with the second,
+        # so this set was `{"unauthorised"}` alone.
+        self.assertIn("polled", statuses,
+                      "a row that was read was relabelled as never read")
+        self.assertIn("unauthorised", statuses,
+                      "the rows whose read was refused were not reported")
 
     def test_an_observed_endpoint_that_answers_is_not_called_unauthorised(self):
         with local_target(self._stored_route(self._render_ssti, store="append")) as base:
