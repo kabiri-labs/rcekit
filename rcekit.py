@@ -4197,12 +4197,15 @@ class RCEKit:
                         self._fire_trigger(observe_trigger(config or {}), timeout)
                         o_status, o_body, o_chans, _ = self._fire_observed(observe, timeout)
                         if o_status in OBSERVE_REFUSED:
-                            # Not read. Leaving the row `not-observed` is what
-                            # lets the run say so at the end, and calling
-                            # `_observe_match` here would mark it `polled` --
-                            # read, and the value absent -- about a page nobody
-                            # was shown.
+                            # Answered, and not read. Both halves matter: the
+                            # endpoint is reachable, so a run whose control
+                            # never connected and whose every later read was
+                            # refused is not `unreachable`; and the row stays
+                            # `not-observed`, because calling `_observe_match`
+                            # here would mark it `polled` -- read, and the value
+                            # absent -- about a page nobody was shown.
                             observe_denied = True
+                            observe_reached = True
                         elif o_status is not None:
                             observe_reached = True
                             self._observe_match(
@@ -4344,7 +4347,9 @@ class RCEKit:
             self._fire_trigger(trigger, timeout)
             status, body, channels, _ = self._fire_observed(observe, timeout)
             if status in OBSERVE_REFUSED:
+                # Answered, and not read -- see `OBSERVE_REFUSED`.
                 observe_denied = True
+                observe_reached = True
                 if not pending or time.time() >= deadline:
                     break
                 time.sleep(interval)
@@ -5343,6 +5348,12 @@ SHELL_CAPABLE_ENVIRONMENTS = UNIX_SHELL_ENVIRONMENTS | {"windows"} | {
 # A read the observed endpoint refused is not a read. `401`/`403` carry no page
 # to search, and counting one as a reading made `polled` -- "read, and the value
 # was not there" -- true of a probe whose channel had never been looked at.
+#
+# It is still an *answer*, and the two are not the same question. Reachability
+# asks whether the endpoint responded at all; a reading asks whether a page came
+# back to search. Treating a refusal as neither reported `unreachable` -- "never
+# answered" -- about an endpoint that answered 403 to every read, and swallowed
+# the one notice that names the flag which fixes it.
 #
 # One constant because three read sites have to agree: the control, the
 # per-probe read, and the poll. The first version of this lived in the poll

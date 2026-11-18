@@ -14732,6 +14732,40 @@ class ObservedChannelTestCase(unittest.TestCase):
         self.assertIn("unauthorised", statuses,
                       "the rows whose read was refused were not reported")
 
+    def test_a_control_that_never_connected_does_not_hide_a_refusal(self):
+        """Reachability and a reading are different questions.
+
+        A control read that times out leaves the endpoint unproven; every later
+        read answering 403 proves it reachable and refusing. Counting a refusal
+        as neither reported `unreachable` -- "never answered" -- about an
+        endpoint that answered every time, and swallowed the notice naming the
+        flag that fixes it."""
+        import time as _time
+
+        state = {"reads": 0}
+
+        def route(method, path, params, headers, body):
+            if path == "/profile":
+                state["reads"] += 1
+                if state["reads"] == 1:
+                    # The control: answers past the client's timeout.
+                    _time.sleep(6)
+                return 403, "<html><body>Please sign in</body></html>"
+            return 200, "<html><body>saved</body></html>"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/bio?bio=FUZZ", methods=["eval"],
+                max_payloads=6, timeout=2,
+                config={"observe_url": f"{base}/profile", "observe_poll": 0.2,
+                        "observe_timeout": 0})
+        self.assertTrue(results)
+        statuses = {r["observe_status"] for r in results}
+        self.assertNotIn("unreachable", statuses,
+                         "an endpoint that refused every read was reported as one that "
+                         "never answered")
+        self.assertIn("unauthorised", statuses)
+
     def test_an_observed_endpoint_that_answers_is_not_called_unauthorised(self):
         with local_target(self._stored_route(self._render_ssti, store="append")) as base:
             results = self.gen.run_detection(

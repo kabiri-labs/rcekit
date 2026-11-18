@@ -485,6 +485,13 @@ in what it replaced.
   expired part-way leaves both kinds, and the notice reports how many of each
   rather than claiming every read was refused.
 
+  A refusal is still an *answer*, and reachability and a reading are different
+  questions. Counting a refusal as neither reported `unreachable` -- "never
+  answered" -- about an endpoint that answered 403 to every read, whenever the
+  control request was the one that failed to connect, and swallowed the notice
+  that names the flag which fixes it. A refused read records reachability
+  without being treated as a reading.
+
   No version of this ever claimed a finding it should not have. What it claimed
   was that a channel had not been read when it had, which is the same class of
   error one door along: a run-wide assertion erasing a per-probe observation.
