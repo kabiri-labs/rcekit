@@ -49,6 +49,7 @@ against a payload-free control:
 | PHP 7.1.3 inclusion sink | — | File inclusion (arbitrary read) | `include` | `file-read` | yes | — |
 | PHP 7.1.3 inclusion sink | — | File inclusion reaching execution (bare `include` sink) | `include` | **`executed`** | yes | — |
 | ThinkPHP 6.0.12 inclusion sink | — | File inclusion reaching execution (loader appends `.php`) | `include` | **`executed`** | yes | — |
+| Flask 1.1.1 on Jinja2 | — | Template sink answering malformed syntax differently (SSTI) | `syntax` | `syntax-sink` | yes | — |
 
 3 of those columns say how much weight the row carries, and they are the ones
 worth reading before the rest.
@@ -58,18 +59,12 @@ method could reach in principle.
 
 **Bench case** says whether [`tests/bench/`](tests/bench/) reproduces the row —
 bringing the target up under Docker and checking the verdict **and** its negative
-control. All 16 rows do; `python tests/bench/runner.py --all` was last green at
-**3.0.1** (2026-10-01), 10/10 cases in 55m48s. That is a point-in-time claim:
-the benchmark runs on a cadence, not on every change.
-
-The suite holds 17 cases now, and the 7 added last were each run on their own
-rather than as part of an `--all` sweep: `mongo-express-where-boolean` passed in
-29.9s, `webmin-cve-2019-15107-enumerated` in 4m32s,
-`webmin-cve-2019-15107-time` in 21m21s, `gitlist-cve-2018-1000533-argv` in
-18.3s, and the three `include` cases in one cold sweep —
-`php-inclusion-file-read` in 2.2s, `php-inclusion-include-execute` in 2.0s and
-`thinkphp-lang-include-execute` in 2.7s. So the figure above still describes the last full sweep, which is the
-claim it was making.
+control. All 17 rows do; `python tests/bench/runner.py --all` was last green at
+**3.19.0** (2026-11-19), 18/18 cases in 1h21m42s. That is a point-in-time
+claim: the benchmark runs on a cadence, not on every change — but it is one
+sweep over the whole suite, rather than a figure assembled from cases each run
+on its own. All 12 detection methods have a case in it; `syntax` was the last
+one without.
 
 The controls are not in this table and two of them are the point. On a Webmin
 1.910 and an OpenTSDB 2.4.1 that are genuinely vulnerable, `time` reaches its
@@ -78,7 +73,7 @@ real software rather than against a fixture. The OpenTSDB one is the row
 reading *as a control* above; the Webmin one now has a case of its own, where
 `time` is the subject and the control injects into a parameter on the same
 request that no shell reads — so the slope has to be attributable to the sink
-rather than to the host. The full 17, controls included, are in
+rather than to the host. The full 18, controls included, are in
 [`tests/bench/README.md`](tests/bench/README.md#status).
 
 **Advisory** is empty where the verdict does not depend on the patch. Both

@@ -798,6 +798,69 @@ class SharedTargetTestCase(unittest.TestCase):
         runner.validate_case(self._composed())
 
 
+class TeardownTestCase(unittest.TestCase):
+    """A case that brings a container up gets it taken down again.
+
+    This is the harness's own version of the bug it was built to catch: a
+    claim about something nobody checked. `compose_command` read the down
+    command as ``case.get("compose_down", [])``, `take_down` reads an empty
+    command as "no containers here", and so a case that spelled out its
+    `compose` without spelling out its `compose_down` reported `pass` and left
+    its container running. Four of the eighteen cases were written that way,
+    all four only to add ``--build`` to the up.
+
+    What it cost, measured on the 3.19.0 sweep: `gitlist-cve-2018-1000533-argv`
+    passed and kept :8080 for the next hour, and seven later cases that publish
+    that port failed in turn on `port is already allocated`. Every one of the
+    seven re-ran green on a free port. A harness that turns one leak into eight
+    red rows is worse than no harness, because the rows look like findings.
+    """
+
+    _FakeSubprocess = SharedTargetTestCase._FakeSubprocess
+    _compose_calls = SharedTargetTestCase._compose_calls
+
+    def test_spelling_out_the_up_does_not_withdraw_the_teardown(self):
+        # No `compose_down`: the standard one, in the directory the up ran in.
+        case = minimal_case(compose=["docker", "compose", "up", "-d", "--build"])
+        calls, _ = self._compose_calls(case)
+        self.assertEqual(calls, ["--build", "-v", "--build", "-v"])
+
+    def test_an_empty_compose_down_is_the_one_way_to_keep_a_container(self):
+        # Still possible, but now only on purpose rather than by omission.
+        case = minimal_case(compose=["docker", "compose", "up", "-d"], compose_down=[])
+        calls, _ = self._compose_calls(case)
+        self.assertEqual(calls, ["-d", "-d"])
+
+    def test_an_explicit_compose_down_is_untouched(self):
+        case = minimal_case(compose=["docker", "compose", "up", "-d"],
+                            compose_down=["docker", "compose", "down"])
+        calls, _ = self._compose_calls(case)
+        self.assertEqual(calls, ["-d", "down", "-d", "down"])
+
+    def test_a_case_with_no_containers_still_runs_no_compose(self):
+        self.assertIsNone(runner.compose_command(minimal_case(), "up"))
+        self.assertIsNone(runner.compose_command(minimal_case(), "down"))
+
+    def test_every_real_case_that_comes_up_also_goes_down(self):
+        """The regression test, over the shipped cases rather than a fixture.
+
+        A fixture proves the function; this proves the corpus. Both halves of
+        every case are checked, because a control brings up its own target
+        wherever it does not share one.
+        """
+        for path in runner.discover_cases(BENCH_ROOT / "cases"):
+            case = runner.load_case(path)
+            _control_invocation, control_case = runner.control_plan(case)
+            for label, half in (("case", case), ("control", control_case)):
+                with self.subTest(case=path.stem, half=label):
+                    if runner.compose_command(half, "up") is None:
+                        continue  # targets something already running
+                    self.assertIsNotNone(
+                        runner.compose_command(half, "down"),
+                        f"{path.stem} ({label}) brings a container up and "
+                        f"leaves it running")
+
+
 class HarnessEndToEndTestCase(unittest.TestCase):
     """The run-and-judge path against a real socket, with no Docker involved.
 

@@ -525,15 +525,34 @@ def compose_command(case: Dict[str, Any], action: str) -> Optional[List[str]]:
 
     A case may give ``compose`` as a ready-made argv list (full control) or rely
     on ``vulhub_path``, in which case the standard compose invocation is run in
-    that directory under ``--vulhub-root``."""
-    if "compose" in case:
-        argv = expand_paths(list(case["compose"]))
-        return argv if action == "up" else expand_paths(list(case.get("compose_down", [])))
-    if "vulhub_path" not in case:
-        return None
+    that directory under ``--vulhub-root``.
+
+    **Spelling out `compose` does not withdraw the teardown.** It used to: the
+    down command was read as ``case.get("compose_down", [])``, an absent key
+    gave the empty list, and :func:`take_down` reads an empty command as "this
+    case manages no containers" and returns. So a case that named `compose`
+    only to add ``--build``, which is the only reason any of the four named it,
+    left its container running, silently, after reporting `pass`.
+
+    Measured on the 3.19.0 sweep: `gitlist-cve-2018-1000533-argv` passed, held
+    :8080 for the next hour, and the seven later cases that publish that port
+    failed one after another on `port is already allocated`. Eight red rows,
+    one leak, and nothing wrong with any of them -- the mode of failure this
+    harness exists to rule out, arriving from the harness itself. Re-run on a
+    free port, all eight pass.
+
+    An absent `compose_down` now falls back to the standard teardown, run in
+    the same directory the `up` ran in. ``compose_down: []`` still means no
+    teardown, which is now the only way to say it and says it on purpose."""
     if action == "up":
-        return ["docker", "compose", "up", "-d"]
-    return ["docker", "compose", "down", "-v"]
+        if "compose" in case:
+            return expand_paths(list(case["compose"]))
+        return ["docker", "compose", "up", "-d"] if "vulhub_path" in case else None
+    if "compose_down" in case:
+        return expand_paths(list(case["compose_down"])) or None
+    if "compose" in case or "vulhub_path" in case:
+        return ["docker", "compose", "down", "-v"]
+    return None
 
 
 def target_cwd(compose_case: Dict[str, Any],

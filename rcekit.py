@@ -7675,12 +7675,20 @@ class SyntaxDifferential(DetectionMethod):
       carrying an independent banner cannot do -- the banner lands on a
       different half each round. 2 of 1200 became 0.
 
-    At 20% drift the guards hold completely. At 50% -- a page whose *structure*
-    is a coin flip per request -- 8 of 1200 survive, and that is the limit
-    rather than a bug to file: no response-shape oracle can answer about such a
-    page, and a run has no way to know it is reading one. Against a target that
-    really parses, the guards cost nothing they were not meant to: 1000 of 1000
-    judgements on the forms that fixture distinguishes.
+    That 0 is a small sample and not a floor, which a longer soak said plainly.
+    Re-measured at 20000 runs x 6 forms = 120000 judgements per fixture, the
+    same 20% drift leaves **171, a rate of 0.14%** -- about one claim in 700,
+    where 1200 judgements had shown none. The guards do not hold completely at
+    20% drift; they hold to within a fifth of a percent, and that is the number
+    to carry.
+
+    At 50% -- a page whose *structure* is a coin flip per request -- 900 of
+    120000 survive, 0.75%, which the first 1200 put at 8 and so had right. That
+    is the limit rather than a bug to file: no response-shape oracle can answer
+    about such a page, and a run has no way to know it is reading one. Against
+    a target that really parses, the guards cost nothing they were not meant
+    to: 1000 of 1000 judgements on the forms that fixture distinguishes, and
+    100000 of 100000 at the longer count.
 
     The guard that matters most on a real engagement is none of those. **A WAF
     that refuses malformed syntax with a 4xx and lets the well-formed form
@@ -8750,6 +8758,14 @@ class BooleanDifferential(DetectionMethod):
     * one wave, 6 pairs: 0 of 2000, and 2000 of 2000
     * screen then confirm, 2 pairs: 2 of 2000 (0.10%), and 2000 of 2000
     * **screen then confirm, 4 pairs: 0 of 2000, and 2000 of 2000**
+
+    The last row is the shipped configuration, and 0 of 2000 is where a sample
+    that small can speak from. Re-measured at **20000 runs** it is still 0 --
+    against the flipping scalar, a two-valued A/B flag, an incrementing counter
+    and a body that echoes the predicate alike -- and still 20000 of 20000
+    against the evaluator. Worth stating because the same soak moved the
+    `syntax` differential's comparable 0 to 0.14%: here the zero was structure
+    and there it was sample size.
 
     So a confirming wave on fresh operands, and a floor of 4 pairs -- which is
     why this channel does not answer at `--probe-depth quick` and says so rather

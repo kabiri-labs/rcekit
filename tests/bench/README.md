@@ -166,8 +166,9 @@ OpenSSL refuses its TLS handshake outright, so every probe was reported `error`
 until `--insecure` was made to lower the security level as well as the
 certificate check.
 
-`python tests/bench/runner.py --all` is green: **10/10, in 55m48s, at 3.0.1**
-(2026-10-01). That run is the one 3.0.1 was gated on: retiring a `reflected`
+`python tests/bench/runner.py --all` was green at **10/10, in 55m48s, at
+3.0.1** (2026-10-01) -- superseded by the 3.19.0 sweep below, and kept because
+what that run ruled out is still what it ruled out. That run is the one 3.0.1 was gated on: retiring a `reflected`
 probe shape is squarely in the "touching a method's probe construction" case for
 re-running this, and the risk it carries is a false negative on a real shell.
 None appeared — Webmin's `reflected` and `file`, Struts2's `eval`, OpenTSDB's
@@ -207,8 +208,9 @@ fast case is most of the run.
     | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
     | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
 
-Seven more were added after that sweep and each was run on its own, so they are
-listed apart from it rather than folded into a figure no run produced. The
+Seven more were added after that sweep and each was run on its own, so they
+were listed apart from it rather than folded into a figure no run produced --
+until the 3.19.0 sweep below ran the whole suite together. The
 count is read off `tests/bench/cases/` rather than incremented by hand, which
 is how this paragraph came to say three while the table under it held four and
 omitted `argv` altogether:
@@ -223,13 +225,83 @@ omitted `argv` altogether:
     | File inclusion reaching execution (bare `include` sink) | PHP 7.1.3 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.0s |
     | File inclusion reaching execution (loader appends `.php`) | ThinkPHP 6.0.12 inclusion sink | `include` | **`executed`** | `negative` | pass | 2.7s |
 
-17 cases now cover the ledger's 16 rows. Both figures are counted from `tests/bench/cases/` and the README table rather than carried forward; the pair here read 13 and 12 while the catalogue already held 14 and 13, which is what a figure maintained by hand does. More cases than rows, in both
+18 cases now cover the ledger's 17 rows. Both figures are counted from
+`tests/bench/cases/` and the README table rather than carried forward; the pair
+here read 13 and 12 while the catalogue already held 14 and 13, which is what a
+figure maintained by hand does. More cases than rows, in both
 directions and for different reasons: the OpenTSDB `time` row is still the
 *control* half of that case rather than one of its own, because a tier ceiling
 is a claim about a method that must not be promoted and the place that claim
 belongs is a control; while `webmin-cve-2019-15107-enumerated` has no row at
 all, because what it proves is the enumerator rather than a method or a tier,
 and the ledger is organised by method.
+
+### The whole suite in one sweep, at 3.19.0
+
+`python tests/bench/runner.py --all` is green again, and this time over
+everything: **18/18, in 1h21m42s, at 3.19.0** (2026-11-19). Every case and
+every control, brought up and torn down in one run rather than assembled from
+cases each run on its own. That is what the ledger's bench column now rests on.
+
+What the sweep found was in the harness rather than the tool, which is the
+reason to write a sweep down at all. Its first attempt reported **8 failures
+and not one finding**: `gitlist-cve-2018-1000533-argv` passed, kept `:8080` for
+the next hour, and the seven later cases that publish that port failed one
+after another on `port is already allocated`. `compose_command` read the down
+command as `case.get("compose_down", [])`, an absent key gave the empty list,
+and `take_down` reads an empty command as "this case manages no containers" --
+so each of the four cases that spelled out a `compose`, all four only to add
+`--build`, reported `pass` and left its container running. A harness that turns
+one leak into eight red rows is the failure mode this suite exists to rule out,
+arriving from the suite itself.
+
+An absent `compose_down` now falls back to the standard teardown, run in the
+directory the `up` ran in; `compose_down: []` is the one way left to ask for no
+teardown, and asks for it on purpose.
+`TeardownTestCase.test_every_real_case_that_comes_up_also_goes_down` walks the
+shipped corpus rather than a fixture, both halves of every case, so the next
+case written that way fails in the unit suite instead of an hour into a sweep.
+All 8 red rows passed on the re-run. The table below is the clean sweep on the
+fixed runner.
+
+    | RCE class | Target | Method | Verdict | Control | Result |
+    |---|---|---|---|---|---|
+    | Deserialization sink (fastjson autoType) | Spring Boot on fastjson 1.2.83 | `deser` | `deserialization-sink` | `negative` | pass |
+    | Template sink whose malformed syntax is answered differently (Jinja2) | Flask 1.1.1 on Jinja2 | `syntax` | `syntax-sink` | `negative` | pass |
+    | Argument injection (no-shell argv sink) | GitList 0.6.0 -- CVE-2018-1000533 | `argv` | **`executed`** | `negative` | pass |
+    | Expression injection (Gremlin/Groovy) | Apache HugeGraph 1.2.0 | `eval` | **`executed`** | `negative` | pass |
+    | Expression injection (Gremlin/Groovy) | Apache HugeGraph 1.2.0 | `eval` | **`executed`** | `negative` | pass |
+    | OS command injection | Apache HugeGraph 1.2.0 | `reflected` | **`executed`** | `negative` | pass |
+    | Expression-lookup sink (Log4Shell/JNDI) | Apache Solr 8.11.0 (Log4j 2.14.1) -- CVE-2021-44228 | `lookup` | `lookup-sink` | `negative` | pass |
+    | Predicate sink with nothing rendered (MongoDB $where) | mongo-express 0.53.0 on MongoDB 3.4 | `boolean` | `evaluation-sink` | `negative` | pass |
+    | Blind command injection (gnuplot) | OpenTSDB 2.4.1 -- CVE-2023-25826 | `oob` | **`executed`** | `timing-sink` | pass |
+    | File inclusion (arbitrary read) | PHP 7.1.3 inclusion sink | `include` | `file-read` | `negative` | pass |
+    | File inclusion reaching execution (bare include sink) | PHP 7.1.3 inclusion sink | `include` | **`executed`** | `negative` | pass |
+    | Expression injection (OGNL) | Apache Struts2 -- S2-001 | `eval` | **`executed`** | `negative` | pass |
+    | File inclusion reaching execution (write-then-interpret) | ThinkPHP 6.0.12 inclusion sink | `include` | **`executed`** | `negative` | pass |
+    | Write primitive (PUT a JSP) | Apache Tomcat 8.5.19 -- CVE-2017-12615 | `write` | **`executed`** | `negative` | pass |
+    | OS command injection, found by enumeration | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `negative` | pass |
+    | OS command injection (self-OOB read-back) | Webmin 1.910 -- CVE-2019-15107 | `file` | **`executed`** | `negative` | pass |
+    | Blind command injection, timing as the subject | Webmin 1.910 -- CVE-2019-15107 | `time` | `timing-sink` | `negative` | pass |
+    | OS command injection (results-based) | Webmin 1.910 -- CVE-2019-15107 | `reflected` | **`executed`** | `timing-sink` | pass |
+
+The two identical HugeGraph `eval` rows are two cases, not a duplicate:
+`hugegraph-gremlin-reflected-class` reaches the same verdict as
+`hugegraph-gremlin-eval` and exists for its control, which fails if the probe
+shape retired in 3.0.1 comes back.
+
+Four cases are most of the wall clock, and each for a reason the method owns:
+`webmin-cve-2019-15107` at 21m37s and `webmin-cve-2019-15107-time` at 21m19s
+send real sleeps, `opentsdb-cve-2023-25826` at 17m01s and
+`log4shell-cve-2021-44228` at 10m12s wait on an out-of-band callback. The other
+14 together come to under 12 minutes, and 9 of them finish in under 30 seconds.
+
+`flask-ssti-syntax` is new in this sweep, and with it **all 12 registered
+methods have a bench case**: `syntax` was the last one without. It is also
+among the cheapest at 18.9s, which is worth putting next to the figures above
+-- a method's case costs what its signal costs rather than what its target
+costs, and the long four are long because real sleeps and real callbacks take
+real time.
 
 ### The fourth row now has one, and it needed the harness to grow
 
