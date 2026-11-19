@@ -8,7 +8,74 @@ formats, or the template schema.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A bench case that spelled out its `compose` lost its teardown, and said
+  nothing.** `compose_command` read the down command as
+  `case.get("compose_down", [])`; an absent key gave the empty list, and
+  `take_down` reads an empty command as "this case manages no containers" and
+  returns. So a case that named `compose` -- all four that did it named it only
+  to add `--build` -- reported `pass` and left its container running.
+
+  What that cost, measured on the 3.19.0 sweep:
+  `gitlist-cve-2018-1000533-argv` passed, kept `:8080` for the next hour, and
+  the seven later cases that publish that port failed one after another on
+  `port is already allocated`. Eight red rows from one leak, and nothing wrong
+  with any of the eight -- re-run on a free port, all eight pass. A harness
+  that turns a leak into findings is worse than no harness, because the
+  findings look real.
+
+  An absent `compose_down` now falls back to the standard teardown, run in the
+  directory the `up` ran in. `compose_down: []` still means no teardown, which
+  is now the only way to say it and says it on purpose.
+  `TeardownTestCase.test_every_real_case_that_comes_up_also_goes_down` walks
+  the shipped corpus rather than a fixture, both halves of every case, and
+  fails on 8 halves across 4 cases against the old logic.
+
+### Added
+
+- **A bench case for `syntax`, the last method without one.** `flask-ssti-syntax`
+  points the differential at vulhub's `flask/ssti` -- three lines whose
+  parameter reaches `Template(...).render()` -- and the sink is the shape the
+  method was designed against: `?name={{7*7}}` answers 200 with `Hello 49`,
+  and `?name={{7*7` answers 500 with Flask's error page. A difference in the
+  response's *structure*, which is what `response_shape` reads.
+
+  The case is worth more than its one row because of the 24 `inconclusive`
+  rows beside it. Jinja2 does not parse `${}`, `#{}`, `%{}`, `<%= %>` or `@()`,
+  so the app echoes those forms back verbatim and the two halves of each pair
+  differ because the *input* differed. The reflection guard says so and
+  refuses to answer -- so the guard this oracle most needs is exercised on the
+  same target as the finding, in the same run. Two shapes are disclosed as not
+  tested rather than reported negative: `@()` in `shell_subshell`, whose
+  broken half that context's own `)` closes.
+
+  The control is class attribution and the mirror of the Struts2 case: Jinja2
+  parses the value and no shell is behind it, so `reflected`'s shell-syntax
+  probes have nothing to execute. Measured at 52 probes, all negative.
+
 ### Documentation
+
+- **The bench claim is a sweep again, and it is measured at this version.**
+  The README said the suite was last green at 3.0.1, 10/10 in 55m48s, with a
+  paragraph beside it listing the 7 cases added since, each run on its own --
+  honest about what it was, and no longer a statement about the suite.
+  `python tests/bench/runner.py --all` is now green at **18/18 in 1h21m42s at
+  3.19.0**, every case and every control in one run on the fixed runner, and
+  the figure in both READMEs is that run. With `flask-ssti-syntax` in it, all
+  12 detection methods have a bench case; `syntax` was the last one without.
+  `tests/bench/README.md` carries the table, the four cases that are most of
+  the wall clock and why each of them is, and the teardown bug the sweep
+  found.
+
+- **Two measured claims in `rcekit.py` corrected by a longer soak.** The
+  `syntax` differential's guards were documented as holding *completely*
+  against a 20% drifting page, on 1200 judgements. At 120000 they leave
+  **171, a rate of 0.14%** -- about one claim in 700. The docstring now says
+  0.14% and says that 0 was a sample rather than a floor. The same soak left
+  the `boolean` scalar channel's 0 of 2000 at 0 of 20000, which the docstring
+  now records, because the two zeros came from different places: one was
+  structure and one was sample size.
 
 - **`docs/oracle-model.md`: where to audit the verdict logic.** The trust core
   -- the oracle contract, the verdict vocabulary, and the delivery facts the
