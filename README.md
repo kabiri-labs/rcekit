@@ -552,7 +552,7 @@ sure RCEKit is:
 | **`timing-sink`** | The target honoured a delay RCEKit injected: response time tracked a randomised `0/N/2N` series with the request index modelled out. Proven. What waited is not shown — a sandbox implementing `sleep` answers the same way — so it is not execution. |
 | **`file-write`** | The target stored a file at a path RCEKit chose, and served it back uninterpreted. Arbitrary file write, proven by reading it back (CWE-434) — **a vulnerability in its own right**, not a weaker RCE. |
 | **`file-read`** | The target opened a path RCEKit named and returned what it read, and that content is absent from a payload-free control. What proves it is a signature RCEKit knew in advance rather than a value the target computed, which is exactly why it stops here. Arbitrary file read (CWE-22 / CWE-98) — **a vulnerability in its own right**, and what it is worth depends on which paths you can reach. |
-| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it, through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit — so this is **a lead, not a finding**: a MongoDB `$where` sandbox and a SQL engine comparing two numbers answer identically, and only one is a vulnerability. Identify the evaluator before reporting. |
+| **`evaluation-sink`** | An evaluator consumed the input and partitioned the response on it — in the response's *shape*, or in a JSON scalar at a path that held still otherwise — through randomised true/false predicates anchored either side. Proven. *Which* evaluator is not shown, and that is the whole limit — so this is **a lead, not a finding**: a MongoDB `$where` sandbox and a SQL engine comparing two numbers answer identically, and only one is a vulnerability. Identify the evaluator before reporting. |
 | **`syntax-sink`** | The target answered structurally valid and structurally invalid expression syntax differently — twice over on fresh operands, with both halves of each pair sent twice, against a payload-free control that got through and with nothing carrying the probe back. So something on it **parsed** what it was handed. Which parser is not shown, and nothing here says it *evaluates* what it parses, which makes this weaker than `evaluation-sink` and not execution. It is the only oracle that reaches a template sink whose output never appears at all. |
 | **`deserialization-sink`** | The target reconstructed an attacker-supplied object graph (CWE-502). Proven, but about a *different property*: reaching RCE from there depends on classpath gadgets, so it is never called RCE. **A confirmed sink** — report it; the gadget analysis is the next piece of work, not a reason to withhold it. |
 | **`lookup-sink`** | The target resolved a URI RCEKit handed it — a `${jndi:…}` expression reached a lookup, proven on a callback carrying a token only that probe held. It is a sink, not execution: reaching RCE from there needs a server answering with a loadable class. **A confirmed sink** whose remediation is known regardless — the Log4Shell shape. |
@@ -672,8 +672,9 @@ them will call `executed`:
   carried in an upload's content, a trigger that runs it later. The chain is the
   *delivery* the engine sends through, so the oracles are the ones above and the
   payload-free control is a chain run of its own. `time` and `boolean` are
-  refused by name there: both read the shape of a response series, which a
-  chain's setup steps and per-probe session change rather than the sink.
+  refused by name there: both read a response *series* rather than one
+  response, and a chain's setup steps and per-probe session change the series
+  rather than the sink.
 - **Second-order execution** (`--observe-url`) — when the payload lands on one
   request and runs on another: stored SSTI rendered on a profile page, a payload
   written to a log a template engine later renders, a queued job. The observed
@@ -763,7 +764,7 @@ one:
 | No-egress — write &amp; fetch back — `file` | ✅ *any read-back path* | ✅ *(web root)* | — | — |
 | `cmd.exe` and PowerShell sinks | ✅ *per-dialect probes* | ✅ *(cmd)* | — | per template |
 | Upload → write-then-execute — `write` | ✅ *write vs. execute, separate tiers* | — | — | per template |
-| Predicate sink, nothing rendered — `boolean` | ✅ *response-shape differential, own tier, never RCE* | — | — | — |
+| Predicate sink, nothing rendered or one bit of it — `boolean` | ✅ *response-shape and JSON-scalar differentials, own tier, never RCE* | — | — | — |
 | Template sink that parses and renders nothing — `syntax` | ✅ *valid/invalid differential, own tier, never RCE* | — | — | — |
 | Second-order — lands here, runs there | ✅ | — | — | — |
 | Query-language bridge to the OS | ✅ | — | — | per template |
@@ -811,10 +812,10 @@ Five mechanisms produce that verdict, and they run on every confirmation:
   does not widen what it will call `executed`.
 
 The same instinct runs the other way. Timing **never self-confirms**, a
-deserialization callback is **never** called RCE, a response shape that tracks a
-predicate is **never** called execution — a query engine comparing two numbers
-produces the same shape — and a run that built no probes is **never** called
-negative.
+deserialization callback is **never** called RCE, a response that tracks a
+predicate is **never** called execution — in its shape or in one of its values,
+because a query engine comparing two numbers answers the same way — and a run
+that built no probes is **never** called negative.
 
 ### 3. It is built for an authorised engagement, not a lab
 
@@ -913,7 +914,7 @@ target shapes.
 | The payload runs later, on a different request | [When execution happens on another request](docs/guide.md#when-execution-happens-on-another-request) |
 | The injection point is SQL and the sink is the database host | [Query-language bridges](docs/reference.md#query-language-bridges) |
 | The endpoint takes a serialized object | [Deserialization sinks](docs/reference.md#deserialization-sinks-and-the-verdict-that-is-not-rce) |
-| The sink evaluates my input but renders nothing of it | [When the sink answers yes or no](docs/reference.md#when-the-sink-answers-yes-or-no-and-nothing-else) |
+| The sink evaluates my input but renders nothing of it, or one bit of it | [When the sink answers yes or no](docs/reference.md#when-the-sink-answers-yes-or-no-and-nothing-else) |
 | The sink is behind a login or a file upload | [Multi-step chains](docs/guide.md#multi-step-chains) |
 | I got a weaker tier / `inconclusive` / `error` | [Reading the results](docs/guide.md#reading-the-results) |
 | It says the corpus is unusable | [Troubleshooting](docs/guide.md#troubleshooting) |
