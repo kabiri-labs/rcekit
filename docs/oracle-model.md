@@ -92,6 +92,13 @@ was tried and what it got wrong.
 
 ## What a response-shape oracle can and cannot answer
 
+`boolean` has a second channel that is not about shape at all: where the shape
+says nothing it compares the JSON scalars at identical paths, which is how a
+sink that renders one bit of its own answer is reached. It is guarded harder
+than the shape channel for the reason a scalar needs it -- a request id moves on
+its own, and an A/B flag takes two values without being an answer -- so it has
+its own pair floor and a confirming wave. The ceiling is the same.
+
 Three verdicts rest on the *shape* of a response rather than on a value:
 `evaluation-sink`, `syntax-sink`, and `deser`'s shape fingerprint. They are the
 weakest oracles here and their guards are measured rather than argued — the

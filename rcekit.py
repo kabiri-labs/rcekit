@@ -55,7 +55,7 @@ def configure_logging() -> None:
 
 # Bump on every change: PATCH for fixes, MINOR for new capabilities, MAJOR for
 # breaking changes to the CLI, output formats, or template schema.
-__version__ = "3.18.2"
+__version__ = "3.19.0"
 
 SAFETY_ORDER = {"safe": 0, "intrusive": 1, "stateful": 2}
 
@@ -8730,6 +8730,47 @@ class BooleanDifferential(DetectionMethod):
       the opening answer and the check would measure the cache. With every
       guard on, a genuinely evaluating target still read as a differential in
       100 runs of 100 -- the guards cost nothing they were not meant to cost.
+
+    **A second channel, on the same probes.** :func:`response_shape` drops every
+    scalar a JSON document carried -- a request id and a timestamp must not make
+    two identical answers look different -- so ``{"allowed":true}`` and
+    ``{"allowed":false}`` have the same shape, and a sink that renders one bit of
+    its own answer was invisible to this method. The scalar channel reads those
+    values back, at identical JSON paths, out of the series already fired: **no
+    extra request** unless something is found.
+
+    It is guarded harder than the shape channel, because it has to be. Measured
+    against a body carrying a scalar that flips on its own -- an A/B variant, a
+    feature flag, a cache marker -- and against one that really evaluates the
+    predicate, 2000 runs each:
+
+    * one wave, 2 pairs (`quick`): 152 of 2000 (7.6%) against the flipping
+      scalar, and 2000 of 2000 against the evaluator
+    * one wave, 4 pairs (`full`): 14 of 2000 (0.70%), and 2000 of 2000
+    * one wave, 6 pairs: 0 of 2000, and 2000 of 2000
+    * screen then confirm, 2 pairs: 2 of 2000 (0.10%), and 2000 of 2000
+    * **screen then confirm, 4 pairs: 0 of 2000, and 2000 of 2000**
+
+    So a confirming wave on fresh operands, and a floor of 4 pairs -- which is
+    why this channel does not answer at `--probe-depth quick` and says so rather
+    than contributing a negative. Six pairs in one wave reaches the same 0 and
+    was not taken: it costs 20 extra requests on every context including every
+    clean one, where a confirming wave costs nothing until something screens.
+
+    Four further guards exclude a confound structurally rather than by name. A
+    path must appear in **every** answer of the series, so a key that comes and
+    goes is drift. A path's values must be **exactly two** across the series,
+    which is what rules out an id, a timestamp and a counter -- they take many.
+    The three anchors, all true predicates, must agree on the path and agree
+    with the true half, so a channel partitioning on something other than truth
+    is not read as one. And a scalar carrying the predicate back is reflection,
+    not evaluation. Measured at 200 runs each: 0 of 200 for a random id, a
+    monotonic timestamp, an incrementing counter, an echoed predicate, and a
+    filter that refuses the false half.
+
+    The ceiling is unchanged. Which evaluator rendered the bit is no more
+    visible here than in the shape channel, so this stays `evaluation-sink`: a
+    lead rather than a finding.
     """
     name = "boolean"
     tier = "evaluation-sink"
@@ -8775,6 +8816,18 @@ class BooleanDifferential(DetectionMethod):
     # 4 for 2 and never for 1.
     PAIRS = {"quick": 2, "full": 4}
     MIN_PAIRS = 2
+    # The scalar channel's own floor, and it is deliberately not the shape
+    # channel's. At two pairs a scalar that flips on its own partitioned 152
+    # times in 2000 runs, and 2 in 2000 even with the confirming wave, while the
+    # shape channel is untouched by it -- `response_shape` drops the scalar that
+    # is doing the flipping. One oracle's measured floor is not another's.
+    SCALAR_MIN_PAIRS = 4
+    # `a*b==P` as `_predicate` writes it. Used to recognise the probe coming
+    # back inside a scalar: a value that carries the predicate partitioned
+    # because the input did, which is reflection and not evaluation. Matched on
+    # the shape of the expression rather than on the exact operands, so it holds
+    # for a value that quotes only part of it.
+    _PREDICATE_RE = re.compile(r"\d{4}\*\d{4}==\d+")
 
     def __init__(self, gen: "RCEKit", config: Optional[Dict[str, Any]] = None):
         super().__init__(gen, config)
@@ -8823,11 +8876,24 @@ class BooleanDifferential(DetectionMethod):
         if record.context in self._contexts_done:
             return []
         self._contexts_done.add(record.context)
+        # Held for `next_probes`, which the engine calls with the series alone.
+        # The same thing `time` does for the same reason.
+        self._record = record
+        self._rng = rng
+        return self._wave(record, rng)
+
+    def _wave_phases(self, tag: str = "") -> "Set[str]":
+        """The four phases of one wave. Matched exactly rather than by suffix,
+        because `"yes2".endswith("")` is true of the first wave's names."""
+        return {"anchor-open" + tag, "yes" + tag, "no" + tag, "anchor-close" + tag}
+
+    def _wave(self, record: "PayloadRecord", rng: "random.Random",
+              tag: str = "") -> List[Probe]:
         pairs = self._pairs()
 
         def probe(payload: str, phase: str, carrier: Optional[str] = None,
                   safety: Optional[str] = None) -> Probe:
-            return Probe(payload=payload, expected="", phase=phase,
+            return Probe(payload=payload, expected="", phase=phase + tag,
                          carrier=carrier, safety=safety)
 
         body: List[Probe] = []
@@ -8862,6 +8928,164 @@ class BooleanDifferential(DetectionMethod):
         opening = [probe(payload, "anchor-open") for payload in anchors[:2]]
         return opening + body + [probe(anchors[2], "anchor-close")]
 
+    def _scalar_leaves(self, body: str) -> "Dict[str, Any]":
+        """``path -> value`` for every scalar leaf of a JSON body, **booleans
+        and nulls included**.
+
+        :meth:`RCEKit._json_leaf_channels` skips those two because they carry no
+        computed value, which is right for an evidence search and exactly wrong
+        here: a predicate channel's whole answer is one bit. The path machinery
+        is the enumeration side's, so "the same value" has a stable identity to
+        be the same at.
+
+        JSON only. A plain-text body has no such identity -- which is where the
+        measurement behind :func:`response_shape` came from, a length-shaped
+        signature claiming a differential in 13 of 25 runs against a target that
+        only echoed its input."""
+        stripped = strip_bom_then_space(body or "")
+        if stripped[:1] not in ("{", "["):
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, TypeError, RecursionError):
+            return {}
+        leaves: "Dict[str, Any]" = {}
+        for tokens in _json_leaf_tokens(parsed):
+            node = parsed
+            try:
+                for token in tokens:
+                    node = node[token]
+            except (KeyError, IndexError, TypeError):  # pragma: no cover
+                continue
+            leaves[_render_json_path(tokens)] = node
+        return leaves
+
+    def _scalar_claim(self, series: "List[Tuple[Probe, Observation]]",
+                      tag: str = "") -> "Optional[Tuple[str, str, str]]":
+        """``(connective, json path, the true half's value)`` for one wave, or
+        None.
+
+        Every guard here excludes a confound *structurally*. The numbers are in
+        the class docstring; the reasons are these:
+
+        * a path has to appear in **every** answer of the wave, so a key that
+          comes and goes is drift rather than a channel;
+        * its values across the wave must number **exactly two**, which is what
+          rules out a request id, a timestamp and a counter -- each takes many,
+          and none of them is excluded by name;
+        * the three anchors are all *true* predicates, so they must agree on the
+          path and the true half must agree with them: a channel that partitions
+          on something other than truth is not a predicate channel;
+        * a value carrying the predicate back is reflection."""
+        phases = self._wave_phases(tag)
+        leaves = [(probe, self._scalar_leaves(obs.body)) for probe, obs in series
+                  if obs.status is not None and probe.phase in phases]
+        if not leaves:
+            return None
+        common = set(leaves[0][1])
+        for _probe, found in leaves[1:]:
+            common &= set(found)
+        anchors = [found for probe, found in leaves
+                   if probe.phase in ("anchor-open" + tag, "anchor-close" + tag)]
+        if not common or len(anchors) < 3:
+            return None
+        for path in sorted(common):
+            rendered = [json.dumps(found[path], sort_keys=True)
+                        for _probe, found in leaves]
+            if len(set(rendered)) != 2:
+                continue
+            anchor_values = {json.dumps(found[path], sort_keys=True)
+                             for found in anchors}
+            if len(anchor_values) != 1:
+                continue
+            if any(isinstance(found[path], str)
+                   and self._PREDICATE_RE.search(found[path])
+                   for _probe, found in leaves):
+                continue
+            halves: "Dict[str, Tuple[List[Any], List[Any]]]" = {}
+            for probe, found in leaves:
+                if probe.phase not in ("yes" + tag, "no" + tag):
+                    continue
+                true_values, false_values = halves.setdefault(
+                    probe.carrier, ([], []))
+                value = json.dumps(found[path], sort_keys=True)
+                (true_values if probe.phase == "yes" + tag
+                 else false_values).append(value)
+            claim = self._partition(halves, self.SCALAR_MIN_PAIRS)
+            if claim is not None and claim[1] == next(iter(anchor_values)):
+                return claim[0], path, claim[1]
+        return None
+
+    def _anchors_hold(self, series: "List[Tuple[Probe, Observation]]",
+                      tag: str = "") -> bool:
+        """Whether the wave's anchors say the channel can carry one bit."""
+        opening = [response_shape(obs.status, obs.body) for probe, obs in series
+                   if probe.phase == "anchor-open" + tag and obs.status is not None]
+        closing = [response_shape(obs.status, obs.body) for probe, obs in series
+                   if probe.phase == "anchor-close" + tag and obs.status is not None]
+        return (len(opening) >= 2 and len(set(opening)) == 1
+                and bool(closing) and set(closing) == set(opening))
+
+    def next_probes(self, series: "List[Tuple[Probe, Observation]]") -> List[Probe]:
+        """The scalar channel's confirming wave, and only for it.
+
+        The shape channel needs none: its guards were measured at one wave and
+        hold there. The scalar channel's did not -- 14 of 2000 against a scalar
+        that flips on its own -- so a screen is not a claim, and the second wave
+        goes out on fresh operands only when the first said something. Nothing
+        is spent on a clean target, which is the whole reason this is a wave
+        rather than a higher pair count."""
+        if any((probe.phase or "").endswith("2") for probe, _obs in series):
+            return []
+        record = getattr(self, "_record", None)
+        rng = getattr(self, "_rng", None)
+        if record is None or rng is None or self._pairs() < self.SCALAR_MIN_PAIRS:
+            return []
+        if not self._anchors_hold(series):
+            # The run is `inconclusive` either way; a second wave would be
+            # traffic spent on a channel that cannot carry an answer.
+            return []
+        if self._partition(self._shape_halves(series), self.MIN_PAIRS) is not None:
+            # The shape channel answered. It is the stronger reading of the same
+            # series -- a whole response partitioned, not one value in it -- and
+            # confirming the weaker one would add nothing to the verdict.
+            return []
+        if self._scalar_claim(series) is None:
+            return []
+        return self._wave(record, rng, "2")
+
+    def _partition(self, halves: "Dict[str, Tuple[List[Any], List[Any]]]",
+                   min_pairs: int) -> "Optional[Tuple[str, Any]]":
+        """The first connective whose two halves each answered one way and
+        differently: ``(name, the true half's value)``, or None.
+
+        Shared by both channels so they cannot drift apart on the one rule that
+        decides either of them. Counted on each side rather than across both: a
+        connective left with three true probes and one false one clears a floor
+        on the total, and then the false half agrees with itself because there
+        is only one of it -- the single-pair answer arriving by the back door,
+        on the half that matters most."""
+        for name, _form, _rung in self.CONNECTIVES:
+            true_values, false_values = halves.get(name, ([], []))
+            if min(len(true_values), len(false_values)) < min_pairs:
+                continue
+            yes, no = set(true_values), set(false_values)
+            if len(yes) == 1 and len(no) == 1 and yes != no:
+                return name, next(iter(yes))
+        return None
+
+    def _shape_halves(self, series: "List[Tuple[Probe, Observation]]",
+                      tag: str = "") -> "Dict[str, Tuple[List[Any], List[Any]]]":
+        """``name -> (true shapes, false shapes)`` for one wave."""
+        halves: "Dict[str, Tuple[List[Any], List[Any]]]" = {}
+        for probe, obs in series:
+            if obs.status is None or probe.phase not in ("yes" + tag, "no" + tag):
+                continue
+            true_values, false_values = halves.setdefault(probe.carrier, ([], []))
+            (true_values if probe.phase == "yes" + tag else false_values).append(
+                response_shape(obs.status, obs.body))
+        return halves
+
     def confirm_series(self, series: "List[Tuple[Probe, Observation]]") -> Verdict:
         shapes = [(probe, response_shape(obs.status, obs.body))
                   for probe, obs in series if obs.status is not None]
@@ -8880,33 +9104,58 @@ class BooleanDifferential(DetectionMethod):
             return Verdict("inconclusive",
                            "the response shape moved while the series was being fired, so a "
                            "difference between probes is not attributable to the predicate")
-        for name, _form, _rung in self.CONNECTIVES:
-            sent = [(probe, shape) for probe, shape in shapes if probe.carrier == name]
-            true_probes = [shape for probe, shape in sent if probe.phase == "yes"]
-            false_probes = [shape for probe, shape in sent if probe.phase == "no"]
-            yes, no = set(true_probes), set(false_probes)
-            # Fewer pairs than the floor is not a weaker answer, it is the
-            # answer the measurement rejected: at one pair an ordinary noisy
-            # target read as a finding in 23% of runs. A connective the profile
-            # or the rung thinned below the floor is skipped, not graded down.
-            #
-            # Counted on each side rather than across both. A connective left
-            # with three true probes and one false one clears a floor on the
-            # total, and then `len(no) == 1` holds because there is only one
-            # false sample to disagree with itself -- which is the single-pair
-            # answer arriving by the back door, on the half that matters most.
-            if min(len(true_probes), len(false_probes)) < self.MIN_PAIRS:
-                continue
-            if len(yes) == 1 and len(no) == 1 and yes != no:
-                return Verdict(
-                    "evaluation-sink",
-                    f"the response shape partitioned exactly along "
-                    f"{min(len(true_probes), len(false_probes))} "
-                    f"randomised true/false predicates via the {name} connective, and held "
-                    "its shape across anchors either side -- an evaluator consumed the "
-                    "input. Which evaluator is not shown: a query engine comparing two "
-                    "numbers produces this same differential, so it is not execution")
-        return Verdict("negative", "no response-shape differential tracked the predicate")
+        # Fewer pairs than the floor is not a weaker answer, it is the answer
+        # the measurement rejected: at one pair an ordinary noisy target read as
+        # a finding in 23% of runs. A connective the profile or the rung thinned
+        # below the floor is skipped by `_partition`, not graded down.
+        halves = self._shape_halves(series)
+        claim = self._partition(halves, self.MIN_PAIRS)
+        if claim is not None:
+            name = claim[0]
+            pairs = min(len(halves[name][0]), len(halves[name][1]))
+            return Verdict(
+                "evaluation-sink",
+                f"the response shape partitioned exactly along {pairs} "
+                f"randomised true/false predicates via the {name} connective, and held "
+                "its shape across anchors either side -- an evaluator consumed the "
+                "input. Which evaluator is not shown: a query engine comparing two "
+                "numbers produces this same differential, so it is not execution")
+        # The scalar channel, on the same probes. It runs only where the shape
+        # channel found nothing: a whole response partitioning is the stronger
+        # reading of the same series, and this one is the weaker.
+        if self._pairs() < self.SCALAR_MIN_PAIRS:
+            return Verdict(
+                "negative",
+                "no response-shape differential tracked the predicate; the scalar channel "
+                f"needs {self.SCALAR_MIN_PAIRS} pairs per connective and this run has "
+                f"{self._pairs()}, so it was not asked -- --probe-depth full asks it")
+        first = self._scalar_claim(series)
+        if first is None:
+            return Verdict("negative",
+                           "neither the response shape nor any JSON scalar at a stable path "
+                           "tracked the predicate")
+        second = self._scalar_claim(series, "2")
+        if second is None:
+            return Verdict(
+                "inconclusive",
+                f"the scalar at {first[1]} partitioned along the predicate once, via the "
+                f"{first[0]} connective, and the confirming wave that would have to "
+                "reproduce it was not sent -- most likely --max-payloads")
+        if second != first:
+            return Verdict(
+                "inconclusive",
+                f"the scalar at {first[1]} partitioned along the predicate once and did not "
+                "reproduce on fresh operands, so what the first wave measured was not the "
+                "predicate")
+        return Verdict(
+            "evaluation-sink",
+            f"the JSON scalar at {first[1]} partitioned exactly along the randomised "
+            f"true/false predicates of the {first[0]} connective, twice over on fresh "
+            "operands, agreeing with three true anchors either side and taking exactly two "
+            "values across the series -- an evaluator consumed the input and rendered one "
+            "bit of its answer. The response *shape* did not partition, which is why this "
+            "channel was read at all. Which evaluator is not shown: a query engine "
+            "comparing two numbers produces this same differential, so it is not execution")
 
 
 # The detection methods RCEKit can run, keyed by their --methods name. Adding a

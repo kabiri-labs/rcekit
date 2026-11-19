@@ -4,7 +4,7 @@
 
 **`executed` means the target executed the input. `negative` means the probes reached it.**
 
-**Version 3.18.2** · MIT · Python 3.8+ · zero third-party dependencies
+**Version 3.19.0** · MIT · Python 3.8+ · zero third-party dependencies
 
 RCEKit is an **RCE detection &amp; confirmation toolkit** for authorised penetration
 testing, red teaming and security research. Point it at a target you are allowed
@@ -658,7 +658,7 @@ One CLI, one `--methods` flag, covering the main paths to RCE:
 | **Upload / write primitive** — PUT-a-JSP, unchecked upload (CWE-434) | `write` | Writes a one-liner that *computes* a product through your own upload request, then fetches the file: the product is `executed` RCE, the source coming back verbatim is `file-write` — arbitrary file write, served but not interpreted. |
 | **Deserialization sinks** — fastjson, shiro, weblogic (CWE-502) | `deser` | Proves the endpoint **deserializes** attacker data, via a non-executing DNS gadget or an error-shape differential. Reported as `deserialization-sink`, **never** as RCE. |
 | **Blind / out-of-band** — exfil, async | `oob` | Built-in HTTP/DNS listener receives callbacks and correlates each to the exact payload; every probe carries its own token. |
-| **Predicate sinks with nothing rendered** — MongoDB `$where`, filter and rule expressions | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Reported `evaluation-sink`: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
+| **Predicate sinks with nothing rendered, or one bit of it** — MongoDB `$where`, filter and rule expressions, an endpoint that answers `{"allowed":true}` | `boolean` | Fires randomised true/false comparisons on random operands and reads the *shape* of the response, anchored either side so a target that merely drifts cannot answer in its place. Where the shape says nothing it reads the JSON scalars at identical paths off the same probes — free of extra requests, and guarded by a confirming wave plus a higher pair floor, because a scalar is exactly the kind of thing that moves on its own. Reported `evaluation-sink` either way: proven that an evaluator consumed the input, and no more — a query engine comparing two numbers produces the same differential. |
 | **Template sinks that render nothing** — a parser reading input whose output never comes back | `syntax` | Sends each delimiter form twice, well formed and with its closing delimiter gone, and reads the *shape* of the two answers — both halves repeated, the pair confirmed on fresh operands, and a filter that refuses only the malformed half reported as a filter rather than a parser. Reported `syntax-sink`: proven that something parsed the syntax, and no more. |
 | **Expression-lookup sinks** — Log4Shell/JNDI | `lookup` | The sink resolves a `${jndi:…}` URI instead of running a command, so `oob`'s shell probes reach nothing. Proves it on the callback alone and reports `lookup-sink`, **never** `executed`. Only `jndi:dns://` is sent — a name lookup and nothing else — so what is proven is the lookup, not a gadget chain. |
 | **Argument injection** — a no-shell `argv` sink | `argv` | The value becomes one ARGUMENT of a program spawned without a shell, so every separator is inert and the application may be doing the correct thing — `escapeshellarg` quotes it exactly as documented. What it cannot stop is that argument being read as an *option*, and an option can name a command the program then runs. Confirms the same computed value `reflected` does, and names the option shape that worked. Needs `--argv-binary`. |
@@ -864,7 +864,7 @@ which is the same method fighting a filter, a quote or an encoding.
 | Nothing comes back and none of the above | `time` | nothing | `timing-sink` |
 | The sink interpolates `${…}` rather than shelling out | `lookup` | a delegated domain | `lookup-sink` |
 | The parameter carries a serialized object | `deser` | nothing for the shape fingerprint; the DNS gadget needs a delegated name and a listener | `needs-review`, or `deserialization-sink` with the gadget |
-| The sink evaluates but renders nothing of it | `boolean` | nothing; `OR` shapes need `stateful` | `evaluation-sink` |
+| The sink evaluates but renders nothing of it, or only one bit of it | `boolean` | nothing; `OR` shapes need `stateful`, and the scalar channel needs `--probe-depth full` | `evaluation-sink` |
 | The sink *parses* a template and renders nothing of it | `syntax` | nothing | `syntax-sink` |
 | Your value becomes an argument of a program spawned with no shell | `argv` | the binary it is spawned as, for `--argv-binary` | **`executed`** |
 | Your value names a file the application opens | `include` | nothing for the read; the URL a file written through the sink is served at, for `--include-write-url` | `file-read`, or **`executed`** with the write-back URL |

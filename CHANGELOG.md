@@ -442,6 +442,64 @@ formats, or the template schema.
 
   No version bump -- this is documentation and tests only.
 
+## [3.19.0] — 2026-11-19
+
+### Added
+
+- **`boolean` reads one bit of a JSON answer, not just the shape of one.**
+  `response_shape` drops every scalar a document carried -- which is what keeps
+  a request id and a timestamp from making two identical answers look different
+  -- so `{"allowed":true}` and `{"allowed":false}` had the same shape, and a
+  sink that evaluates an attacker-supplied predicate and renders one bit of the
+  result was invisible to the one method built for predicate sinks. A rules
+  engine, a filter-expression evaluator and an authorisation endpoint all have
+  that shape. The `$where` case was never affected: a document set changes
+  length, and a list's length is kept.
+
+  The scalar channel reads those values back at identical JSON paths, **off the
+  series already fired**, so it costs no request unless it finds something. It
+  runs only where the shape channel said nothing: a whole response partitioning
+  is the stronger reading of the same probes.
+
+  It is guarded harder than the shape channel because it has to be, and the
+  floors are measured rather than chosen. Against a body carrying a scalar that
+  flips on its own -- an A/B variant, a feature flag, a cache marker -- and
+  against one that really evaluates the predicate, 2000 runs each:
+
+  | configuration | flips on its own | really evaluates |
+  |---|---|---|
+  | one wave, 2 pairs (`quick`) | 152/2000 (7.6%) | 2000/2000 |
+  | one wave, 4 pairs (`full`) | 14/2000 (0.70%) | 2000/2000 |
+  | one wave, 6 pairs | 0/2000 | 2000/2000 |
+  | screen then confirm, 2 pairs | 2/2000 (0.10%) | 2000/2000 |
+  | **screen then confirm, 4 pairs** | **0/2000** | **2000/2000** |
+
+  So: a confirming wave on fresh operands, and a floor of four pairs per
+  connective -- which is why this channel does not answer at `--probe-depth
+  quick` and says so in the negative's evidence rather than letting the run read
+  as a clean one. Six pairs in a single wave reaches the same 0 and was not
+  taken: it costs 20 extra requests on every context including every clean one,
+  where a confirming wave costs nothing until something screens. The shape
+  channel's floor of two is untouched -- `response_shape` drops the scalar that
+  is doing the flipping, so one oracle's measured floor is not another's.
+
+  Four further guards exclude a confound structurally rather than by name: a
+  path must appear in every answer of the wave; its values across the wave must
+  number exactly two, which is what rules out an id, a timestamp and a counter;
+  the three true anchors must agree on the path and with the true half; and a
+  value carrying the predicate back is reflection. Measured at 200 runs each: 0
+  of 200 for a random id, a monotonic timestamp, an incrementing counter, an
+  echoed predicate, and a filter that refuses the false half.
+
+  JSON only, deliberately. A path is a stable identity for "the same value" and
+  a plain-text body has none -- which is where the measurement behind
+  `response_shape` came from, a length-shaped signature claiming a differential
+  in 13 of 25 runs against a target that only echoed its input.
+
+  The ceiling is unchanged: `evaluation-sink`, a lead rather than a finding.
+  Which evaluator rendered the bit is no more visible here than in the shape
+  channel.
+
 ## [3.18.2] — 2026-11-18
 
 Both of these were raised by automated review on the pull request that shipped
@@ -4605,6 +4663,7 @@ this file and have not been restated here.
 
 
 [Unreleased]: https://github.com/kabiri-labs/rcekit/compare/v2.36.0...HEAD
+[3.19.0]: https://github.com/kabiri-labs/rcekit/compare/v3.18.2...v3.19.0
 [3.18.2]: https://github.com/kabiri-labs/rcekit/compare/v3.18.1...v3.18.2
 [3.18.1]: https://github.com/kabiri-labs/rcekit/compare/v3.18.0...v3.18.1
 [3.18.0]: https://github.com/kabiri-labs/rcekit/compare/v3.17.0...v3.18.0

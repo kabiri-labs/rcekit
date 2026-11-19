@@ -16279,6 +16279,185 @@ class BooleanSeriesShapeTestCase(unittest.TestCase):
             self.assertNotEqual(yes, no)
 
 
+class BooleanScalarChannelTestCase(unittest.TestCase):
+    """The scalar channel: one bit of a JSON answer, read off the same probes.
+
+    `response_shape` drops every scalar a document carried, which is what keeps
+    a request id from making two identical answers look different -- and which
+    made `{"allowed":true}` and `{"allowed":false}` the same shape. This channel
+    reads those values back, and because a scalar is exactly the kind of thing
+    that moves on its own, it is guarded harder than the shape channel: a floor
+    of four pairs and a confirming wave on fresh operands, both of which the
+    measurement in the class docstring picked.
+
+    The tests that matter here are the quiet ones. A request id, a timestamp and
+    a counter must not partition, and the method must still be able to report a
+    clean negative.
+    """
+
+    PRED = re.compile(r"(\d{4})\*(\d{4})==(\d+)")
+
+    def setUp(self):
+        self.gen = RCEKit()
+        self.rec = make_record(environment="unix", context="raw")
+
+    @classmethod
+    def _truth(cls, payload):
+        found = cls.PRED.search(payload or "")
+        if not found:
+            return None
+        a, b, claimed = (int(g) for g in found.groups())
+        return a * b == claimed
+
+    def _run(self, render, **config):
+        """`render(truth, state) -> dict` becomes the JSON body."""
+        state = {"n": 0}
+
+        def route(method, path, params, headers, body):
+            state["n"] += 1
+            return 200, json.dumps(render(self._truth(params.get("q", "")), state))
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["boolean"],
+                config=config, timeout=15)
+        return results
+
+    # -- what it is for ------------------------------------------------------
+
+    def test_a_sink_that_renders_one_bit_of_its_answer_is_reported(self):
+        results = self._run(lambda truth, state: {"allowed": bool(truth),
+                                                  "id": state["n"]})
+        self.assertEqual({r["verdict"] for r in results}, {"evaluation-sink"},
+                         f"details were {[r['detail'][:80] for r in results]}")
+        detail = results[0]["detail"]
+        self.assertIn("JSON scalar at allowed", detail)
+        self.assertIn("twice over on fresh operands", detail)
+        self.assertIn("not execution", detail,
+                      "the ceiling has to be disclaimed in the evidence line")
+
+    def test_the_shape_channel_wins_and_spends_no_confirming_wave(self):
+        """A whole response partitioning is the stronger reading of the same
+        series. The scalar channel is not consulted and its wave is not sent."""
+        def render(truth, state):
+            # The *shape* differs: one answer carries a list the other does not.
+            return {"rows": [1, 2, 3]} if truth else {"rows": []}
+
+        results = self._run(render)
+        self.assertEqual({r["verdict"] for r in results}, {"evaluation-sink"})
+        self.assertIn("response shape partitioned", results[0]["detail"])
+        self.assertLessEqual(self.gen.delivered_probes, 28,
+                             "a confirming wave went out after the shape channel had "
+                             "already answered")
+
+    # -- the quiet ones ------------------------------------------------------
+
+    def test_a_request_id_does_not_partition(self):
+        results = self._run(lambda truth, state: {"allowed": True,
+                                                  "id": state["n"] * 7919})
+        self.assertEqual({r["verdict"] for r in results}, {"negative"},
+                         f"details were {[r['detail'][:80] for r in results]}")
+
+    def test_a_timestamp_does_not_partition(self):
+        results = self._run(lambda truth, state: {"ts": 1700000000 + state["n"]})
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+
+    def test_a_counter_does_not_partition(self):
+        results = self._run(lambda truth, state: {"rows": state["n"]})
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+
+    def test_a_scalar_carrying_the_predicate_back_is_reflection(self):
+        def route(method, path, params, headers, body):
+            return 200, json.dumps({"query": params.get("q", ""), "rows": 0})
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["boolean"], timeout=15)
+        self.assertEqual({r["verdict"] for r in results}, {"negative"},
+                         f"details were {[r['detail'][:80] for r in results]}")
+
+    def test_a_plain_text_body_is_not_read_for_scalars(self):
+        """JSON only, and deliberately: a path is a stable identity for "the
+        same value" and a text body has none."""
+        def route(method, path, params, headers, body):
+            return 200, "allowed yes" if self._truth(params.get("q", "")) else "allowed no"
+
+        with local_target(route) as base:
+            results = self.gen.run_detection(
+                [self.rec], url=f"{base}/x?q=FUZZ", methods=["boolean"], timeout=15)
+        # The *shape* channel may answer here -- a word count differs -- and
+        # that is its business. What must not happen is a scalar claim, which
+        # the evidence line opens with. Matched on that opening rather than on
+        # the words "JSON scalar", which the negative message also carries.
+        for row in results:
+            self.assertFalse(row["detail"].startswith("the JSON scalar at "),
+                             f"a text body produced a scalar claim: {row['detail'][:80]}")
+
+    # -- the floor and the wave ----------------------------------------------
+
+    def test_the_channel_is_not_asked_at_quick_depth_and_says_so(self):
+        results = self._run(lambda truth, state: {"allowed": bool(truth)},
+                            probe_depth="quick")
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+        self.assertIn("was not asked", results[0]["detail"])
+        self.assertIn("--probe-depth full", results[0]["detail"],
+                      "a channel that could not answer has to name what would let it")
+
+    def test_a_clean_target_pays_for_no_confirming_wave(self):
+        results = self._run(lambda truth, state: {"rows": 0})
+        self.assertEqual({r["verdict"] for r in results}, {"negative"})
+        self.assertLessEqual(self.gen.delivered_probes, 28,
+                             "a confirming wave went out on a target that screened clean")
+
+    # -- the guards, directly -------------------------------------------------
+
+    def _series(self, values, pairs=4):
+        """A synthetic wave: `values` maps a phase to the scalar it answered."""
+        method = rcekit.BooleanDifferential(self.gen, {"probe_depth": "full"})
+        series = []
+
+        def row(phase, value, carrier=None):
+            series.append((rcekit.Probe(payload="1234*5678==7006652", expected="",
+                                        phase=phase, carrier=carrier),
+                           Observation(status=200,
+                                       body=json.dumps({"allowed": value}))))
+
+        for _ in range(2):
+            row("anchor-open", values["anchor"])
+        for index in range(pairs):
+            row("yes", values["yes"][index % len(values["yes"])], "bare")
+            row("no", values["no"][index % len(values["no"])], "bare")
+        row("anchor-close", values["anchor"])
+        return method, series
+
+    def test_a_path_with_three_values_is_never_a_one_bit_channel(self):
+        method, series = self._series(
+            {"anchor": True, "yes": [True], "no": [False]})
+        self.assertIsNotNone(method._scalar_claim(series),
+                             "precondition: two values partition")
+        method, series = self._series(
+            {"anchor": True, "yes": [True], "no": [False, None]})
+        self.assertIsNone(method._scalar_claim(series),
+                          "a path taking three values is drift, not one bit")
+
+    def test_the_true_half_has_to_agree_with_the_anchors(self):
+        method, series = self._series(
+            {"anchor": False, "yes": [True], "no": [False]})
+        self.assertIsNone(
+            method._scalar_claim(series),
+            "the anchors are true predicates, so a partition whose true half "
+            "disagrees with them is not a partition along truth")
+
+    def test_the_floor_is_the_scalar_channel_own(self):
+        method, series = self._series(
+            {"anchor": True, "yes": [True], "no": [False]}, pairs=3)
+        self.assertIsNone(method._scalar_claim(series),
+                          f"three pairs is below SCALAR_MIN_PAIRS "
+                          f"({rcekit.BooleanDifferential.SCALAR_MIN_PAIRS})")
+        self.assertEqual(rcekit.BooleanDifferential.MIN_PAIRS, 2,
+                         "the shape channel's floor is not the scalar channel's")
+
+
 class BooleanCarrierScopeTestCase(unittest.TestCase):
     """Where the series runs, and where running it again would ask a question
     whose answer cannot differ."""
